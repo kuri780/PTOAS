@@ -26,7 +26,7 @@ The TileLang DSL provides two distinct authoring modes:
 
 **Basic Mode (default)**
 - Uses **Tile element/slice semantics** for buffer access
-- Direct tile indexing syntax: `tile[start:]`, `tile[row, col:]`
+- Direct tile indexing syntax: `tile[start:]`, `tile[row, col:]`, `tile[row:, col]` (Tile indexing sugar only supports open-ended vector slices; explicit `stop` and `step` forms are not accepted for `Tile` indexing)
 - Vector operations use element-indexing syntax: `pto.vlds(tile[row, col:])`, `pto.vsts(vec, tile[start:], mask)`
 - No pointer arithmetic or explicit offset calculations
 - Suitable for most kernel authoring with high-level abstractions

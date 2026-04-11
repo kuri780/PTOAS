@@ -41,6 +41,11 @@ The syntax supports two indexing modes for different operations:
    - **1D tile indexing**: `tile[start:]` (or equivalently `tile[0, start:]` for row-major or `tile[start:, 0]` for column-major)
      - `start:`: Starting element index followed by colon
 
+   Tile indexing sugar only accepts an open-ended vector slice. Python slice
+   forms with an explicit `stop` or `step` are not supported for `Tile`
+   indexing. For example, `tile[row, col:col_end]`, `tile[row, col::2]`,
+   `tile[row_start:row_end, col]`, and `tile[start:stop:step]` are invalid.
+
 2. **Single-element indexing** (for scalar load operations like `pto.vsld`):
    - **Row-major layout (default)**: `tile[row_index, col_index]`
      - `row_index`: Row index (0-based)
@@ -117,6 +122,12 @@ The byte offset is automatically computed based on tile layout:
 3. **Full vectors only**: The `:` syntax always loads/stores a full vector width. For partial vectors, use the traditional byte offset approach with explicit mask handling.
 
 4. **Single-element operations**: The single-element indexing syntax (`tile[row, col]` or `tile[pos]`) is only supported for scalar load operations like `pto.vsld`. For other operations, use vector-range indexing with `:` syntax.
+
+5. **No explicit slice bounds/stride for `Tile` indexing**: `Tile` vector-range
+   indexing only supports the open-ended forms `tile[start:]`,
+   `tile[row, col:]`, and `tile[row_start:, col_index]` (for column-major
+   layout). `stop` and `step` syntax are not accepted in user-guide Tile
+   indexing.
 
 #### Supported Operations
 
