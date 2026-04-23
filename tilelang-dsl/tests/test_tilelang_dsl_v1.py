@@ -6183,6 +6183,7 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
                     result = pto.vselr(converted, v_idx_ui8)
                     pto.mem_bar(pto.BarrierType.VST_VST)
                     pto.vsts(result, dst[row, col:], store_mask, dist="NORM_B8")
+
             return None
 
         specialized = kernel.specialize(
@@ -6200,6 +6201,42 @@ class TileLangDSLDescriptorTests(unittest.TestCase):
         self.assertIn('pto.mem_bar "VST_VST"', text)
         self.assertIn("pto.vselr", text)
         self.assertIn("pto.vsts", text)
+
+    def test_punpack_widens_b16_mask_for_norm_b32_store_in_advanced_mode(self) -> None:
+        @pto.vkernel(op="punpack_widen_b16_to_b32_unique", dtypes=[(pto.si8, pto.i32)], advanced=True)
+        def kernel(src: pto.Tile, dst: pto.Tile):
+            valid_rows, valid_cols = dst.valid_shape
+            lanes_i32 = pto.get_lanes(pto.i32)
+            for row in range(0, valid_rows, 1):
+                b8_mask = pto.make_mask(pto.i8, pto.PAT.ALL)
+                mask_b16, _ = pto.make_mask(pto.i16, valid_cols)
+                mask_b32 = pto.punpack(mask_b16, pto.PredicatePart.LOWER)
+                vec_si8 = pto.vlds(src[row, 0:], dist="UNPK_B8")
+                vec_ui8 = pto.vbitcast(vec_si8, pto.ui8)
+                v_zero_i8 = pto.vdup(pto.i8(0), b8_mask)
+                v_zero = pto.vbitcast(v_zero_i8, pto.ui8)
+                wide_lo, _ = pto.vintlv(vec_ui8, v_zero)
+                narrowed = pto.vbitcast(wide_lo, pto.si8)
+                converted = pto.vcvt(narrowed, pto.i32, b8_mask, part=pto.VcvtPartMode.P0)
+                pto.vsts(converted, dst[row, 0:], mask_b32, dist="NORM_B32")
+                pto.vsts(converted, dst[row, lanes_i32:], mask_b32, dist="NORM_B32")
+            return None
+
+        specialized = kernel.specialize(
+            src=pto.TileSpecialization(shape=(16, 64), memory_space=pto.MemorySpace.UB),
+            dst=pto.TileSpecialization(shape=(16, 64), memory_space=pto.MemorySpace.UB),
+        )
+
+        text = specialized.mlir_text()
+        self.assertIn(' = pto.punpack ', text)
+        self.assertRegex(
+            text,
+            r"pto\.punpack %mask_b16_\d+, \"LOWER\" : !pto\.mask<b16> -> !pto\.mask<b32>",
+        )
+        self.assertRegex(
+            text,
+            r"pto\.vsts %converted_\d+, %tmp_\d+\[%c0\], %mask_b32_\d+ \{dist = \"NORM_B32\"\} : !pto\.vreg<64xi32>, memref<\?x\?xi32, strided<\[\?, \?\], offset: \?>, #pto\.address_space<vec>>, !pto\.mask<b32>",
+        )
 
     def test_elementwise_kernel_positive_regression_covers_vecscope_tail_mask_and_dynamic_loop_bound(self) -> None:
         @pto.vkernel(op="eltwise", dtypes=[(pto.f32, pto.f32, pto.i32)], advanced=True)

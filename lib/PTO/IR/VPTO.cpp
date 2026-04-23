@@ -87,6 +87,12 @@ static LogicalResult verifyMaskTypeWithGranularityLike(Operation *op, Type type,
   return success();
 }
 
+static bool isMaskGranularityAdjacentWidening(StringRef inputGranularity,
+                                              StringRef resultGranularity) {
+  return (inputGranularity == "b8" && resultGranularity == "b16") ||
+         (inputGranularity == "b16" && resultGranularity == "b32");
+}
+
 static LogicalResult verifyEnclosingLoopLike(Operation *op,
                                              StringRef opNameForDiag) {
   if (!op->getParentOfType<LoopLikeOpInterface>()) {
@@ -2130,6 +2136,15 @@ LogicalResult PunpackOp::verify() {
     return failure();
   if (getPart() != "LOWER")
     return emitOpError("currently supports only LOWER part");
+  auto inputMaskType = cast<MaskType>(getInput().getType());
+  auto resultMaskType = cast<MaskType>(getResult().getType());
+  StringRef inputGranularity = inputMaskType.getGranularity();
+  StringRef resultGranularity = resultMaskType.getGranularity();
+  if (inputGranularity != resultGranularity &&
+      !isMaskGranularityAdjacentWidening(inputGranularity, resultGranularity)) {
+    return emitOpError(
+        "requires result mask granularity to match the input or widen by one step");
+  }
   return success();
 }
 

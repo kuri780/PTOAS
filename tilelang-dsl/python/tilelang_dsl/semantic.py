@@ -4851,7 +4851,18 @@ class _SemanticAnalyzer:
             raise TypeError(f"pto.{name} expects exactly 2 positional arguments in TileLang DSL")
         mask = self._require_mask_expr(args[0], f"pto.{name} mask")
         part = self._normalize_predicate_part(args[1], f"pto.{name} part")
-        return SemanticCallExpr(namespace="pto", name=name, args=(args[0], part), type=mask)
+        result_granularity = mask.granularity
+        if name == "punpack":
+            if mask.granularity == "b8":
+                result_granularity = "b16"
+            elif mask.granularity == "b16":
+                result_granularity = "b32"
+        return SemanticCallExpr(
+            namespace="pto",
+            name=name,
+            args=(args[0], part),
+            type=SemanticMaskType(granularity=result_granularity),
+        )
 
     def _analyze_mask_logic_op(
         self,
