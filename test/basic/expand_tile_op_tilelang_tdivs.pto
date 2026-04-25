@@ -1,0 +1,63 @@
+// Test that pto.tdivs can be lowered to vector-style VPTO IR.
+//
+// IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
+// TDIVS has a scalar operand (f32), so it uses the PTOToVPTO lowering path.
+//
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-TILE-SCALAR
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-SCALAR-TILE
+
+// tile / scalar form:
+// CHECK-TILE-SCALAR: func.func @TDIVS
+// CHECK-TILE-SCALAR-NOT: pto.tdivs ins
+// CHECK-TILE-SCALAR: pto.vecscope
+// CHECK-TILE-SCALAR: pto.vlds
+// CHECK-TILE-SCALAR: pto.vbr
+// CHECK-TILE-SCALAR: pto.vdiv
+// CHECK-TILE-SCALAR: pto.vsts
+
+// scalar / tile form:
+// CHECK-SCALAR-TILE: func.func @TDIVS
+// CHECK-SCALAR-TILE-NOT: pto.tdivs ins
+// CHECK-SCALAR-TILE: pto.vecscope
+// CHECK-SCALAR-TILE: pto.vlds
+// CHECK-SCALAR-TILE: pto.vbr
+// CHECK-SCALAR-TILE: pto.vdiv
+// CHECK-SCALAR-TILE: pto.vsts
+
+module {
+  func.func @TDIVS() {
+    %a = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tile_buf = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %scalar = arith.constant 2.0 : f32
+
+    pto.tdivs ins(%a, %scalar : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                              blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+                                f32)
+              outs(%tile_buf : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}
+
+module {
+  func.func @TDIVS() {
+    %a = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tile_buf = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %scalar = arith.constant 2.0 : f32
+
+    pto.tdivs ins(%scalar, %a : f32,
+                              !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                              blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+              outs(%tile_buf : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}

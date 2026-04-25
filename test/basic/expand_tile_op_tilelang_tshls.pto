@@ -1,0 +1,33 @@
+// Test that pto.tshls can be lowered to vector-style VPTO IR.
+//
+// IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
+// TSHLS has a scalar operand (i16), so it uses the PTOToVPTO lowering path.
+//
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s
+
+// After PTOToVPTO lowering, pto.tshls should use vshls (vector shift left scalar).
+// CHECK: func.func @TSHLS
+// CHECK-NOT: pto.tshls ins
+// CHECK: pto.vecscope
+// CHECK: pto.vlds
+// CHECK: pto.vshls
+// CHECK: pto.vsts
+
+module {
+  func.func @TSHLS() {
+    %a = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tile_buf = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %scalar = arith.constant 2 : i16
+
+    pto.tshls ins(%a, %scalar : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                              blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+                                i16)
+              outs(%tile_buf : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}

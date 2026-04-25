@@ -1,0 +1,34 @@
+// Test that pto.tands can be lowered to vector-style VPTO IR.
+//
+// IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
+// TANDS has a scalar operand (i32), so it uses the PTOToVPTO lowering path.
+//
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s
+
+// After PTOToVPTO lowering, pto.tands should use vbr + vand.
+// CHECK: func.func @TANDS
+// CHECK-NOT: pto.tands ins
+// CHECK: pto.vecscope
+// CHECK: pto.vlds
+// CHECK: pto.vbr
+// CHECK: pto.vand
+// CHECK: pto.vsts
+
+module {
+  func.func @TANDS() {
+    %a = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tile_buf = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %scalar = arith.constant 0xFF : i32
+
+    pto.tands ins(%a, %scalar : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                              blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+                                i32)
+              outs(%tile_buf : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=64, v_row=16, v_col=64,
+                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}

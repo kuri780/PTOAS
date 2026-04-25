@@ -1,0 +1,38 @@
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Test that pto.tadds can be lowered to vector-style VPTO IR.
+//
+// IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
+// TADDS has a scalar operand (f32), so it uses the PTOToVPTO lowering path.
+//
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto %s -o - 2>/dev/null | FileCheck %s
+
+// After PTOToVPTO lowering, pto.tadds should use vadds (vector add scalar).
+// CHECK: func.func @TADDS
+// CHECK-NOT: pto.tadds ins
+// CHECK: pto.vecscope
+// CHECK: pto.vlds
+// CHECK: pto.vadds
+// CHECK: pto.vsts
+
+module {
+  func.func @TADDS() {
+    %a = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tile_buf = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %scalar = arith.constant 1.0 : f32
+
+    pto.tadds ins(%a, %scalar : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                              blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+                                f32)
+              outs(%tile_buf : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}

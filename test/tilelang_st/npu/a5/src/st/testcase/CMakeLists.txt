@@ -155,6 +155,17 @@ set(ALL_TESTCASES
     trowprod
     trsqrt
     tsqrt
+    tadds
+    tands
+    tdivs
+    tmaxs
+    tmins
+    tmuls
+    tors
+    tshls
+    tshrs
+    tsubs
+    txors
 )
 
 if((TEST_CASE IN_LIST ALL_TESTCASES) OR (TEST_CASE STREQUAL "all"))
