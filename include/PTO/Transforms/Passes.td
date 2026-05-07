@@ -38,6 +38,25 @@ def PTOInsertSync : Pass<"pto-insert-sync", "func::FuncOp"> {
   ];
 }
 
+def PTOInjectBarrierAllSync : Pass<"pto-inject-barrier-all-sync", "func::FuncOp"> {
+  let summary = "Conservatively insert PIPE_ALL barriers for PTO dialect";
+  let description = [{
+    Inserts a `pto.barrier <PIPE_ALL>` before each PTO pipe operation that has
+    MemoryEffects read/write side effects. This mode does not reuse set/wait
+    dependency analysis and does not replace the internal synchronization
+    protocol of composite pipe ops such as `pto.tpush`, `pto.tpop`, and
+    `pto.tfree`; it only adds conservative barriers at operation boundaries.
+  }];
+
+  let constructor = "mlir::pto::createPTOInjectBarrierAllSyncPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
 // Define PTOGraphSyncSolver Pass (graph-based intra-core sync solver).
 // Coexists with PTOInsertSync; selectable via the driver flag
 // `--enable-graph-sync-solver`. Minimal port of bishengir's GraphSyncSolver:
