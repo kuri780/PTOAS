@@ -45,6 +45,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
@@ -247,6 +248,96 @@ static std::optional<std::string> getTCvtRoundModeString(pto::TCvtOp op) {
   return std::nullopt;
 }
 
+static StringRef getPrecisionTypeString(pto::DivPrecision precision) {
+  switch (precision) {
+  case pto::DivPrecision::Default:
+    return "default";
+  case pto::DivPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown DivPrecision");
+}
+
+static StringRef getPrecisionTypeString(pto::ExpPrecision precision) {
+  switch (precision) {
+  case pto::ExpPrecision::Default:
+    return "default";
+  case pto::ExpPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown ExpPrecision");
+}
+
+static StringRef getPrecisionTypeString(pto::LogPrecision precision) {
+  switch (precision) {
+  case pto::LogPrecision::Default:
+    return "default";
+  case pto::LogPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown LogPrecision");
+}
+
+static StringRef getPrecisionTypeString(pto::RecipPrecision precision) {
+  switch (precision) {
+  case pto::RecipPrecision::Default:
+    return "default";
+  case pto::RecipPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown RecipPrecision");
+}
+
+static StringRef getPrecisionTypeString(pto::RsqrtPrecision precision) {
+  switch (precision) {
+  case pto::RsqrtPrecision::Default:
+    return "default";
+  case pto::RsqrtPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown RsqrtPrecision");
+}
+
+static StringRef getPrecisionTypeString(pto::SqrtPrecision precision) {
+  switch (precision) {
+  case pto::SqrtPrecision::Default:
+    return "default";
+  case pto::SqrtPrecision::HighPrecision:
+    return "high_precision";
+  }
+  llvm_unreachable("unknown SqrtPrecision");
+}
+
+// MUST stay in sync with template behavior. Adding an op here without a real
+// high_precision code path would silence the warning while preserving default
+// behavior.
+static const llvm::StringSet<> &highPrecisionImplementedOps() {
+  static const llvm::StringSet<> kImplementedOps{};
+  return kImplementedOps;
+}
+
+template <typename OpT, typename PrecisionT>
+static bool tryAppendPrecisionType(
+    Operation *op,
+    SmallVectorImpl<std::pair<std::string, std::string>> &attrs,
+    PrecisionT highPrecision) {
+  auto typed = dyn_cast<OpT>(op);
+  if (!typed)
+    return false;
+
+  PrecisionT precision = typed.getPrecisionType();
+  attrs.emplace_back("precisionType", getPrecisionTypeString(precision).str());
+
+  if (precision == highPrecision &&
+      !highPrecisionImplementedOps().contains(op->getName().getStringRef())) {
+    StringRef opName = op->getName().getStringRef();
+    llvm::errs() << "warning: '" << opName << "' op " << opName
+                 << ": precisionType = high_precision requested but not yet "
+                    "implemented; falling back to default behavior\n";
+  }
+  return true;
+}
+
 static std::string getTRandomRoundsString(pto::TRandomOp op) {
   return std::to_string(op.getRounds());
 }
@@ -273,6 +364,24 @@ static void appendOpContextAttrs(
                          stringifyCmpMode(cmpModeAttr.getValue()).str());
     }
   }
+  (void)(tryAppendPrecisionType<pto::TExpOp>(
+             op, attrs, pto::ExpPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TLogOp>(
+             op, attrs, pto::LogPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TSqrtOp>(
+             op, attrs, pto::SqrtPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TRecipOp>(
+             op, attrs, pto::RecipPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TRsqrtOp>(
+             op, attrs, pto::RsqrtPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TDivOp>(
+             op, attrs, pto::DivPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TDivSOp>(
+             op, attrs, pto::DivPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TRowExpandDivOp>(
+             op, attrs, pto::DivPrecision::HighPrecision) ||
+         tryAppendPrecisionType<pto::TColExpandDivOp>(
+             op, attrs, pto::DivPrecision::HighPrecision));
 }
 
 static bool getStaticIntFromValue(Value value, int64_t &out) {

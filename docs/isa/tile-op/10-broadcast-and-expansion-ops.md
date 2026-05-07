@@ -103,6 +103,9 @@ pto.<op> ins(%src0, %src1 : !pto.tile_buf<...>, !pto.tile_buf<...>)
 - `src1` must provide one logical scalar per destination row.
 - Templates target row-major VEC layouts.
 - `pto.trowexpanddiv` and `pto.trowexpandexpdif` are floating-point-only.
+- `pto.trowexpanddiv` additionally accepts `precisionType = #pto<div_precision default|high_precision>`.
+  Omitted means `default`.
+  `high_precision` requires floating-point element type and an explicit `tmp` operand.
 
 **Example:**
 
@@ -110,6 +113,14 @@ pto.<op> ins(%src0, %src1 : !pto.tile_buf<...>, !pto.tile_buf<...>)
 pto.trowexpandadd ins(%src0, %src1 : !pto.tile_buf<vec, 16x128xf32>,
                                      !pto.tile_buf<vec, 16x1xf32, blayout=col_major>)
                   outs(%dst : !pto.tile_buf<vec, 16x128xf32>)
+```
+
+```mlir
+pto.trowexpanddiv ins(%src0, %src1, %tmp : !pto.tile_buf<vec, 16x128xf32>,
+                                             !pto.tile_buf<vec, 16x1xf32, blayout=col_major>,
+                                             !pto.tile_buf<vec, 16x128xf32>)
+                  outs(%dst : !pto.tile_buf<vec, 16x128xf32>)
+                  {precisionType = #pto<div_precision high_precision>}
 ```
 
 ---
@@ -180,6 +191,9 @@ pto.<op> ins(%src0, %src1 : !pto.tile_buf<...>, !pto.tile_buf<...>)
 - `src1` must provide one logical scalar per destination column.
 - Templates target row-major VEC layouts.
 - `pto.tcolexpanddiv` and `pto.tcolexpandexpdif` are floating-point-only.
+- `pto.tcolexpanddiv` additionally accepts `precisionType = #pto<div_precision default|high_precision>`.
+  Omitted means `default`.
+  `high_precision` is currently legal only when the tile element type is `f16` or `f32`.
 
 **Example:**
 
@@ -187,4 +201,11 @@ pto.<op> ins(%src0, %src1 : !pto.tile_buf<...>, !pto.tile_buf<...>)
 pto.tcolexpandadd ins(%src0, %src1 : !pto.tile_buf<vec, 16x128xf32>,
                                      !pto.tile_buf<vec, 1x128xf32>)
                   outs(%dst : !pto.tile_buf<vec, 16x128xf32>)
+```
+
+```mlir
+pto.tcolexpanddiv ins(%src0, %src1 : !pto.tile_buf<vec, 16x128xf32>,
+                                     !pto.tile_buf<vec, 1x128xf32>)
+                  outs(%dst : !pto.tile_buf<vec, 16x128xf32>)
+                  {precisionType = #pto<div_precision high_precision>}
 ```

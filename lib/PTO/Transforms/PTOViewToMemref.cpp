@@ -2832,7 +2832,8 @@ struct PTOViewToMemrefPass
             TypeRange{},
             src,
             scale,
-            dst);
+            dst,
+            op.getPrecisionTypeAttr());
         newOp->setAttrs(attrs);
         rewriter.replaceOp(op, newOp->getResults());
       }

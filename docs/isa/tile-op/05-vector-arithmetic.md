@@ -43,6 +43,9 @@ pto.<op> ins(%src0, %src1 : !pto.tile_buf<...>, !pto.tile_buf<...>)
 - The valid region must match across all three tiles.
 - Element type legality is target-defined; ops specialize over the tile dtype selected at expansion time.
 - `pto.tdiv` uses element-wise division; **undefined behavior** on divide-by-zero.
+- `pto.tdiv` additionally accepts `precisionType = #pto<div_precision default|high_precision>`.
+  Omitted means `default`.
+  `high_precision` is currently legal only when the tile element type is `f16` or `f32`.
 
 **Example:**
 
@@ -80,9 +83,11 @@ For `pto.tdivs`:
 ```mlir
 pto.tdivs ins(%src, %scalar : !pto.tile_buf<...>, <scalar_type>)
           outs(%dst : !pto.tile_buf<...>)
+          {precisionType = #pto<div_precision high_precision>}
 
 pto.tdivs ins(%scalar, %src : <scalar_type>, !pto.tile_buf<...>)
           outs(%dst : !pto.tile_buf<...>)
+          {precisionType = #pto<div_precision high_precision>}
 ```
 
 **Parameter Table:**
@@ -98,6 +103,9 @@ pto.tdivs ins(%scalar, %src : <scalar_type>, !pto.tile_buf<...>)
 - `src` and `dst` must be shape-compatible `loc=vec` tile buffers.
 - The scalar element type must be compatible with the tile element type.
 - `pto.tdivs` is the only scalar family with two public operand orders. **Undefined behavior** on divide-by-zero (either `scalar==0` or any `src[i,j]==0` in the `scalar/src` form).
+- `pto.tdivs` additionally accepts `precisionType = #pto<div_precision default|high_precision>`.
+  Omitted means `default`.
+  `high_precision` is currently legal only when the tile element type is `f16` or `f32`.
 
 **Example:**
 
@@ -137,6 +145,22 @@ pto.<op> ins(%src : !pto.tile_buf<...>)
 - `src` and `dst` must have the same valid region.
 - These ops are numeric Tile Instruction ops on `loc=vec`.
 - **Undefined behavior** on out-of-domain inputs: `tlog(<=0)`, `tsqrt(<0)`, `trsqrt(<=0)`, `trecip(0)`.
+- Selected unary math ops additionally accept op-specific `precisionType` attrs:
+  `#pto<exp_precision default|high_precision>` for `pto.texp`,
+  `#pto<log_precision default|high_precision>` for `pto.tlog`,
+  `#pto<sqrt_precision default|high_precision>` for `pto.tsqrt`,
+  `#pto<rsqrt_precision default|high_precision>` for `pto.trsqrt`, and
+  `#pto<recip_precision default|high_precision>` for `pto.trecip`.
+  Omitted means `default`.
+  For these ops, `high_precision` is currently legal on their supported floating-point element types.
+
+**Precision-Type Form:**
+
+```mlir
+pto.<op> ins(%src : !pto.tile_buf<...>)
+         outs(%dst : !pto.tile_buf<...>)
+         {precisionType = #pto<exp_precision high_precision>}
+```
 
 **Example:**
 

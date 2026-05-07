@@ -8,6 +8,7 @@
 
 import importlib
 import importlib.util
+import functools
 from pathlib import Path
 
 from mlir import ir as _ods_ir
@@ -85,6 +86,18 @@ ReduceOp = _pto_mod.ReduceOp
 ReduceOpAttr = _pto_mod.ReduceOpAttr
 RoundMode = _pto_mod.RoundMode
 RoundModeAttr = _pto_mod.RoundModeAttr
+DivPrecision = _pto_mod.DivPrecision
+DivPrecisionAttr = _pto_mod.DivPrecisionAttr
+ExpPrecision = _pto_mod.ExpPrecision
+ExpPrecisionAttr = _pto_mod.ExpPrecisionAttr
+LogPrecision = _pto_mod.LogPrecision
+LogPrecisionAttr = _pto_mod.LogPrecisionAttr
+RecipPrecision = _pto_mod.RecipPrecision
+RecipPrecisionAttr = _pto_mod.RecipPrecisionAttr
+RsqrtPrecision = _pto_mod.RsqrtPrecision
+RsqrtPrecisionAttr = _pto_mod.RsqrtPrecisionAttr
+SqrtPrecision = _pto_mod.SqrtPrecision
+SqrtPrecisionAttr = _pto_mod.SqrtPrecisionAttr
 SaturationMode = _pto_mod.SaturationMode
 SaturationModeAttr = _pto_mod.SaturationModeAttr
 CmpMode = _pto_mod.CmpMode
@@ -104,6 +117,7 @@ QuantTypeAttr = _pto_mod.QuantTypeAttr
 
 
 _ptr_type_get_impl = PtrType.get
+_ods_get_default_loc_context = getattr(_pto_ops_gen, "_ods_get_default_loc_context")
 
 
 def _ptr_type_get_compat(cls, element_type, memory_space=None, context=None):
@@ -118,6 +132,52 @@ def _ptr_type_get_compat(cls, element_type, memory_space=None, context=None):
 
 
 PtrType.get = classmethod(_ptr_type_get_compat)
+
+
+def _default_precision_type_attr(attr_cls, enum_value, loc=None):
+    ctx = _ods_get_default_loc_context(loc)
+    return attr_cls.get(enum_value, ctx)
+
+
+def _install_default_precision_type_compat():
+    specs = (
+        ("TDivOp", DivPrecisionAttr, DivPrecision.Default),
+        ("TDivSOp", DivPrecisionAttr, DivPrecision.Default),
+        ("TExpOp", ExpPrecisionAttr, ExpPrecision.Default),
+        ("TLogOp", LogPrecisionAttr, LogPrecision.Default),
+        ("TRecipOp", RecipPrecisionAttr, RecipPrecision.Default),
+        ("TRowExpandDivOp", DivPrecisionAttr, DivPrecision.Default),
+        ("TRsqrtOp", RsqrtPrecisionAttr, RsqrtPrecision.Default),
+        ("TSqrtOp", SqrtPrecisionAttr, SqrtPrecision.Default),
+        ("TColExpandDivOp", DivPrecisionAttr, DivPrecision.Default),
+    )
+    for op_name, attr_cls, enum_value in specs:
+        op_cls = getattr(_pto_ops_gen, op_name, None)
+        if op_cls is None or getattr(op_cls, "_pto_default_precision_type_compat", False):
+            continue
+        original_init = op_cls.__init__
+
+        @functools.wraps(original_init)
+        def compat_init(
+            self,
+            *args,
+            __orig_init=original_init,
+            __attr_cls=attr_cls,
+            __enum_value=enum_value,
+            precisionType=None,
+            **kwargs,
+        ):
+            if precisionType is None:
+                precisionType = _default_precision_type_attr(
+                    __attr_cls, __enum_value, kwargs.get("loc")
+                )
+            __orig_init(self, *args, precisionType=precisionType, **kwargs)
+
+        op_cls.__init__ = compat_init
+        op_cls._pto_default_precision_type_compat = True
+
+
+_install_default_precision_type_compat()
 
 __all__ = [
     # Dialect utilities
@@ -158,6 +218,18 @@ __all__ = [
     "ReduceOpAttr",
     "RoundMode",
     "RoundModeAttr",
+    "DivPrecision",
+    "DivPrecisionAttr",
+    "ExpPrecision",
+    "ExpPrecisionAttr",
+    "LogPrecision",
+    "LogPrecisionAttr",
+    "RecipPrecision",
+    "RecipPrecisionAttr",
+    "RsqrtPrecision",
+    "RsqrtPrecisionAttr",
+    "SqrtPrecision",
+    "SqrtPrecisionAttr",
     "SaturationMode",
     "SaturationModeAttr",
     "CmpMode",

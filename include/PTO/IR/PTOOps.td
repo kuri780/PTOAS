@@ -3971,7 +3971,8 @@ def TDivSOp : PTO_TOp<"tdivs", [
   let arguments = (ins
     AnyType:$src,
     AnyType:$scalar,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    DefaultValuedAttr<PTO_DivPrecisionAttr, "::mlir::pto::DivPrecision::Default">:$precisionType
   );
 
   let results = (outs);
