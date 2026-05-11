@@ -103,9 +103,15 @@ bool RemoveRedundantSync::CheckAllSync(SyncOperation *setFlag,
     // 普通的前向依赖
     return CheckRepeatSync(begin, end, syncFinder, setFlag);
   } else {
-    // Back-edge pruning is intentionally disabled in correctness-first mode.
-    (void)forEndIndex;
-    return false;
+    checkCondition(forEndIndex.has_value(),
+                   "setFlag expected to have forEndIndex for back-edge sync");
+    auto *loopElement =
+        dyn_cast<LoopInstanceElement>(syncIR_[forEndIndex.value()].get());
+    checkCondition(loopElement != nullptr, "Invalid loop element for sync");
+    // Back-edge pairs are still removable if the loop body or the tail span
+    // already contains a complete inner pair on the same pipe dependency.
+    return CheckRepeatSync(begin, loopElement->endId, syncFinder, setFlag) ||
+           CheckRepeatSync(loopElement->beginId, end, syncFinder, setFlag);
   }
 }
  
