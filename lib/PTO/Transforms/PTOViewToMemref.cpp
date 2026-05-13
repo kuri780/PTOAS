@@ -3332,7 +3332,8 @@ struct PTOViewToMemrefPass
             TypeRange{},
             mem,
             idx,
-            dst);
+            dst,
+            op.getGatherOobAttr());
       }
 
       SmallVector<mlir::pto::MScatterOp, 8> mascatterops;
@@ -3360,7 +3361,9 @@ struct PTOViewToMemrefPass
             TypeRange{},
             src,
             idx,
-            mem);
+            mem,
+            op.getScatterAtomicOpAttr(),
+            op.getScatterOobAttr());
       }
       SmallVector<mlir::pto::TPrintOp, 8> printops;
       func.walk([&](mlir::pto::TPrintOp op) { printops.push_back(op); });

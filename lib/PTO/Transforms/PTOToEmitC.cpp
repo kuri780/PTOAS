@@ -140,6 +140,43 @@ static Value maybeWrapGlobalMemrefAsGlobalTensor(
     ConversionPatternRewriter &rewriter, Location loc, Value loweredValue,
     Type originalType, Operation *anchor);
 
+static bool hasCompatibleKnownExtentForMGather(int64_t lhs, int64_t rhs) {
+  return lhs == ShapedType::kDynamic || rhs == ShapedType::kDynamic ||
+         lhs == rhs;
+}
+
+static bool isKnownUnitExtentForMGather(int64_t value) {
+  return value == ShapedType::kDynamic || value == 1;
+}
+
+static bool isRowCoalescedMGatherIndexType(Type dataTy, Type idxTy) {
+  auto dataTile = dyn_cast<pto::TileBufType>(dataTy);
+  auto idxTile = dyn_cast<pto::TileBufType>(idxTy);
+  if (!dataTile || !idxTile)
+    return false;
+
+  ArrayRef<int64_t> dataValid = dataTile.getValidShape();
+  ArrayRef<int64_t> idxValid = idxTile.getValidShape();
+  if (dataValid.size() != 2 || idxValid.size() != 2)
+    return false;
+
+  const bool idxRowMajor =
+      idxTile.getBLayoutValueI32() ==
+      static_cast<int32_t>(pto::BLayout::RowMajor);
+  const bool idxColMajor =
+      idxTile.getBLayoutValueI32() ==
+      static_cast<int32_t>(pto::BLayout::ColMajor);
+
+  const bool rowCoalesce1xR =
+      idxRowMajor && isKnownUnitExtentForMGather(idxValid[0]) &&
+      hasCompatibleKnownExtentForMGather(idxValid[1], dataValid[0]);
+  const bool rowCoalesceRx1 =
+      idxColMajor &&
+      hasCompatibleKnownExtentForMGather(idxValid[0], dataValid[0]) &&
+      isKnownUnitExtentForMGather(idxValid[1]);
+  return rowCoalesce1xR || rowCoalesceRx1;
+}
+
 static std::optional<mlir::pto::Layout> getLayoutAttrFromOp(Operation *op) {
   if (!op)
     return std::nullopt;
@@ -2568,24 +2605,30 @@ struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
     Value memArg = maybeWrapGlobalMemrefAsGlobalTensor(
         rewriter, op.getLoc(), mem, op.getMem().getType(), op.getOperation());
 
-    ArrayAttr templateArgs;
+    auto gatherOobTok = [&](pto::GatherOOB mode) -> StringRef {
+      switch (mode) {
+      case pto::GatherOOB::Undefined:
+        return "pto::GatherOOB::Undefined";
+      case pto::GatherOOB::Clamp:
+        return "pto::GatherOOB::Clamp";
+      case pto::GatherOOB::Wrap:
+        return "pto::GatherOOB::Wrap";
+      case pto::GatherOOB::Zero:
+        return "pto::GatherOOB::Zero";
+      }
+      llvm_unreachable("unknown GatherOOB");
+    };
+
+    SmallVector<Attribute, 2> templateArgVec;
+    const bool rowCoalesce =
+        isRowCoalescedMGatherIndexType(op.getDst().getType(), op.getIdx().getType());
+    templateArgVec.push_back(emitc::OpaqueAttr::get(
+        ctx, rowCoalesce ? "pto::Coalesce::Row" : "pto::Coalesce::Elem"));
     if (op.getGatherOob() != pto::GatherOOB::Undefined) {
-      auto gatherOobTok = [&](pto::GatherOOB mode) -> StringRef {
-        switch (mode) {
-        case pto::GatherOOB::Undefined:
-          return "pto::GatherOOB::Undefined";
-        case pto::GatherOOB::Clamp:
-          return "pto::GatherOOB::Clamp";
-        case pto::GatherOOB::Wrap:
-          return "pto::GatherOOB::Wrap";
-        case pto::GatherOOB::Zero:
-          return "pto::GatherOOB::Zero";
-        }
-        llvm_unreachable("unknown GatherOOB");
-      };
-      templateArgs = rewriter.getArrayAttr(
-          {emitc::OpaqueAttr::get(ctx, gatherOobTok(op.getGatherOob()))});
+      templateArgVec.push_back(
+          emitc::OpaqueAttr::get(ctx, gatherOobTok(op.getGatherOob())));
     }
+    ArrayAttr templateArgs = rewriter.getArrayAttr(templateArgVec);
 
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "MGATHER",
@@ -5224,17 +5267,20 @@ struct PTOMScatterToMSCATTER : public OpConversionPattern<pto::MScatterOp> {
       llvm_unreachable("unknown ScatterOOB");
     };
 
-    SmallVector<Attribute, 2> templateArgVec;
+    SmallVector<Attribute, 3> templateArgVec;
+    const bool rowCoalesce =
+        isRowCoalescedMGatherIndexType(op.getSrc().getType(), op.getIdx().getType());
+    templateArgVec.push_back(emitc::OpaqueAttr::get(
+        ctx, rowCoalesce ? "pto::Coalesce::Row" : "pto::Coalesce::Elem"));
     if (op.getScatterAtomicOp() != pto::ScatterAtomicOp::None ||
         op.getScatterOob() != pto::ScatterOOB::Undefined) {
-      templateArgVec.push_back(
-          emitc::OpaqueAttr::get(ctx, scatterAtomicTok(op.getScatterAtomicOp())));
+      templateArgVec.push_back(emitc::OpaqueAttr::get(
+          ctx, scatterAtomicTok(op.getScatterAtomicOp())));
       if (op.getScatterOob() != pto::ScatterOOB::Undefined)
         templateArgVec.push_back(
             emitc::OpaqueAttr::get(ctx, scatterOobTok(op.getScatterOob())));
     }
-    ArrayAttr templateArgs =
-        templateArgVec.empty() ? ArrayAttr{} : rewriter.getArrayAttr(templateArgVec);
+    ArrayAttr templateArgs = rewriter.getArrayAttr(templateArgVec);
 
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "MSCATTER",

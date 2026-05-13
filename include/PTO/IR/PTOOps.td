@@ -2409,7 +2409,31 @@ def MGatherOp : PTO_TOp<"mgather", [
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MGATHER"; }
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_MTE2; }
+    ::mlir::pto::PIPE getPipe() {
+      auto isA5Target = [&]() -> bool {
+        auto moduleOp = getOperation()->getParentOfType<::mlir::ModuleOp>();
+        if (!moduleOp)
+          return false;
+
+        if (auto arch =
+                moduleOp->getAttrOfType<::mlir::StringAttr>("pto.target_arch")) {
+          if (arch.getValue().equals_insensitive("a5"))
+            return true;
+        }
+
+        if (auto spec =
+                moduleOp->getAttrOfType<::mlir::StringAttr>("pto.device-spec")) {
+          auto s = spec.getValue();
+          if (s.starts_with("Ascend950") || s.starts_with("Ascend910_95"))
+            return true;
+        }
+
+        return false;
+      };
+
+      return isA5Target() ? ::mlir::pto::PIPE::PIPE_V
+                          : ::mlir::pto::PIPE::PIPE_MTE2;
+    }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }
@@ -2565,7 +2589,31 @@ def MScatterOp : PTO_TOp<"mscatter", [
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MSCATTER"; }
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_MTE3; }
+    ::mlir::pto::PIPE getPipe() {
+      auto isA5Target = [&]() -> bool {
+        auto moduleOp = getOperation()->getParentOfType<::mlir::ModuleOp>();
+        if (!moduleOp)
+          return false;
+
+        if (auto arch =
+                moduleOp->getAttrOfType<::mlir::StringAttr>("pto.target_arch")) {
+          if (arch.getValue().equals_insensitive("a5"))
+            return true;
+        }
+
+        if (auto spec =
+                moduleOp->getAttrOfType<::mlir::StringAttr>("pto.device-spec")) {
+          auto s = spec.getValue();
+          if (s.starts_with("Ascend950") || s.starts_with("Ascend910_95"))
+            return true;
+        }
+
+        return false;
+      };
+
+      return isA5Target() ? ::mlir::pto::PIPE::PIPE_V
+                          : ::mlir::pto::PIPE::PIPE_MTE3;
+    }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getMemMutable(); }
   }];
 }
