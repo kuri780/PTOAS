@@ -18,6 +18,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
     %c16_i64 = arith.constant 16 : i64
     %c64_i64 = arith.constant 64 : i64
     %c1024_i64 = arith.constant 1024 : i64
+    %c4096_i64 = arith.constant 4096 : i64
     %false = arith.constant false
 
     %l1_a = pto.castptr %c0_i64 : i64 -> !pto.ptr<!pto.hif8, l1>
@@ -25,6 +26,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
     %l0a = pto.castptr %c0_i64 : i64 -> !pto.ptr<!pto.hif8, l0a>
     %l0b = pto.castptr %c0_i64 : i64 -> !pto.ptr<!pto.hif8, l0b>
     %l0c = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, l0c>
+    %l0c_fp8 = pto.castptr %c4096_i64 : i64 -> !pto.ptr<f32, l0c>
     %l1_a_fp8 = pto.castptr %c0_i64 : i64 -> !pto.ptr<f8E4M3FN, l1>
     %l1_b_fp8 = pto.castptr %c1024_i64 : i64 -> !pto.ptr<f8E4M3FN, l1>
     %l0a_fp8 = pto.castptr %c0_i64 : i64 -> !pto.ptr<f8E4M3FN, l0a>
@@ -75,13 +77,13 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
       : !pto.ptr<f8E4M3FN, l1>, !pto.ptr<f8E4M3FN, l0b>, i64, i64
     pto.set_flag["PIPE_MTE1", "PIPE_M", "EVENT_ID1"]
     pto.wait_flag["PIPE_MTE1", "PIPE_M", "EVENT_ID1"]
-    pto.mad %l0a_fp8, %l0b_fp8, %l0c, %c16_i64, %c16_i64, %c64_i64
+    pto.mad %l0a_fp8, %l0b_fp8, %l0c_fp8, %c16_i64, %c16_i64, %c64_i64
       : !pto.ptr<f8E4M3FN, l0a>, !pto.ptr<f8E4M3FN, l0b>, !pto.ptr<f32, l0c>, i64, i64, i64
 
     pto.set_flag["PIPE_M", "PIPE_FIX", "EVENT_ID0"]
     pto.wait_flag["PIPE_M", "PIPE_FIX", "EVENT_ID0"]
 
-    pto.mte_l0c_gm %l0c, %c_fp8_gm, %c16_i64, %c16_i64, %c16_i64, %c16_i64,
+    pto.mte_l0c_gm %l0c_fp8, %c_fp8_gm, %c16_i64, %c16_i64, %c16_i64, %c16_i64,
       %c0_i64, %c0_i64,
       nz2nd
       : !pto.ptr<f32, l0c>, !pto.ptr<f32, gm>, i64, i64, i64, i64, i64, i64

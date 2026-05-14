@@ -18,10 +18,12 @@ K = 16
 
 
 def generate(output_dir: Path) -> None:
-    a = np.zeros((M, K), dtype=np.float16)
-    b = np.zeros((K, N), dtype=np.float16)
+    a = np.eye(M, K, dtype=np.float16)
+    b = np.arange(K * N, dtype=np.float16).reshape(K, N)
     c = np.zeros((M, N), dtype=np.float32)
-    golden_c = np.zeros((M, N), dtype=np.float32)
+    a_f32 = a.astype(np.float32, copy=False)
+    b_f32 = b.astype(np.float32, copy=False)
+    golden_c = a_f32 @ b_f32
 
     output_dir.mkdir(parents=True, exist_ok=True)
     a.reshape(-1).tofile(output_dir / "v1.bin")

@@ -89,14 +89,14 @@ module attributes {pto.target_arch = "a5"} {
         sat
         : !pto.ptr<f32, l0c>, !pto.ptr<f32, l1>, i64, i64, i64, i64, i64, i64, i64
 
-      pto.set_flag["PIPE_FIX", "PIPE_MTE2", "EVENT_ID0"]
-      pto.wait_flag["PIPE_FIX", "PIPE_MTE2", "EVENT_ID0"]
+      pto.set_flag["PIPE_FIX", "PIPE_MTE1", "EVENT_ID0"]
+      pto.wait_flag["PIPE_FIX", "PIPE_MTE1", "EVENT_ID0"]
       pto.mte_l1_ub %l1_out, %ub_out, %c64_i64
         nburst(%c40_i64, %c0_i64, %c0_i64)
         : !pto.ptr<f32, l1>, !pto.ptr<f32, ub>, i64, i64, i64, i64
 
-      pto.set_flag["PIPE_MTE2", "PIPE_FIX", "EVENT_ID0"]
-      pto.wait_flag["PIPE_MTE2", "PIPE_FIX", "EVENT_ID0"]
+      pto.set_flag["PIPE_MTE1", "PIPE_FIX", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE1", "PIPE_FIX", "EVENT_ID0"]
       pto.sync.set <PIPE_FIX>, 1
       pto.sync.set <PIPE_FIX>, 17
     }

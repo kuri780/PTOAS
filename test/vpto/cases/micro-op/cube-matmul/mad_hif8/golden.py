@@ -15,81 +15,68 @@ import numpy as np
 M = 16
 N = 16
 K = 64
+M0 = 16
+K0 = 32
+N0 = 16
+
+
+def pack_lhs_cube_fractal(matrix: np.ndarray) -> np.ndarray:
+    m, k = matrix.shape
+    assert m % M0 == 0 and k % K0 == 0
+    return matrix.reshape(m // M0, M0, k // K0, K0).transpose(
+        2, 0, 1, 3
+    )
+
+
+def pack_rhs_cube_fractal(matrix: np.ndarray) -> np.ndarray:
+    k, n = matrix.shape
+    assert k % K0 == 0 and n % N0 == 0
+    return matrix.reshape(k // K0, K0, n // N0, N0).transpose(
+        0, 2, 1, 3
+    )
+
+
+def fp8_e4m3_to_f32(bits: np.ndarray) -> np.ndarray:
+    raw = bits.astype(np.uint8)
+    sign = np.where((raw & 0x80) != 0, -1.0, 1.0).astype(np.float32)
+    exponent = ((raw >> 3) & 0x0F).astype(np.int32)
+    mantissa = (raw & 0x07).astype(np.float32)
+    normal = exponent != 0
+    value = np.where(
+        normal,
+        (1.0 + mantissa / 8.0) * np.exp2(exponent - 7),
+        (mantissa / 8.0) * np.exp2(-6),
+    ).astype(np.float32)
+    return sign * value
 
 
 def generate(output_dir: Path) -> None:
-    # The simulator maps 0x40 and 0xC0 to opposite HiF8 values, and 0x00 to
-    # zero.  For this K=64 case, a constant 0x40 x 0x40 dot product produces
-    # 8192.0, so one non-zero multiply contributes 128.0 to the FP32 result.
-    # Keep each row/column stable across K so the test validates HiF8 MAD
-    # semantics without baking in an incomplete model of the 8-bit L0 layout.
+    # This kernel stages GM->L1 with raw byte copies, so v1/v2.bin must already
+    # be in the cube-fractal layout expected by mte_l1_l0a/l0b.
     codes = np.array([0x40, 0xC0, 0x00, 0x40, 0xC0], dtype=np.uint8)
     signed_units = np.array([1.0, -1.0, 0.0, 1.0, -1.0], dtype=np.float32)
 
     m_idx = np.arange(M).reshape(M, 1)
     k_idx = np.arange(K).reshape(1, K)
     a_index = (m_idx * 3 + k_idx * 0) % codes.size
-    a = codes[a_index].astype(np.uint8)
+    a_logical = codes[a_index].astype(np.uint8)
     a_unit = signed_units[a_index].astype(np.float32)
 
     k_idx = np.arange(K).reshape(K, 1)
     n_idx = np.arange(N).reshape(1, N)
     b_index = (k_idx * 0 + n_idx * 2 + 1) % codes.size
-    b = codes[b_index].astype(np.uint8)
+    b_logical = codes[b_index].astype(np.uint8)
     b_unit = signed_units[b_index].astype(np.float32)
 
+    a = pack_lhs_cube_fractal(a_logical).reshape(-1).astype(np.uint8)
+    b = pack_rhs_cube_fractal(b_logical).reshape(-1).astype(np.uint8)
     c_hif8 = np.zeros((M, N), dtype=np.float32)
     c_fp8 = np.zeros((M, N), dtype=np.float32)
 
-    # A 16x64 8-bit left tile is consumed in row groups after the L1-to-L0A
-    # layout step.  The generated row-major tile above is intentionally mapped
-    # to positive, negative, and zero effective rows so the output checks more
-    # than a single constant path.
-    effective_a_unit = np.array(
-        [
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            -1.0,
-            -1.0,
-        ],
-        dtype=np.float32,
-    ).reshape(M, 1)
-    effective_b_unit = b_unit[0:1, :]
-    effective_fp8_a_unit = np.array(
-        [
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-        ],
-        dtype=np.float32,
-    ).reshape(M, 1)
-    golden_hif8 = (effective_a_unit @ effective_b_unit) * np.float32(K * 128.0)
-    golden_fp8 = (effective_fp8_a_unit @ effective_b_unit) * np.float32(K * 2.0)
+    golden_hif8 = (a_unit @ b_unit).astype(np.float32) * np.float32(128.0)
+    a_fp8 = fp8_e4m3_to_f32(a_logical)
+    b_fp8 = fp8_e4m3_to_f32(b_logical)
+    golden_fp8 = (a_fp8 @ b_fp8).astype(np.float32)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     a.reshape(-1).tofile(output_dir / "v1.bin")

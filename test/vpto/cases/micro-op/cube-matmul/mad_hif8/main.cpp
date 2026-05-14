@@ -9,6 +9,7 @@
 #include "test_common.h"
 #include "acl/acl.h"
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 
@@ -65,10 +66,14 @@ int main() {
 
   uint8_t *aHost = nullptr;
   uint8_t *bHost = nullptr;
+  uint8_t *aFp8Host = nullptr;
+  uint8_t *bFp8Host = nullptr;
   float *cHif8Host = nullptr;
   float *cFp8Host = nullptr;
   uint8_t *aDevice = nullptr;
   uint8_t *bDevice = nullptr;
+  uint8_t *aFp8Device = nullptr;
+  uint8_t *bFp8Device = nullptr;
   float *cHif8Device = nullptr;
   float *cFp8Device = nullptr;
 
@@ -89,10 +94,14 @@ int main() {
 
   ACL_CHECK(aclrtMallocHost((void **)(&aHost), aSize));
   ACL_CHECK(aclrtMallocHost((void **)(&bHost), bSize));
+  ACL_CHECK(aclrtMallocHost((void **)(&aFp8Host), aSize));
+  ACL_CHECK(aclrtMallocHost((void **)(&bFp8Host), bSize));
   ACL_CHECK(aclrtMallocHost((void **)(&cHif8Host), cSize));
   ACL_CHECK(aclrtMallocHost((void **)(&cFp8Host), cSize));
   ACL_CHECK(aclrtMalloc((void **)&aDevice, aSize, ACL_MEM_MALLOC_HUGE_FIRST));
   ACL_CHECK(aclrtMalloc((void **)&bDevice, bSize, ACL_MEM_MALLOC_HUGE_FIRST));
+  ACL_CHECK(aclrtMalloc((void **)&aFp8Device, aSize, ACL_MEM_MALLOC_HUGE_FIRST));
+  ACL_CHECK(aclrtMalloc((void **)&bFp8Device, bSize, ACL_MEM_MALLOC_HUGE_FIRST));
   ACL_CHECK(aclrtMalloc((void **)&cHif8Device, cSize, ACL_MEM_MALLOC_HUGE_FIRST));
   ACL_CHECK(aclrtMalloc((void **)&cFp8Device, cSize, ACL_MEM_MALLOC_HUGE_FIRST));
 
@@ -102,6 +111,8 @@ int main() {
   inputSize = bSize;
   FILE_CHECK(ReadFile("./v2.bin", inputSize, bHost, bSize) && inputSize == bSize,
              "./v2.bin");
+  std::memcpy(aFp8Host, aHost, aSize);
+  std::memcpy(bFp8Host, bHost, bSize);
   inputSize = cSize;
   FILE_CHECK(ReadFile("./v3.bin", inputSize, cHif8Host, cSize) && inputSize == cSize,
              "./v3.bin");
@@ -111,10 +122,12 @@ int main() {
 
   ACL_CHECK(aclrtMemcpy(aDevice, aSize, aHost, aSize, ACL_MEMCPY_HOST_TO_DEVICE));
   ACL_CHECK(aclrtMemcpy(bDevice, bSize, bHost, bSize, ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(aFp8Device, aSize, aFp8Host, aSize, ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(bFp8Device, bSize, bFp8Host, bSize, ACL_MEMCPY_HOST_TO_DEVICE));
   ACL_CHECK(aclrtMemcpy(cHif8Device, cSize, cHif8Host, cSize, ACL_MEMCPY_HOST_TO_DEVICE));
   ACL_CHECK(aclrtMemcpy(cFp8Device, cSize, cFp8Host, cSize, ACL_MEMCPY_HOST_TO_DEVICE));
 
-  LaunchMad_hif8_kernel(aDevice, bDevice, cHif8Device, aDevice, bDevice,
+  LaunchMad_hif8_kernel(aDevice, bDevice, cHif8Device, aFp8Device, bFp8Device,
                         cFp8Device, stream);
   ACL_CHECK(aclrtSynchronizeStream(stream));
 
@@ -126,10 +139,14 @@ int main() {
 cleanup:
   aclrtFree(aDevice);
   aclrtFree(bDevice);
+  aclrtFree(aFp8Device);
+  aclrtFree(bFp8Device);
   aclrtFree(cHif8Device);
   aclrtFree(cFp8Device);
   aclrtFreeHost(aHost);
   aclrtFreeHost(bHost);
+  aclrtFreeHost(aFp8Host);
+  aclrtFreeHost(bFp8Host);
   aclrtFreeHost(cHif8Host);
   aclrtFreeHost(cFp8Host);
   if (stream != nullptr)

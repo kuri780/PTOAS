@@ -47,7 +47,10 @@ struct MrgSortExecutedNumList {
     }                                                                            \
   } while (0)
 
-void LaunchMad_bf16bf16f32_kernel(__bf16 *a, __bf16 *b, float *c, void *stream);
+using bf16_storage_t = uint16_t;
+
+void LaunchMad_bf16bf16f32_kernel(bf16_storage_t *a, bf16_storage_t *b, float *c,
+                                  void *stream);
 
 int main() {
   constexpr size_t kM = 16;
@@ -57,15 +60,15 @@ int main() {
   constexpr size_t bElem = kK * kN;
   constexpr size_t cElem = kM * kN;
 
-  constexpr size_t aSize = aElem * sizeof(__bf16);
-  constexpr size_t bSize = bElem * sizeof(__bf16);
+  constexpr size_t aSize = aElem * sizeof(bf16_storage_t);
+  constexpr size_t bSize = bElem * sizeof(bf16_storage_t);
   constexpr size_t cSize = cElem * sizeof(float);
 
-  __bf16 *aHost = nullptr;
-  __bf16 *bHost = nullptr;
+  bf16_storage_t *aHost = nullptr;
+  bf16_storage_t *bHost = nullptr;
   float *cHost = nullptr;
-  __bf16 *aDevice = nullptr;
-  __bf16 *bDevice = nullptr;
+  bf16_storage_t *aDevice = nullptr;
+  bf16_storage_t *bDevice = nullptr;
   float *cDevice = nullptr;
 
   int rc = 0;
