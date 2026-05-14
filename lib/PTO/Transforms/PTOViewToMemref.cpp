@@ -1742,7 +1742,8 @@ struct PTOViewToMemrefPass
         Value rhs = op->getOperand(1);
         Value dst = op->getOperand(2);
 
-        rewriter.replaceOpWithNewOp<pto::TMatmulOp>(op, TypeRange{}, lhs, rhs, dst);
+        rewriter.replaceOpWithNewOp<pto::TMatmulOp>(
+            op, TypeRange{}, lhs, rhs, dst, op.getAccPhaseAttr());
       }
 
       // --- TMatmulAccOp [Acc, Lhs, Rhs, Dst] ---
@@ -1753,7 +1754,8 @@ struct PTOViewToMemrefPass
         rewriter.setInsertionPoint(op);
         rewriter.replaceOpWithNewOp<pto::TMatmulAccOp>(
           op, TypeRange{}, 
-          op->getOperand(0), op->getOperand(1), op->getOperand(2), op->getOperand(3));
+          op->getOperand(0), op->getOperand(1), op->getOperand(2),
+          op->getOperand(3), op.getAccPhaseAttr());
       }
 
       // --- TMatmulBiasOp [Acc, Lhs, Rhs, Bias, Dst] ---

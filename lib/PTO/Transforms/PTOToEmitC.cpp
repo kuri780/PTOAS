@@ -4290,6 +4290,33 @@ struct PTOTStoreToTSTORE : public OpConversionPattern<pto::TStoreOp> {
 //===----------------------------------------------------------------------===//
 // pto.matmul_dps lowering (Simplified: No internal copy/sync)
 //===----------------------------------------------------------------------===//
+//
+// Render `pto.tmatmul` as one of three forms depending on the optional
+// `acc_phase` attribute:
+//   * absent / Unspecified  -> `TMATMUL(dst, lhs, rhs)`
+//   * Partial               -> `TMATMUL<AccPhase::Partial>(dst, lhs, rhs)`
+//   * Final                 -> `TMATMUL<AccPhase::Final>(dst, lhs, rhs)`
+// The Unspecified default keeps backward compatibility with all upstream IR
+// that does not yet emit an explicit phase attribute.
+static ArrayAttr buildAccPhaseTemplateArgs(ConversionPatternRewriter &rewriter,
+                                           pto::AccPhase phase) {
+  StringRef tmpl;
+  switch (phase) {
+  case pto::AccPhase::Unspecified:
+    return ArrayAttr{};
+  case pto::AccPhase::Partial:
+    tmpl = "AccPhase::Partial";
+    break;
+  case pto::AccPhase::Final:
+    tmpl = "AccPhase::Final";
+    break;
+  default:
+    llvm_unreachable("unknown AccPhase");
+  }
+  return rewriter.getArrayAttr(
+      {emitc::OpaqueAttr::get(rewriter.getContext(), tmpl)});
+}
+
 struct PTOTMatmulToTMATMUL : public OpConversionPattern<pto::TMatmulOp> {
   using OpConversionPattern<pto::TMatmulOp>::OpConversionPattern;
 
@@ -4300,11 +4327,13 @@ struct PTOTMatmulToTMATMUL : public OpConversionPattern<pto::TMatmulOp> {
     Value rhs = peelUnrealized(adaptor.getRhs()); // B (Right)
     Value dst = peelUnrealized(adaptor.getDst()); // C (Acc)
 
-    // 2. 直接生成函数调用 TMATMUL(dst, lhs, rhs)
-    // 假设输入已经在对应的 L0 Buffer 中
+    // 2. 根据 acc_phase 属性决定是否生成 TMATMUL<AccPhase::Final/Partial>(...)
+    ArrayAttr templateArgs =
+        buildAccPhaseTemplateArgs(rewriter, op.getAccPhase());
+
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "TMATMUL",
-        ArrayAttr{}, ArrayAttr{},
+        /*args=*/ArrayAttr{}, /*template_args=*/templateArgs,
         ValueRange{dst, lhs, rhs});
 
     // 3. 处理 Op 替换/删除
@@ -4396,10 +4425,13 @@ struct PTOTMatmulAccToTMATMULACC : public OpConversionPattern<pto::TMatmulAccOp>
     Value rhs   = peelUnrealized(adaptor.getRhs());   // B (Right)
     Value dst   = peelUnrealized(adaptor.getDst());   // AccNew
 
-    // 2. 直接生成函数调用 TMATMUL_ACC(dst, accIn, lhs, rhs)
+    // 2. 根据 acc_phase 属性决定是否生成 TMATMUL_ACC<AccPhase::Final/Partial>(...)
+    ArrayAttr templateArgs =
+        buildAccPhaseTemplateArgs(rewriter, op.getAccPhase());
+
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "TMATMUL_ACC",
-        ArrayAttr{}, ArrayAttr{},
+        /*args=*/ArrayAttr{}, /*template_args=*/templateArgs,
         ValueRange{dst, accIn, lhs, rhs});
 
     // 3. 处理 Op 替换/删除

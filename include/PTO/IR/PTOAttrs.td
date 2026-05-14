@@ -398,6 +398,28 @@ def PTO_STPhaseAttr : EnumAttr<PTO_Dialect, PTO_STPhaseEnum, "st_phase"> {
   let summary = "TSTORE phase attribute";
 }
 
+//===----------------------------------------------------------------------===//
+// TMatmul accumulation phase
+//===----------------------------------------------------------------------===//
+
+// Mirrors the device-side `AccPhase` template parameter on TMATMUL /
+// TMATMUL_ACC. `Unspecified` keeps backward compatibility: the lowering emits
+// the call without any template argument (i.e. `TMATMUL(...)`), which is also
+// the only form generated before this attribute existed. `Partial` / `Final`
+// instruct lowering to emit the templated form (`TMATMUL<AccPhase::Final>(...)`)
+// so a K-loop scheduler upstream can drive last-iteration vs. mid-iteration
+// behaviour without resorting to per-call switch statements at codegen time.
+def PTO_AccPhaseEnum : PTO_I32Enum<
+  "AccPhase", "PTO matmul accumulation phase", [
+    I32EnumAttrCase<"Unspecified", 0, "unspecified">,
+    I32EnumAttrCase<"Partial", 2, "partial">,
+    I32EnumAttrCase<"Final", 3, "final">
+  ]>;
+
+def PTO_AccPhaseAttr : EnumAttr<PTO_Dialect, PTO_AccPhaseEnum, "acc_phase"> {
+  let summary = "TMATMUL / TMATMUL_ACC accumulation phase attribute";
+}
+
 def PTO_AtomicTypeEnum : PTO_I32Enum<
   "AtomicType", "PTO TSTORE atomic mode", [
     I32EnumAttrCase<"AtomicNone", 0, "atomic_none">,

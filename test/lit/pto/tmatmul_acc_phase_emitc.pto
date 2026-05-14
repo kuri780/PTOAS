@@ -1,0 +1,56 @@
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 %s 2>&1 | FileCheck %s --check-prefix=A3
+//
+// Six-way pivot of the TMATMUL / TMATMUL_ACC accumulation-phase template
+// argument matrix:
+//   * (acc) x (Unspecified, Partial, Final)
+// Mirrors tstore_forms_emitc.pto for the TSTORE phase axis.
+
+module {
+  func.func @tmatmul_acc_phase_forms() {
+    %c0_i64 = arith.constant 0 : i64
+
+    %a_left = pto.alloc_tile addr = %c0_i64
+        : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %b_right = pto.alloc_tile addr = %c0_i64
+        : !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %c_acc = pto.alloc_tile addr = %c0_i64
+        : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    // 1) TMATMUL(c, a, b)
+    pto.tmatmul ins(%a_left, %b_right : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+
+    // 2) TMATMUL<AccPhase::Partial>(c, a, b)
+    pto.tmatmul ins(%a_left, %b_right : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+                {accPhase = #pto<acc_phase partial>}
+
+    // 3) TMATMUL<AccPhase::Final>(c, a, b)
+    pto.tmatmul ins(%a_left, %b_right : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+                {accPhase = #pto<acc_phase final>}
+
+    // 4) TMATMUL_ACC(c, a, b)
+    pto.tmatmul.acc ins(%c_acc, %a_left, %b_right : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                    outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+
+    // 5) TMATMUL_ACC<AccPhase::Partial>(c, a, b)
+    pto.tmatmul.acc ins(%c_acc, %a_left, %b_right : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                    outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+                    {accPhase = #pto<acc_phase partial>}
+
+    // 6) TMATMUL_ACC<AccPhase::Final>(c, a, b)
+    pto.tmatmul.acc ins(%c_acc, %a_left, %b_right : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=128, v_row=16, v_col=128, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=128, cols=64, v_row=128, v_col=64, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+                    outs(%c_acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+                    {accPhase = #pto<acc_phase final>}
+
+    return
+  }
+}
+
+// A3: TMATMUL([[C:v[0-9]+]], [[A:v[0-9]+]], [[B:v[0-9]+]]);
+// A3: TMATMUL<AccPhase::Partial>([[C]], [[A]], [[B]]);
+// A3: TMATMUL<AccPhase::Final>([[C]], [[A]], [[B]]);
+// A3: TMATMUL_ACC([[C]], [[C]], [[A]], [[B]]);
+// A3: TMATMUL_ACC<AccPhase::Partial>([[C]], [[C]], [[A]], [[B]]);
+// A3: TMATMUL_ACC<AccPhase::Final>([[C]], [[C]], [[A]], [[B]]);

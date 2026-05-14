@@ -824,7 +824,8 @@ def TMatmulOp : PTO_TOp<"tmatmul", [
   let arguments = (ins
     PTODpsType:$lhs,
     PTODpsType:$rhs,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    DefaultValuedAttr<PTO_AccPhaseAttr, "::mlir::pto::AccPhase::Unspecified">:$accPhase
   );
 
   let results = (outs
@@ -860,7 +861,8 @@ def TMatmulAccOp : PTO_TOp<"tmatmul.acc", [
     PTODpsType:$acc_in,
     PTODpsType:$lhs,
     PTODpsType:$rhs,
-    PTODpsType:$dst
+    PTODpsType:$dst,
+    DefaultValuedAttr<PTO_AccPhaseAttr, "::mlir::pto::AccPhase::Unspecified">:$accPhase
   );
 
   let results = (outs
