@@ -13,6 +13,7 @@
 #
 # Required environment variables:
 #   LLVM_BUILD_DIR  - Path to LLVM build directory
+#   PTO_BUILD_DIR   - Path to PTO build directory (optional, defaults to PTO_SOURCE_DIR/build)
 #   PTO_INSTALL_DIR - Path to PTO install directory
 #   PTO_SOURCE_DIR  - Path to PTO source directory
 #
@@ -41,7 +42,8 @@ done
 
 export LD_LIBRARY_PATH="${LLVM_BUILD_DIR}/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
 
-PTOAS_BIN="${PTO_SOURCE_DIR}/build/tools/ptoas/ptoas"
+PTO_BUILD_DIR="${PTO_BUILD_DIR:-${PTO_SOURCE_DIR}/build}"
+PTOAS_BIN="${PTO_BUILD_DIR}/tools/ptoas/ptoas"
 PTOAS_DEPS_DIR="${PTOAS_DIST_DIR}/lib"
 
 if [ ! -f "$PTOAS_BIN" ]; then

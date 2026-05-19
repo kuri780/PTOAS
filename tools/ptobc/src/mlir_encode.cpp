@@ -76,16 +76,37 @@ static uint64_t internType(PTOBCFile& f, mlir::Type t) {
   return f.typeAsm.size();
 }
 
-static mlir::DictionaryAttr stripAttr(mlir::MLIRContext *ctx, mlir::DictionaryAttr dict, llvm::StringRef key) {
-  if (!dict) return dict;
-  if (!dict.get(key)) return dict;
-  NamedAttributeVector keep;
+static mlir::DictionaryAttr stripAttrs(mlir::MLIRContext *ctx,
+                                       mlir::DictionaryAttr dict,
+                                       llvm::ArrayRef<llvm::StringRef> keys) {
+  if (!dict || dict.empty() || keys.empty())
+    return dict;
+
+  llvm::SmallVector<mlir::NamedAttribute, 8> keep;
   keep.reserve(dict.size());
   for (auto na : dict) {
-    if (na.getName().getValue() == key) continue;
+    if (llvm::is_contained(keys, na.getName().getValue()))
+      continue;
     keep.push_back(na);
   }
+  if (keep.size() == dict.size())
+    return dict;
   return mlir::DictionaryAttr::get(ctx, keep);
+}
+
+static mlir::DictionaryAttr stripKnownImmediateAttrs(
+    mlir::MLIRContext *ctx, mlir::DictionaryAttr dict,
+    const ptobc::v0::OpInfo &info) {
+  switch (info.imm_kind) {
+  case 0x01:
+    return stripAttrs(ctx, dict, {"predicate"});
+  case 0x02:
+    return stripAttrs(ctx, dict, {"src_op", "dst_op", "event_id"});
+  case 0x05:
+    return stripAttrs(ctx, dict, {"value"});
+  default:
+    return dict;
+  }
 }
 
 static uint64_t internAttr(PTOBCFile& f, mlir::DictionaryAttr dict) {
@@ -523,8 +544,7 @@ void Encoder::encodeKnownOp(mlir::Operation &op, Buffer &out,
 
   out.appendU16LE(variantInfo.opcode);
   mlir::DictionaryAttr dict = op.getAttrDictionary();
-  if (llvm::isa<mlir::arith::ConstantOp>(&op))
-    dict = stripAttr(op.getContext(), dict, "value");
+  dict = stripKnownImmediateAttrs(op.getContext(), dict, info);
   writeULEB128(internAttr(file, dict), out.bytes);
 
   if (info.has_variant_u8)

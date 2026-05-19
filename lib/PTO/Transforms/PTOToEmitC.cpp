@@ -301,6 +301,25 @@ static std::string getEmitCScalarTypeToken(Type elemTy) {
   return "float";
 }
 
+static emitc::PointerType getEmitCPointerType(MLIRContext *ctx,
+                                              StringRef pointeeTypeStr) {
+  return emitc::PointerType::get(emitc::OpaqueType::get(ctx, pointeeTypeStr));
+}
+
+static emitc::PointerType getEmitCPointerType(MLIRContext *ctx,
+                                              StringRef qualifier,
+                                              StringRef elemTypeStr) {
+  return getEmitCPointerType(ctx, (qualifier + " " + elemTypeStr).str());
+}
+
+static bool isEmitCPointerLikeType(Type ty) {
+  if (isa<emitc::PointerType>(ty))
+    return true;
+  if (auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty))
+    return opaqueTy.getValue().ends_with("*");
+  return false;
+}
+
 static int64_t getEmitCScalarByteWidth(Type elemTy) {
   if (pto::getPTOStorageElemByteSize(elemTy) == 1)
     return 1;
@@ -503,8 +522,7 @@ public:
       std::string qualifier = "__gm__";
 
       std::string finalTypeStr = qualifier + " " + elemTypeStr;
-      return emitc::PointerType::get(
-          emitc::OpaqueType::get(Ctx, finalTypeStr));
+      return getEmitCPointerType(Ctx, finalTypeStr);
     });
 
     addConversion([Ctx](pto::PipeType type) -> Type {
@@ -592,7 +610,7 @@ public:
       std::string finalTypeStr = qualifier + " " + elemTypeStr;
       LLVM_DEBUG(llvm::dbgs() << "  [Success] -> " << finalTypeStr << "*\n");
       
-      return emitc::PointerType::get(emitc::OpaqueType::get(Ctx, finalTypeStr));
+      return getEmitCPointerType(Ctx, finalTypeStr);
     });
 
     // ---------------------------------------------------------
@@ -733,24 +751,18 @@ static FailureOr<std::string> getTPipeTokenFromValue(Value pipeHandle,
 }
 
 static bool isSetFFTsPointerLikeType(Type ty) {
-  if (isa<emitc::PointerType>(ty))
-    return true;
-  if (auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty))
-    return opaqueTy.getValue().ends_with("*");
-  return false;
+  return isEmitCPointerLikeType(ty);
 }
 
 static bool tileDataReturnsIntegralAddress(pto::AddressSpace as) {
   return as == pto::AddressSpace::BIAS;
 }
 
-static emitc::OpaqueType getTileDataResultType(MLIRContext *ctx,
-                                               pto::AddressSpace as,
-                                               StringRef elemTok) {
+static Type getTileDataResultType(MLIRContext *ctx, pto::AddressSpace as,
+                                  StringRef elemTok) {
   if (tileDataReturnsIntegralAddress(as))
     return emitc::OpaqueType::get(ctx, "uint64_t");
-  return emitc::OpaqueType::get(
-      ctx, std::string(addrSpaceQualifier(as)) + " " + elemTok.str() + "*");
+  return getEmitCPointerType(ctx, addrSpaceQualifier(as), elemTok);
 }
 
 static Value materializeTileDataValue(ConversionPatternRewriter &rewriter,
@@ -772,7 +784,7 @@ static Value materializeAddressAsPointer(ConversionPatternRewriter &rewriter,
   auto *ctx = rewriter.getContext();
   std::string ptrTyStr =
       std::string(addrSpaceQualifier(as)) + " " + elemTok.str() + "*";
-  auto ptrTy = emitc::OpaqueType::get(ctx, ptrTyStr);
+  auto ptrTy = getEmitCPointerType(ctx, ptrTyStr);
   if (isSetFFTsPointerLikeType(addr.getType())) {
     if (addr.getType() == ptrTy)
       return addr;
@@ -12335,13 +12347,6 @@ static AICORE inline void ptoas_auto_sync_tail(
     // --- Step A: 清理 UnrealizedConversionCastOp ---
     // Prefer dropping redundant/unused casts; otherwise lower to emitc.cast
     // so the C++ emitter can print it.
-    auto isEmitCPointerLikeType = [](Type ty) {
-      if (isa<emitc::PointerType>(ty))
-        return true;
-      if (auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty))
-        return opaqueTy.getValue().ends_with("*");
-      return false;
-    };
     auto isEmitCTileLikeType = [](Type ty) {
       auto opaqueTy = dyn_cast<emitc::OpaqueType>(ty);
       if (!opaqueTy)

@@ -94,9 +94,12 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       LLVM_COMMIT: cd708029e0b2869e80abe31ddb175f7c35361f90
-      LLVM_DIR: ${{ github.workspace }}/llvm-project/llvm/build-shared
-      PTO_INSTALL_DIR: ${{ github.workspace }}/install
-      MLIR_PYTHONPATH: ${{ github.workspace }}/llvm-project/llvm/build-shared/tools/mlir/python_packages/mlir_core
+      LLVM_BUILD_DIR: ${{ github.workspace }}/llvm-project/llvm/build-assert
+      LLVM_DIR: ${{ github.workspace }}/llvm-project/llvm/build-assert
+      PTO_BUILD_DIR: ${{ github.workspace }}/build-assert
+      PTO_INSTALL_DIR: ${{ github.workspace }}/install-assert
+      MLIR_PYTHONPATH: ${{ github.workspace }}/llvm-project/llvm/build-assert/tools/mlir/python_packages/mlir_core
+      LLVM_CACHE_FLAVOR: assert-shared-mlirpy-hardening-v1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,15 +146,15 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            llvm-project/llvm/build-shared
-          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-shared-mlirpy-hardening-v2
+            llvm-project/llvm/build-assert
+          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-${{ env.LLVM_CACHE_FLAVOR }}
 
       - name: Prepare LLVM source (no rebuild)
         run: |
           mkdir -p llvm-project
           cd llvm-project
 
-          # 如果 restore 只带来了 build-shared，这里补一个 git repo
+          # cache 只保存 build 目录，这里补一个最小 git repo 供 cmake/ninja 使用
           if [ ! -d .git ]; then
             git init
             git remote add origin https://github.com/llvm/llvm-project.git
@@ -164,15 +167,16 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           cd llvm-project
-          cmake -C "${GITHUB_WORKSPACE}/cmake/LinuxHardeningCache.cmake" -G Ninja -S llvm -B llvm/build-shared \
+          cmake -C "${GITHUB_WORKSPACE}/cmake/LinuxHardeningCache.cmake" -G Ninja -S llvm -B "${LLVM_BUILD_DIR}" \
             -DLLVM_ENABLE_PROJECTS="mlir;clang" \
             -DBUILD_SHARED_LIBS=ON \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DPython3_EXECUTABLE=python3 \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_TARGETS_TO_BUILD="host"
 
-          ninja -C llvm/build-shared
+          ninja -C "${LLVM_BUILD_DIR}"
          
 
       # LLVM build 完成后立即保存缓存，避免后续测试影响缓存内容
@@ -181,13 +185,13 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            llvm-project/llvm/build-shared
-          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-shared-mlirpy-hardening-v2
+            llvm-project/llvm/build-assert
+          key: llvm-${{ runner.os }}-${{ env.LLVM_COMMIT }}-${{ env.LLVM_CACHE_FLAVOR }}
 
       - name: Build PTOAS
         run: |
           export PYBIND11_CMAKE_DIR="$(python3 -m pybind11 --cmakedir)"
-          cmake -C "${GITHUB_WORKSPACE}/cmake/LinuxHardeningCache.cmake" -G Ninja -S . -B build \
+          cmake -C "${GITHUB_WORKSPACE}/cmake/LinuxHardeningCache.cmake" -G Ninja -S . -B "${PTO_BUILD_DIR}" \
             -DLLVM_DIR="${LLVM_DIR}/lib/cmake/llvm" \
             -DMLIR_DIR="${LLVM_DIR}/lib/cmake/mlir" \
             -DPython3_EXECUTABLE=python3 \
@@ -196,10 +200,10 @@ jobs:
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DMLIR_PYTHON_PACKAGE_DIR="${LLVM_DIR}/tools/mlir/python_packages/mlir_core" \
             -DCMAKE_INSTALL_PREFIX="${PTO_INSTALL_DIR}" \
-            -DCMAKE_BUILD_TYPE=Release
-          ninja -C build ptoas
-          ninja -C build ptobc
-          ninja -C build install
+            -DCMAKE_BUILD_TYPE=Debug
+          ninja -C "${PTO_BUILD_DIR}" ptoas
+          ninja -C "${PTO_BUILD_DIR}" ptobc
+          ninja -C "${PTO_BUILD_DIR}" install
 
       - name: Run lit tests
         shell: bash
@@ -211,14 +215,14 @@ jobs:
           export PATH="${LLVM_DIR}/bin:${PTO_INSTALL_DIR}/bin:${PATH}"
           export LD_LIBRARY_PATH="${LLVM_DIR}/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
           export PYTHONPATH="${MLIR_PYTHONPATH}:${PTO_INSTALL_DIR}:${PYTHONPATH:-}"
-          ninja -C build check-pto
+          ninja -C "${PTO_BUILD_DIR}" check-pto
 
       - name: Run sample tests (py -> pto -> cpp)
         shell: bash
         env:
           CI_EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_SOC_VERSION: ${{ github.event.inputs.soc_version || 'Ascend910' }}
-          PTOAS_BIN: ${{ github.workspace }}/build/tools/ptoas/ptoas
+          PTOAS_BIN: ${{ env.PTO_BUILD_DIR }}/tools/ptoas/ptoas
           PYTHON_BIN: /usr/bin/python3
           MLIR_PYTHON_ROOT: ${{ env.MLIR_PYTHONPATH }}
           PTO_PYTHON_ROOT: ${{ env.PTO_INSTALL_DIR }}/

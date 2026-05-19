@@ -9,11 +9,13 @@
 
 # Collect only *.so actually needed by ptoas (transitive closure under /llvm-workspace).
 # Expects: LLVM_BUILD_DIR, PTO_INSTALL_DIR, PTOAS_DEPS_DIR, PTO_SOURCE_DIR
+# Optional: PTO_BUILD_DIR (defaults to PTO_SOURCE_DIR/build)
 
 set -euo pipefail
 
 export LD_LIBRARY_PATH="${LLVM_BUILD_DIR}/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
-PTOAS_BIN="${PTO_SOURCE_DIR}/build/tools/ptoas/ptoas"
+PTO_BUILD_DIR="${PTO_BUILD_DIR:-${PTO_SOURCE_DIR}/build}"
+PTOAS_BIN="${PTO_BUILD_DIR}/tools/ptoas/ptoas"
 
 remove_rpath() {
   local path="$1"
