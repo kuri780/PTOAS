@@ -1471,12 +1471,9 @@ def main() -> None:
     expect(', "PK"' in mask_surface_text, "psts(..., dist=pto.PredicateDist.PK) should preserve the documented DIST token")
     expect("pto.init_align" in mask_surface_text, "init_align() should lower to pto.init_align")
 
-    try:
-        block64[1, None]
-    except NotImplementedError as exc:
-        expect("compile / inspect / verify / emit" in str(exc), "runtime-launch diagnostic text mismatch")
-    else:
-        raise AssertionError("compiled handle unexpectedly accepted runtime launch syntax")
+    launch_handle = block64[1, None]
+    expect(callable(launch_handle), "compiled[grid, stream] should return a launch callable")
+    expect(hasattr(launch_handle, "__call__"), "launch handle should support __call__")
 
     print("ptodsl_jit_compile: PASS")
 

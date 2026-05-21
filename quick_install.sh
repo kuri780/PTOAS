@@ -63,7 +63,9 @@ python -c "from mlir.dialects import pto"
 
 which ptoas
 
-(cd "${PTO_SOURCE_DIR}/test/samples/MatMul" && python ./tmatmulk.py > ./tmatmulk.pto && ptoas ./tmatmulk.pto -o ./tmatmulk.cpp)
-(cd "${PTO_SOURCE_DIR}/test/samples/Abs" && python ./abs.py > ./abs.pto && ptoas --enable-insert-sync ./abs.pto -o ./abs.cpp)
+PTOAS_ENV_TMP="${PTO_SOURCE_DIR}/tmp/set_ptoas_env"
+mkdir -p "${PTOAS_ENV_TMP}/MatMul" "${PTOAS_ENV_TMP}/Abs"
+(cd "${PTO_SOURCE_DIR}/test/samples/MatMul" && python ./tmatmulk.py > "${PTOAS_ENV_TMP}/MatMul/tmatmulk.pto" && ptoas "${PTOAS_ENV_TMP}/MatMul/tmatmulk.pto" -o "${PTOAS_ENV_TMP}/MatMul/tmatmulk.cpp")
+(cd "${PTO_SOURCE_DIR}/test/samples/Abs" && python ./abs.py > "${PTOAS_ENV_TMP}/Abs/abs.pto" && ptoas --enable-insert-sync "${PTOAS_ENV_TMP}/Abs/abs.pto" -o "${PTOAS_ENV_TMP}/Abs/abs.cpp")
 
 echo "quick_install.sh: OK"

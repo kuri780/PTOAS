@@ -20,7 +20,7 @@ from ._types import _normalize_address_space, _resolve, ptr
 from mlir.dialects import arith
 from mlir.dialects import memref
 from mlir.dialects import pto as _pto
-from mlir.ir import IndexType, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type
+from mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type
 
 
 def unwrap_surface_value(value):
@@ -30,9 +30,12 @@ def unwrap_surface_value(value):
 
 def _unwrap_sequence(values):
     normalized = []
+    interned_ints = {}
     for value in values:
         if isinstance(value, int):
-            normalized.append(_index_const(value))
+            if value not in interned_ints:
+                interned_ints[value] = _index_const(value)
+            normalized.append(interned_ints[value])
         else:
             normalized.append(unwrap_surface_value(value))
     return normalized
@@ -47,6 +50,10 @@ def _index_const(value: int):
 
 
 def _add_index(lhs, rhs):
+    if isinstance(lhs, int) and lhs == 0:
+        return _normalize_index(rhs)
+    if isinstance(rhs, int) and rhs == 0:
+        return _normalize_index(lhs)
     lhs = _normalize_index(lhs)
     rhs = _normalize_index(rhs)
     if isinstance(lhs, int) and isinstance(rhs, int):
@@ -56,6 +63,36 @@ def _add_index(lhs, rhs):
     if isinstance(rhs, int):
         rhs = _index_const(rhs)
     return arith.AddIOp(lhs, rhs).result
+
+
+def _try_get_constant_index(value) -> int | None:
+    """Return a compile-time index when *value* is a Python int or ``arith.constant``."""
+    if isinstance(value, int):
+        return value
+    raw = unwrap_surface_value(value)
+    owner = getattr(raw, "owner", None)
+    if owner is None or not hasattr(owner, "operation"):
+        return None
+    if owner.operation.name != "arith.constant":
+        return None
+    attrs = owner.operation.attributes
+    if "value" not in attrs:
+        return None
+    try:
+        return IntegerAttr(attrs["value"]).value
+    except Exception:
+        return None
+
+
+def _static_index_dims(values) -> tuple[int, ...] | None:
+    """Return static index dimensions when every entry is known at trace time."""
+    dims = []
+    for value in values:
+        dim = _try_get_constant_index(value)
+        if dim is None:
+            return None
+        dims.append(dim)
+    return tuple(dims)
 
 
 def _maybe_cast_tensor_view_type(type_obj):
@@ -507,11 +544,17 @@ def compose_partition_spec(source, *, offsets, sizes) -> PartitionSpec | None:
     parent = extract_partition_spec(source)
     if parent is None:
         return None
+    if isinstance(source, TensorViewValue):
+        return PartitionSpec(
+            root_tensor_view=source,
+            offsets=tuple(offsets),
+            sizes=tuple(sizes),
+        )
     if parent.offsets and len(parent.offsets) != len(offsets):
         raise ValueError("nested partition_view rank mismatch")
     composed_offsets = tuple(
         _add_index(parent_offset, child_offset)
-        for parent_offset, child_offset in zip(parent.offsets or [0] * len(offsets), offsets)
+        for parent_offset, child_offset in zip(parent.offsets, offsets)
     )
     return PartitionSpec(
         root_tensor_view=parent.root_tensor_view,

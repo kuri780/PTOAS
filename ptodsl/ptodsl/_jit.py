@@ -7,6 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """``@pto.jit`` decorator and compiled-kernel handles."""
 
+from __future__ import annotations
+
 from ._kernel_compilation import CompiledKernelHandle, KernelCompiler
 from ._kernel_signature import parse_jit_kernel_signature
 from ._tracing import (
@@ -14,6 +16,45 @@ from ._tracing import (
     ModuleArtifact,
     ModuleStyle,
 )
+
+from mlir.ir import InsertionPoint
+
+
+_MODULE_ATTRS = ("pto.target_arch", "pto.kernel_kind")
+
+
+def _module_attr_map(module):
+    attrs = module.operation.attributes
+    return {name: str(attrs[name]) for name in _MODULE_ATTRS if name in attrs}
+
+
+def merge_jit_modules(*kernels: KernelHandle):
+    """
+    Merge multiple ``@pto.jit`` flat-module kernels into one MLIR module.
+
+    Each handle must have been compiled with the same ``target`` and
+    ``kernel_kind`` module attributes.  Function order follows *kernels*.
+    """
+    if not kernels:
+        raise ValueError("merge_jit_modules() requires at least one kernel handle")
+
+    merged = kernels[0].build()
+    expected_attrs = _module_attr_map(merged)
+
+    for kernel in kernels[1:]:
+        module = kernel.build()
+        actual_attrs = _module_attr_map(module)
+        if actual_attrs != expected_attrs:
+            raise ValueError(
+                "merge_jit_modules() requires compatible module attributes; "
+                f"expected {expected_attrs}, got {actual_attrs}"
+            )
+        with InsertionPoint(merged.body):
+            for op in module.body.operations:
+                op.operation.clone()
+
+    merged.operation.verify()
+    return merged
 
 
 def jit(
@@ -88,4 +129,4 @@ class KernelHandle(ModuleArtifact):
         return self.compile().build()
 
 
-__all__ = ["CompiledKernelHandle", "jit", "KernelHandle"]
+__all__ = ["CompiledKernelHandle", "jit", "KernelHandle", "merge_jit_modules"]

@@ -1,6 +1,13 @@
 # Build artifacts
 build/
+build_plain/
+build_plan/
 install/
+
+# TileLang ST standalone build outputs (see temp_docs/standalone_st.md)
+test/tilelang_st/npu/a5/src/st/build/
+test/tilelang_st/npu/a5/src/st/build_plain/
+test/tilelang_st/npu/a5/src/st/build_plan/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
@@ -49,12 +56,20 @@ venv/
 dist/
 
 # Logs/temp
+tmp/
 *.log
 *.tmp
 *.swp
 *.swo
 .cache/
 .pytest_cache/
+
+# PTODSL JIT / msprof simulator artifacts
+.ptodsl_jit/
+.ptodsl_cache/
+msprof_res/
+ptodsl/examples/jit/.cache/
+ptodsl/examples/jit/msprof_res/
 
 # Remote/NPU validation artifacts
 /payload/

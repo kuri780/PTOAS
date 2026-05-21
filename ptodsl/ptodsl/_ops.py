@@ -34,6 +34,7 @@ from ._surface_values import (
     TileSliceValue,
     TileValue,
     _coerce_index_value,
+    _static_index_dims,
     _unwrap_sequence,
     compose_partition_spec,
     emit_as_ptr,
@@ -50,7 +51,9 @@ from ._types import (
     _strip_integer_signedness,
     mask_type,
     part_tensor_view_type,
+    part_tensor_view_type_from_dims,
     tensor_view_type,
+    tensor_view_type_from_dims,
     vreg_type,
 )
 
@@ -1362,7 +1365,12 @@ def make_tensor_view(ptr, *, shape=None, strides=None):
     rank = len(shape)
     raw_ptr = unwrap_surface_value(ptr)
     elem = _pto.PtrType(raw_ptr.type).element_type
-    tv_type = tensor_view_type(rank, elem)
+    static_dims = _static_index_dims(shape)
+    tv_type = (
+        tensor_view_type_from_dims(static_dims, elem)
+        if static_dims is not None
+        else tensor_view_type(rank, elem)
+    )
     value = _pto.MakeTensorViewOp(
         tv_type,
         raw_ptr,
@@ -1474,7 +1482,12 @@ def partition_view(tv, *, offsets, sizes):
     src_type = _pto.TensorViewType(raw_source.type)
     rank = src_type.rank
     elem = src_type.element_type
-    ptv_type = part_tensor_view_type(rank, elem)
+    static_dims = _static_index_dims(sizes)
+    ptv_type = (
+        part_tensor_view_type_from_dims(static_dims, elem)
+        if static_dims is not None
+        else part_tensor_view_type(rank, elem)
+    )
     value = _pto.PartitionViewOp(
         ptv_type,
         raw_source,

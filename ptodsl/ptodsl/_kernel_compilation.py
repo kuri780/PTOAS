@@ -9,16 +9,28 @@
 
 from __future__ import annotations
 
+from ._runtime.launch import LaunchHandle, parse_launch_spec
 from ._tracing import ModuleArtifact, SignatureTracingRuntime
 
 
 class CompiledKernelHandle(ModuleArtifact):
     """One compiled ``@pto.jit`` specialization."""
 
-    def __init__(self, py_name: str, *, specialization_key, constexpr_bindings, module_factory):
+    def __init__(
+        self,
+        py_name: str,
+        *,
+        specialization_key,
+        constexpr_bindings,
+        module_factory,
+        module_spec,
+        kernel_signature,
+    ):
         super().__init__(py_name, module_factory=module_factory)
         self._specialization_key = specialization_key
         self._constexpr_bindings = dict(constexpr_bindings)
+        self._module_spec = module_spec
+        self._kernel_signature = kernel_signature
 
     @property
     def specialization_key(self):
@@ -28,11 +40,13 @@ class CompiledKernelHandle(ModuleArtifact):
     def constexpr_bindings(self):
         return dict(self._constexpr_bindings)
 
+    @property
+    def ir_function_name(self):
+        return self._module_spec.function_name
+
     def __getitem__(self, launch_spec):
-        raise NotImplementedError(
-            "PTODSL v1 compiled handles only support compile / inspect / verify / emit. "
-            "Runtime launch is not implemented yet."
-        )
+        grid, stream = parse_launch_spec(launch_spec)
+        return LaunchHandle(self, grid, stream)
 
 
 class KernelCompiler:
@@ -68,6 +82,8 @@ class KernelCompiler:
             specialization_key=specialization_key,
             constexpr_bindings=normalized_bindings,
             module_factory=runtime.build_module,
+            module_spec=self._module_spec,
+            kernel_signature=self._kernel_signature,
         )
         compiled.build()
         self._compiled_cache[specialization_key] = compiled

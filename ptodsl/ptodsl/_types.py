@@ -436,6 +436,14 @@ def tensor_view_type(rank: int, elem) -> Type:
     return _pto.TensorViewType.get(rank, _ensure_tensor_storage_dtype(elem, context="pto.tensor_view_type(...)"))
 
 
+def tensor_view_type_from_dims(dims, elem) -> Type:
+    """``!pto.tensor_view<d0x…xdN x elem>`` when every dimension is static."""
+    resolved_elem = _ensure_tensor_storage_dtype(elem, context="pto.tensor_view_type_from_dims(...)")
+    if all(isinstance(dim, int) for dim in dims):
+        return _pto.TensorViewType.get(list(dims), resolved_elem)
+    return tensor_view_type(len(dims), resolved_elem)
+
+
 def part_tensor_view_type(rank: int, elem) -> Type:
     """``!pto.partition_tensor_view<?x…xelem>`` with *rank* all-dynamic dims."""
     kDynamic = ShapedType.get_dynamic_size()
@@ -443,6 +451,14 @@ def part_tensor_view_type(rank: int, elem) -> Type:
         [kDynamic] * rank,
         _ensure_tensor_storage_dtype(elem, context="pto.part_tensor_view_type(...)"),
     )
+
+
+def part_tensor_view_type_from_dims(dims, elem) -> Type:
+    """``!pto.partition_tensor_view<d0x…xdN x elem>`` when every dimension is static."""
+    resolved_elem = _ensure_tensor_storage_dtype(elem, context="pto.part_tensor_view_type_from_dims(...)")
+    if all(isinstance(dim, int) for dim in dims):
+        return _pto.PartitionTensorViewType.get(list(dims), resolved_elem)
+    return part_tensor_view_type(len(dims), resolved_elem)
 
 
 __all__ = [
@@ -454,5 +470,6 @@ __all__ = [
     "ui8", "ui16", "ui32", "ui64",
     "index",
     "ptr", "vreg_type", "mask_type",
-    "tile_buf_type", "tensor_view_type", "part_tensor_view_type",
+    "tile_buf_type", "tensor_view_type", "tensor_view_type_from_dims",
+    "part_tensor_view_type", "part_tensor_view_type_from_dims",
 ]
