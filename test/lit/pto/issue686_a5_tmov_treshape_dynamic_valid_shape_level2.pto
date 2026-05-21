@@ -1,0 +1,40 @@
+// RUN: ptoas --pto-arch=a5 %s -o - 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @a5_tmov_treshape_dynamic_valid_shape_level2() {
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+
+    %src = pto.alloc_tile valid_row = %c16 valid_col = %c1
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1, v_row=?, v_col=?,
+                      blayout=col_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile valid_row = %c16 valid_col = %c1
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1, v_row=?, v_col=?,
+                      blayout=col_major, slayout=none_box, fractal=512, pad=0>
+
+    pto.tmov
+      ins(%src
+          : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1, v_row=?, v_col=?,
+                          blayout=col_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst
+          : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1, v_row=?, v_col=?,
+                          blayout=col_major, slayout=none_box, fractal=512, pad=0>)
+
+    return
+  }
+}
+
+// CHECK-LABEL: __global__ AICORE void a5_tmov_treshape_dynamic_valid_shape_level2()
+// CHECK: Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[SRC_ORIG:v[0-9]+]]
+// CHECK: Tile<TileType::Vec, float, 16, 1, BLayout::ColMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DST_ORIG:v[0-9]+]]
+// CHECK: Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[SRC:v[0-9]+]];
+// CHECK-NEXT: TRESHAPE([[SRC]], [[SRC_ORIG]]);
+// CHECK: Tile<TileType::Vec, float, 1, 16, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DST:v[0-9]+]];
+// CHECK-NEXT: TRESHAPE([[DST]], [[DST_ORIG]]);
+// CHECK: int32_t [[SRC_ROW:v[0-9]+]] = [[SRC_ORIG]].GetValidRow();
+// CHECK-NEXT: int32_t [[SRC_COL:v[0-9]+]] = [[SRC_ORIG]].GetValidCol();
+// CHECK-NEXT: [[SRC]].SetValidShape([[SRC_COL]], [[SRC_ROW]]);
+// CHECK-NEXT: int32_t [[DST_ROW:v[0-9]+]] = [[DST_ORIG]].GetValidRow();
+// CHECK-NEXT: int32_t [[DST_COL:v[0-9]+]] = [[DST_ORIG]].GetValidCol();
+// CHECK-NEXT: [[DST]].SetValidShape([[DST_COL]], [[DST_ROW]]);
+// CHECK-NEXT: TMOV([[DST]], [[SRC]]);
