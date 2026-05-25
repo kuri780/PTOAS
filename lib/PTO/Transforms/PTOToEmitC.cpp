@@ -5976,6 +5976,9 @@ struct PTOStoreScalarToEmitC : public OpConversionPattern<pto::StoreScalarOp> {
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "PTOAS__PTR_STORE",
         ArrayAttr{}, ArrayAttr{}, ValueRange{ptr, offset, val});
+    rewriter.create<emitc::CallOpaqueOp>(
+        op.getLoc(), TypeRange{}, "PTOAS__SCALAR_GM_STORE_FLUSH",
+        ArrayAttr{}, ArrayAttr{}, ValueRange{ptr});
 
     rewriter.eraseOp(op);
     return success();
