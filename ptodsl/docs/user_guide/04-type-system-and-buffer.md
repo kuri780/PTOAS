@@ -179,15 +179,17 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 ```python
 @pto.jit(target="a5")
 def kernel(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    tv = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+    tv = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
     return
 ```
 
-`make_tensor_view` wraps a Python-native tensor. You provide the logical shape and the stride of each dimension in **elements** (not bytes). The resulting `TensorView` can be partitioned for `tile.load`/`tile.store`.
+`make_tensor_view` wraps an explicit GM pointer plus authored metadata. You provide the logical shape and the stride of each dimension in **elements** (not bytes). The resulting `TensorView` can be partitioned for `tile.load`/`tile.store`.
 
 ### TensorView attributes
 

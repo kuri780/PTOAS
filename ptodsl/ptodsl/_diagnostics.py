@@ -50,9 +50,9 @@ def jit_missing_annotation_error(name: str) -> TypeError:
     """Return one diagnostic for missing ``@pto.jit`` positional ABI annotations."""
     return TypeError(
         f"@pto.jit positional parameter '{name}' does not declare an entry ABI annotation. "
-        "Use pto.tensor_spec(...) for runtime tensors, a PTO scalar type such as "
-        "pto.i32/pto.f32/pto.i1 for runtime scalars, or move compile-time values "
-        "to keyword-only pto.constexpr parameters."
+        'Use an explicit GM pointer such as pto.ptr(pto.f32, "gm") for device buffers, '
+        "a PTO scalar type such as pto.i32/pto.f32/pto.i1 for runtime scalars, "
+        "or move compile-time values to keyword-only pto.constexpr parameters."
     )
 
 
@@ -60,11 +60,60 @@ def jit_illegal_formal_annotation_error(name: str, annotation: object) -> TypeEr
     """Return one diagnostic for unsupported ``@pto.jit`` positional annotations."""
     return TypeError(
         f"@pto.jit positional parameter '{name}' uses unsupported entry annotation {annotation!r}. "
-        "The public @pto.jit entry ABI accepts pto.tensor_spec(...) runtime tensors, "
+        'The public @pto.jit entry ABI accepts explicit GM pointers such as pto.ptr(pto.f32, "gm"), '
         "PTO scalar annotations such as pto.i32/pto.f32/pto.i1 for runtime scalars, "
         "and keyword-only pto.constexpr compile-time parameters. "
-        "Low-level PTODSL types such as pto.ptr(...), Tile, PartitionTensorView, and VReg "
-        "belong inside the kernel body or across sub-kernel boundaries, not at the host/kernel entry."
+        "Legacy host tensor annotations such as pto.tensor_spec(...), and low-level PTODSL "
+        "types such as Tile, PartitionTensorView, VReg, or non-entry pointer forms do not "
+        "belong at the host/kernel entry."
+    )
+
+
+def jit_legacy_tensor_spec_entry_error(name: str, annotation: object) -> TypeError:
+    """Return one diagnostic for legacy ``pto.tensor_spec(...)`` entry annotations."""
+    return TypeError(
+        f"@pto.jit positional parameter '{name}' still uses legacy host-tensor entry annotation "
+        f"{annotation!r}. The public @pto.jit entry ABI no longer accepts pto.tensor_spec(...) "
+        'mainline. Migrate this parameter to an explicit GM pointer such as pto.ptr(pto.f32, "gm"), '
+        "pass shape/stride metadata as runtime scalars, and reconstruct the tensor view in-kernel "
+        "with pto.make_tensor_view(...)."
+    )
+
+
+def jit_non_gm_ptr_entry_error(name: str, annotation: object) -> TypeError:
+    """Return one diagnostic for non-GM pointer entry annotations."""
+    return TypeError(
+        f"@pto.jit positional parameter '{name}' uses non-GM pointer entry annotation {annotation!r}. "
+        'The host-visible @pto.jit boundary only accepts explicit GM pointers such as pto.ptr(pto.f32, "gm"). '
+        "This boundary contract does not change the global pto.ptr(...) defaults; "
+        'spell out "gm" explicitly at the @pto.jit entry.'
+    )
+
+
+def jit_keyword_only_non_constexpr_error(name: str, annotation: object) -> TypeError:
+    """Return one diagnostic for keyword-only params that are not ``pto.constexpr``."""
+    return TypeError(
+        f"@pto.jit keyword-only parameter '{name}' uses unsupported compile-time annotation {annotation!r}. "
+        "Compile-time @pto.jit parameters must remain keyword-only pto.constexpr values in this change; "
+        "move runtime data to positional pointer/scalar parameters instead."
+    )
+
+
+def jit_constexpr_missing_default_error(name: str) -> TypeError:
+    """Return one diagnostic for ``pto.constexpr`` params missing a default value."""
+    return TypeError(
+        f"@pto.jit constexpr parameter '{name}' must declare a default value until explicit "
+        "compile-time specialization is implemented. Keep this parameter keyword-only and "
+        "override it through .compile(...) when a non-default specialization is needed."
+    )
+
+
+def make_tensor_view_missing_metadata_error(ptr: object) -> TypeError:
+    """Return one diagnostic for ``make_tensor_view`` calls missing shape/stride metadata."""
+    return TypeError(
+        f"make_tensor_view({ptr!r}, ...) requires explicit shape= and strides= in the pointer-first "
+        "@pto.jit contract. Do not rely on host tensor proxy metadata; pass runtime shape/stride "
+        "scalars through the kernel entry and forward them explicitly here."
     )
 
 
@@ -203,7 +252,12 @@ __all__ = [
     "explicit_mode_required_with_context_error",
     "host_tensor_metadata_error",
     "jit_illegal_formal_annotation_error",
+    "jit_constexpr_missing_default_error",
+    "jit_keyword_only_non_constexpr_error",
+    "jit_legacy_tensor_spec_entry_error",
     "jit_missing_annotation_error",
+    "jit_non_gm_ptr_entry_error",
+    "make_tensor_view_missing_metadata_error",
     "illegal_inline_subkernel_placement_error",
     "illegal_subkernel_placement_error",
     "invalid_jit_mode_error",

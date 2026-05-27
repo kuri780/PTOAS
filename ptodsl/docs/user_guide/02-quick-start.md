@@ -11,19 +11,18 @@ from ptodsl import pto
 
 @pto.jit(target="a5")
 def tile_copy(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
     """Copy one 2D tensor tile from A to O."""
 
-    rows = A.shape[0]
-    cols = A.shape[1]
-
-    # Describe the GM tensors.
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    # Describe the GM tensors explicitly.
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
     # Allocate UB tiles for one row-strip block.
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
@@ -47,15 +46,15 @@ Let us step through each piece.
 def tile_copy(A, O, *, BLOCK: pto.constexpr = 128):
 ```
 
-`@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A` and `O` are Python-native tensors — they arrive from NumPy, torch-npu, or any framework that provides a shape and strides. Their ABI contract is declared with `pto.tensor_spec(...)`. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.constexpr`; the compiler specializes the kernel for each tile width.
+`@pto.jit` marks this function as a launchable PTO kernel. The positional parameters `A_ptr` and `O_ptr` are explicit GM pointers, while `rows` and `cols` are runtime scalar metadata passed at launch time. The keyword-only argument `BLOCK` is a compile-time constant declared with `pto.constexpr`; the compiler specializes the kernel for each tile width.
 
 ### Describing GM tensors
 
 ```python
-a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
 ```
 
-`make_tensor_view` wraps a Python tensor into a `TensorView` — a descriptor that tells the kernel how to address the tensor in global memory. You provide the logical shape and the stride (in elements) of each dimension.
+`make_tensor_view` wraps an explicit GM pointer into a `TensorView` — a descriptor that tells the kernel how to address the tensor in global memory. You provide the logical shape and the stride (in elements) of each dimension.
 
 ### Allocating on-chip buffers
 
@@ -91,7 +90,7 @@ pto.tile.store(o_tile, o_part)
 
 A copy kernel strips the example down to the essential PTODSL boundary objects:
 
-- host tensors entering `@pto.jit`
+- explicit GM pointers and runtime scalars entering `@pto.jit`
 - `TensorView` descriptors over GM tensors
 - UB `Tile` allocation
 - `PartitionTensorView` slices
@@ -110,16 +109,15 @@ from ptodsl import pto
 
 @pto.jit(target="a5")
 def blocked_copy(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
     tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
 
@@ -131,7 +129,7 @@ def blocked_copy(
         pto.tile.store(tile, o_part)
 ```
 
-Here `rows` and `cols` are dynamic — they come from `A.shape` and can differ across launches. The loop bound depends on `rows`, so `pto.for_` records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `constexpr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
+Here `rows` and `cols` are dynamic launch-time scalars. The loop bound depends on `rows`, so `pto.for_` records a structured loop in the IR rather than unrolling at trace time. The `BLOCK` parameter stays `constexpr` because it is a tuning knob, not data-dependent. Chapter 5 covers this distinction in detail.
 
 ## 2.3 Compile and launch
 
@@ -148,7 +146,7 @@ A = np.random.randn(4, 128).astype(np.float32)
 O = np.empty_like(A)
 
 # Launch on the NPU.
-compiled[1, None](A, O)
+compiled[1, None](A.ctypes.data, O.ctypes.data, 4, 128)
 ```
 
 - `.compile(**constexprs)` traces the kernel body, lowers it through the PTOAS pipeline, and returns a compiled handle. Repeated calls with the same tensor ABI contract and constexpr configuration hit the cache.
@@ -160,7 +158,17 @@ For workloads that can be parallelized across multiple blocks, specify a grid:
 
 ```python
 # Process batch * heads slices in parallel.
-compiled[batch * heads, stream](Q, K, V, O)
+compiled[batch * heads, stream](
+    Q.ctypes.data,
+    K.ctypes.data,
+    V.ctypes.data,
+    O.ctypes.data,
+    batch,
+    seq_q,
+    seq_k,
+    heads,
+    dim,
+)
 ```
 
 Inside the kernel, each block queries its index:
@@ -203,16 +211,16 @@ def add_rows(a_tile: pto.Tile, b_tile: pto.Tile, o_tile: pto.Tile,
 # Single kernel entry in explicit mode — micro-instruction staging plus SIMD sub-kernel.
 @pto.jit(target="a5", mode="explicit")
 def vec_add_micro(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
-    B: pto.tensor_spec(rank=1, dtype=pto.f32),
-    O: pto.tensor_spec(rank=1, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    N: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    N = A.shape[0]
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[N], strides=[1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[N], strides=[1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[N], strides=[1])
 
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)

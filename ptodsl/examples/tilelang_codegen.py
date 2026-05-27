@@ -12,7 +12,7 @@ TileLang-generated explicit PTODSL kernel.
 This file keeps the original generated kernel body essentially intact and only
 adds the minimum wrapper needed to make it usable as a compile/test target:
 
-- public `@pto.jit` host ABI via `tensor_spec(...)`
+- public `@pto.jit` host ABI via explicit GM pointers
 - `--emit-mlir` entry point
 - compile smoke path for regression tests
 """
@@ -132,11 +132,11 @@ def _tilelang_generated_body(
     insert_sync=False,
 )
 def main_kernel(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
-    B: pto.tensor_spec(rank=1, dtype=pto.f32),
-    C: pto.tensor_spec(rank=1, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tilelang_generated_body(A.data_handle, B.data_handle, C.data_handle)
+    _tilelang_generated_body(A_ptr, B_ptr, C_ptr)
 
 
 def _tilelang_generated_body_small(A, B, C):
@@ -225,11 +225,11 @@ def _tilelang_generated_body_small(A, B, C):
     insert_sync=False,
 )
 def main_kernel_precision_test(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
-    B: pto.tensor_spec(rank=1, dtype=pto.f32),
-    C: pto.tensor_spec(rank=1, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tilelang_generated_body_small(A.data_handle, B.data_handle, C.data_handle)
+    _tilelang_generated_body_small(A_ptr, B_ptr, C_ptr)
 
 
 def emit_mlir():
@@ -279,7 +279,7 @@ def run_precision_case(torch) -> None:
     compile_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    compiled[1, stream](a_t, b_t, c_t)
+    compiled[1, stream](a_t.data_ptr(), b_t.data_ptr(), c_t.data_ptr())
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0
 

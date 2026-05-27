@@ -37,8 +37,12 @@ from ptodsl import pto
 
 
 @pto.jit(name="my_kernel", kernel_kind="vector", target="a5", mode="explicit")
-def my_kernel(inp: pto.tensor_spec(rank=2, dtype=pto.f32),
-              out: pto.tensor_spec(rank=2, dtype=pto.f32)):
+def my_kernel(
+    inp_ptr: pto.ptr(pto.f32, "gm"),
+    out_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+):
     # write kernel here
     ...
 

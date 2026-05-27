@@ -66,23 +66,23 @@ def _make_softmax_kernel(name: str, *, rows: int, seq: int):
         insert_sync=False
     )
     def kernel(
-        scores: pto.tensor_spec(rank=2, dtype=pto.f32),
-        out: pto.tensor_spec(rank=2, dtype=pto.f32),
+        scores_ptr: pto.ptr(pto.f32, "gm"),
+        out_ptr: pto.ptr(pto.f32, "gm"),
+        runtime_seq: pto.i32,
+        runtime_rows: pto.i32,
     ):
         lane_num = pto.elements_per_vreg(pto.f32)
         physical_rows = ((rows + lane_num - 1) // lane_num) * lane_num
         scores_tile_bytes = seq * physical_rows * pto.bytewidth(pto.f32)
-        runtime_seq = scores.shape[0]
-        runtime_rows = scores.shape[1]
         total_elems = runtime_rows * runtime_seq
 
         scores_view = pto.make_tensor_view(
-            scores,
+            scores_ptr,
             shape=[1, 1, 1, runtime_seq, runtime_rows],
             strides=[total_elems, total_elems, total_elems, runtime_rows, 1],
         )
         out_view = pto.make_tensor_view(
-            out,
+            out_ptr,
             shape=[1, 1, 1, runtime_seq, runtime_rows],
             strides=[total_elems, total_elems, total_elems, runtime_rows, 1],
         )
@@ -248,8 +248,10 @@ def run_case(case: dict[str, object], torch) -> None:
 
     t0 = time.perf_counter()
     compiled[1, stream](
-        scores_t,
-        out_t,
+        scores_t.data_ptr(),
+        out_t.data_ptr(),
+        case["seq"],
+        case["rows"],
     )
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0

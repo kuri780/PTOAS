@@ -49,36 +49,38 @@ ROWS = 9
     insert_sync=False,
 )
 def predicate_pack_part_kernel(
-    inp: pto.tensor_spec(rank=2, dtype=pto.ui8),
-    out: pto.tensor_spec(rank=2, dtype=pto.ui8),
+    inp_ptr: pto.ptr(pto.ui8, "gm"),
+    out_ptr: pto.ptr(pto.ui8, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    inp_total = inp.shape[0] * inp.shape[1]
-    out_total = out.shape[0] * out.shape[1]
+    inp_total = rows * cols
+    out_total = ROWS * ROW_BYTES
     offsets = [0, 0, 0, 0, 0]
     inp_view = pto.make_tensor_view(
-        inp,
-        shape=[1, 1, 1, inp.shape[0], inp.shape[1]],
-        strides=[inp_total, inp_total, inp_total, inp.shape[1], 1],
+        inp_ptr,
+        shape=[1, 1, 1, rows, cols],
+        strides=[inp_total, inp_total, inp_total, cols, 1],
     )
     out_view = pto.make_tensor_view(
-        out,
-        shape=[1, 1, 1, out.shape[0], out.shape[1]],
-        strides=[out_total, out_total, out_total, out.shape[1], 1],
+        out_ptr,
+        shape=[1, 1, 1, ROWS, ROW_BYTES],
+        strides=[out_total, out_total, out_total, ROW_BYTES, 1],
     )
-    inp_part = pto.partition_view(inp_view, offsets=offsets, sizes=[1, 1, 1, inp.shape[0], inp.shape[1]])
-    out_part = pto.partition_view(out_view, offsets=offsets, sizes=[1, 1, 1, out.shape[0], out.shape[1]])
+    inp_part = pto.partition_view(inp_view, offsets=offsets, sizes=[1, 1, 1, rows, cols])
+    out_part = pto.partition_view(out_view, offsets=offsets, sizes=[1, 1, 1, ROWS, ROW_BYTES])
 
     src_tile = pto.alloc_tile(
         shape=[1, 32],
         dtype=pto.ui8,
         addr=pto.const(0, dtype=pto.i64),
-        valid_shape=[inp.shape[0], inp.shape[1]],
+        valid_shape=[rows, cols],
     )
     dst_tile = pto.alloc_tile(
         shape=[ROWS, ROW_BYTES],
         dtype=pto.ui8,
         addr=pto.const(1024, dtype=pto.i64),
-        valid_shape=[out.shape[0], out.shape[1]],
+        valid_shape=[ROWS, ROW_BYTES],
     )
 
     pto.tile.load(inp_part, src_tile)

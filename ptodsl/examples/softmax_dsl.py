@@ -46,25 +46,25 @@ def _make_softmax_kernel(name: str, *, rows: int, seq: int):
         insert_sync=False,
     )
     def kernel(
-        scores: pto.tensor_spec(rank=2, dtype=pto.f32),
-        out: pto.tensor_spec(rank=2, dtype=pto.f32),
+        scores_ptr: pto.ptr(pto.f32, "gm"),
+        out_ptr: pto.ptr(pto.f32, "gm"),
+        runtime_rows: pto.i32,
+        runtime_seq: pto.i32,
     ):
         packed_rows = pto.elements_per_vreg(pto.f32)
         physical_rows = ((rows + packed_rows - 1) // packed_rows) * packed_rows
         scores_tile_bytes = seq * physical_rows * pto.bytewidth(pto.f32)
-        runtime_rows = scores.shape[0]
-        runtime_seq = scores.shape[1]
         has_rows = runtime_rows > 0
 
         with pto.if_(has_rows) as has_rows_br:
             with has_rows_br.then_:
                 scores_view = pto.make_tensor_view(
-                    scores,
+                    scores_ptr,
                     shape=[seq, rows],
                     strides=[1, seq],
                 )
                 out_view = pto.make_tensor_view(
-                    out,
+                    out_ptr,
                     shape=[seq, rows],
                     strides=[1, seq],
                 )

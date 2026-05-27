@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from .._bootstrap import make_context
 from mlir.ir import BF16Type, F16Type, F32Type, IndexType, IntegerType
 
 from .._kernel_signature import DeviceParameterSpec, RuntimeScalarParameterSpec, TensorSpecParameterSpec
@@ -52,7 +53,13 @@ def _device_param_cpp_type(annotation) -> str:
 
 
 def _runtime_scalar_cpp_type(annotation) -> str:
-    type_obj = _resolve(annotation)
+    try:
+        type_obj = _resolve(annotation)
+    except RuntimeError as exc:
+        if "requires a Context" not in str(exc):
+            raise
+        with make_context():
+            type_obj = _resolve(annotation)
     if IndexType.isinstance(type_obj):
         return "int64_t"
     if IntegerType.isinstance(type_obj):
@@ -86,9 +93,12 @@ def launch_symbol_name(ir_function_name: str) -> str:
     return f"ptodsl_launch_{ir_function_name}"
 
 
-def _tensor_metadata_cpp_type() -> str:
-    # Host-visible tensor shape/stride metadata is marshaled as 64-bit integers.
-    return "int64_t"
+def _legacy_tensor_entry_abi_error(name: str) -> TypeError:
+    return TypeError(
+        f"legacy host-tensor launch parameter '{name}' is no longer supported by the public @pto.jit "
+        'runtime ABI. Use an explicit GM pointer such as pto.ptr(pto.f32, "gm") plus runtime '
+        "shape/stride scalars instead."
+    )
 
 
 def generate_launch_cpp(*, ir_function_name: str, kernel_signature) -> str:
@@ -111,21 +121,7 @@ def generate_launch_cpp(*, ir_function_name: str, kernel_signature) -> str:
             kernel_args.append(param.name)
             continue
         if isinstance(param, TensorSpecParameterSpec):
-            cpp_type = _elem_cpp_type(param.tensor_spec.dtype)
-            meta_cpp_type = _tensor_metadata_cpp_type()
-            rank = param.tensor_spec.rank
-            gm_params.append(f"__gm__ {cpp_type} *{param.name}_ptr")
-            host_params.append(f"{cpp_type} *{param.name}_ptr")
-            kernel_args.append(f"(__gm__ {cpp_type} *){param.name}_ptr")
-            for idx in range(rank):
-                gm_params.append(f"{meta_cpp_type} {param.name}_shape_{idx}")
-                host_params.append(f"{meta_cpp_type} {param.name}_shape_{idx}")
-                kernel_args.append(f"{param.name}_shape_{idx}")
-            for idx in range(rank):
-                gm_params.append(f"{meta_cpp_type} {param.name}_stride_{idx}")
-                host_params.append(f"{meta_cpp_type} {param.name}_stride_{idx}")
-                kernel_args.append(f"{param.name}_stride_{idx}")
-            continue
+            raise _legacy_tensor_entry_abi_error(param.name)
         raise TypeError(f"unsupported launch parameter spec: {param!r}")
 
     gm_sig = ", ".join(gm_params)

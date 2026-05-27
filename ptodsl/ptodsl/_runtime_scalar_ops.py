@@ -13,6 +13,7 @@ from ._types import (
     _integer_signedness,
     _materialize_integer_literal,
     _restore_integer_signedness,
+    _signless_integer_type,
     _strip_integer_signedness,
 )
 
@@ -122,6 +123,14 @@ def _reconcile_typed_operands(lhs, rhs):
         lhs = arith.IndexCastOp(IndexType.get(), _strip_integer_signedness(lhs)).result
         return lhs, rhs, "index"
 
+    if IntegerType.isinstance(lhs_type) and IntegerType.isinstance(rhs_type):
+        lhs_width = IntegerType(lhs_type).width
+        rhs_width = IntegerType(rhs_type).width
+        target_type = lhs_type if lhs_width >= rhs_width else rhs_type
+        lhs = _coerce_runtime_integer_like(lhs, target_type)
+        rhs = _coerce_runtime_integer_like(rhs, target_type)
+        return lhs, rhs, "integer"
+
     raise TypeError(
         "runtime scalar operators require matching scalar types or an index/integer pair; "
         f"got {lhs_type} and {rhs_type}"
@@ -145,6 +154,31 @@ def _materialize_literal(value, anchor_type):
         )
 
     return _materialize_integer_literal(anchor_type, value)
+
+
+def _coerce_runtime_integer_like(raw_value, target_type):
+    if IndexType.isinstance(raw_value.type):
+        signless_target = _signless_integer_type(target_type)
+        adapted = arith.IndexCastOp(signless_target, raw_value).result
+        return _restore_integer_signedness(adapted, target_type)
+
+    source_type = raw_value.type
+    source_width = IntegerType(source_type).width
+    target_width = IntegerType(target_type).width
+    signless_source = _strip_integer_signedness(raw_value)
+    signless_target = _signless_integer_type(target_type)
+
+    if source_width < target_width:
+        source_signedness = _integer_signedness(source_type)
+        if source_signedness == "unsigned":
+            widened = arith.ExtUIOp(signless_target, signless_source).result
+        else:
+            widened = arith.ExtSIOp(signless_target, signless_source).result
+        return _restore_integer_signedness(widened, target_type)
+    if source_width > target_width:
+        truncated = arith.TruncIOp(signless_target, signless_source).result
+        return _restore_integer_signedness(truncated, target_type)
+    return _restore_integer_signedness(signless_source, target_type)
 
 
 def classify_runtime_scalar_type(type_obj):

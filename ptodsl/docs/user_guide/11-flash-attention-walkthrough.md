@@ -44,7 +44,10 @@ def flash_attention(Q, K, V, *, O=None, causal=False,
     compiled = flash_attention_kernel.compile(
         BLOCK_Q=block_q, BLOCK_KV=block_kv, CAUSAL=causal,
     )
-    compiled[batch * heads, stream](Q, K, V, O)
+    compiled[batch * heads, stream](
+        Q.data_ptr(), K.data_ptr(), V.data_ptr(), O.data_ptr(),
+        batch, seq_q, seq_k, heads, dim,
+    )
     return O
 ```
 
@@ -62,10 +65,15 @@ The wrapper knows nothing about tiles, UB, or pipelines. It is the boundary betw
 ```python
 @pto.jit(target="a5", mode="explicit")
 def flash_attention_kernel(
-    Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-    K: pto.tensor_spec(rank=4, dtype=pto.f32),
-    V: pto.tensor_spec(rank=4, dtype=pto.f32),
-    O: pto.tensor_spec(rank=4, dtype=pto.f32),
+    Q_ptr: pto.ptr(pto.f32, "gm"),
+    K_ptr: pto.ptr(pto.f32, "gm"),
+    V_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    batch: pto.i32,
+    seq_q: pto.i32,
+    seq_k: pto.i32,
+    heads: pto.i32,
+    dim: pto.i32,
     *,
     BLOCK_Q: pto.constexpr = 128,
     BLOCK_KV: pto.constexpr = 128,
@@ -76,23 +84,35 @@ def flash_attention_kernel(
     return
 ```
 
-The `@pto.jit(mode="explicit")` decorator marks the compile + launch boundary. Inputs are Python-native tensors; outputs are written in-place to `O`. Keyword-only `constexpr` parameters (`BLOCK_Q`, `BLOCK_KV`, `CAUSAL`) are baked at compile time.
+The `@pto.jit(mode="explicit")` decorator marks the compile + launch boundary. Inputs and outputs arrive as explicit GM pointers plus runtime shape metadata; keyword-only `constexpr` parameters (`BLOCK_Q`, `BLOCK_KV`, `CAUSAL`) are baked at compile time.
 
 ### 11.3.1 TensorView construction
 
 <!-- ptodsl-doc-test: {"mode":"compile_fragment","fixture":"flash_attention.l1_tensor_views","symbol":"flash_attention_l1_tensor_views_probe","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"CAUSAL":false,"NUM_STAGES":2}} -->
 ```python
-q_view = pto.make_tensor_view(Q, shape=[batch, seq_q, heads, dim],
-                              strides=Q.strides)
-k_view = pto.make_tensor_view(K, shape=[batch, seq_k, heads, dim],
-                              strides=K.strides)
-v_view = pto.make_tensor_view(V, shape=[batch, seq_k, heads, dim],
-                              strides=V.strides)
-o_view = pto.make_tensor_view(O, shape=[batch, seq_q, heads, dim],
-                              strides=O.strides)
+q_view = pto.make_tensor_view(
+    Q_ptr,
+    shape=[batch, seq_q, heads, dim],
+    strides=[seq_q * heads * dim, heads * dim, dim, 1],
+)
+k_view = pto.make_tensor_view(
+    K_ptr,
+    shape=[batch, seq_k, heads, dim],
+    strides=[seq_k * heads * dim, heads * dim, dim, 1],
+)
+v_view = pto.make_tensor_view(
+    V_ptr,
+    shape=[batch, seq_k, heads, dim],
+    strides=[seq_k * heads * dim, heads * dim, dim, 1],
+)
+o_view = pto.make_tensor_view(
+    O_ptr,
+    shape=[batch, seq_q, heads, dim],
+    strides=[seq_q * heads * dim, heads * dim, dim, 1],
+)
 ```
 
-`make_tensor_view` wraps each framework tensor with a PTO TensorView descriptor — a GM pointer paired with shape and stride metadata. These descriptors are what the rest of the kernel uses to address global memory. No data moves yet.
+`make_tensor_view` wraps each explicit GM pointer with a PTO TensorView descriptor — a GM pointer paired with authored shape and stride metadata. These descriptors are what the rest of the kernel uses to address global memory. No data moves yet.
 
 ### 11.3.2 SPMD launch contract
 

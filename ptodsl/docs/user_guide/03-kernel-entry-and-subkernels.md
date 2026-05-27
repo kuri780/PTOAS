@@ -31,13 +31,17 @@ decorators define sub-kernels that are called from within `@pto.jit`.
 ```python
 @pto.jit(target="a5", mode="auto")
 def kernel_name(
-    tensor_arg_1: pto.tensor_spec(rank=1, dtype=pto.f32),  # Python-native tensor (positional)
-    tensor_arg_2: pto.tensor_spec(rank=1, dtype=pto.f32),  # Python-native tensor (positional)
+    x_ptr: pto.ptr(pto.f32, "gm"),  # explicit GM pointer (positional)
+    y_ptr: pto.ptr(pto.f32, "gm"),  # explicit GM pointer (positional)
+    rows: pto.i32,                  # runtime metadata (positional)
+    cols: pto.i32,                  # runtime metadata (positional)
     *,
     CONST_A: pto.constexpr = 128,  # compile-time constant (keyword-only)
     CONST_B: pto.constexpr = 64,   # compile-time constant (keyword-only)
 ):
-    # ... tensor views, tile allocation, and kernel logic ...
+    x_view = pto.make_tensor_view(x_ptr, shape=[rows, cols], strides=[cols, 1])
+    y_view = pto.make_tensor_view(y_ptr, shape=[rows, cols], strides=[cols, 1])
+    # ... tile allocation, view partitioning, and kernel logic ...
     return
 ```
 
@@ -48,27 +52,27 @@ position in the signature, and way to supply the value:
 
 | Parameter kind | Position | Annotation | Pass the value at |
 |---|---|---|---|
-| **Tensor** | positional (before `*`) | `pto.tensor_spec(rank=N, dtype=...)` | launch time |
+| **Device buffer** | positional (before `*`) | `pto.ptr(dtype, "gm")` | launch time |
 | **Runtime scalar** | positional (before `*`) | `pto.i32`, `pto.f32`, `pto.i1`, etc. | launch time |
 | **Compile-time constant** | keyword-only (after `*`) | `pto.constexpr = <default>` | compile time |
 
-#### 1. Tensor parameters
+#### 1. Device-buffer parameters
 
-Declare a positional parameter with `pto.tensor_spec(rank=..., dtype=...)`.
-At launch time, pass a **Python-native tensor** — a NumPy array, a torch-npu
-tensor, or any object with `.shape`, `.dtype`, `.strides` (or `.stride()`), and
-a data pointer (`.data_ptr()` or `.ptr`):
+Declare a positional parameter with an explicit GM pointer type such as
+`pto.ptr(pto.f32, "gm")`. At launch time, pass a pointer-like value — for
+example, a framework tensor with `.data_ptr()` or an integer device address:
 
 ```python
 @pto.jit(target="a5")
 def my_kernel(
-    X: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    X_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    # Inside the body, access shape/strides/dtype directly:
-    rows, cols = X.shape[0], X.shape[1]
-    # Then wrap with make_tensor_view(...) to build a GM descriptor:
-    x_view = pto.make_tensor_view(X, shape=X.shape, strides=X.strides)
+    # Inside the body, reconstruct the GM descriptor explicitly:
+    x_view = pto.make_tensor_view(X_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 ```
 
 #### 2. Runtime scalar parameters
@@ -80,7 +84,7 @@ Declare a positional parameter with a PTO scalar annotation (`pto.i32`,
 ```python
 @pto.jit(target="a5")
 def my_kernel(
-    X: pto.tensor_spec(rank=2, dtype=pto.f32),
+    X_ptr: pto.ptr(pto.f32, "gm"),
     n: pto.i32,          # pass an int at launch
     alpha: pto.f32,      # pass a float at launch
 ):
@@ -97,7 +101,7 @@ Pass the value to `.compile(...)` — **not** at launch time:
 ```python
 @pto.jit(target="a5")
 def my_kernel(
-    X: pto.tensor_spec(rank=2, dtype=pto.f32),
+    X_ptr: pto.ptr(pto.f32, "gm"),
     *,
     BLOCK: pto.constexpr = 128,
 ):
@@ -117,14 +121,17 @@ Bringing all three kinds together:
 ```python
 @pto.jit(target="a5", mode="auto")
 def scaled_bias_add(
-    X: pto.tensor_spec(rank=2, dtype=pto.f32),   # tensor
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),   # tensor
+    X_ptr: pto.ptr(pto.f32, "gm"),                # device buffer
+    O_ptr: pto.ptr(pto.f32, "gm"),                # device buffer
+    rows: pto.i32,                                 # runtime scalar
+    cols: pto.i32,                                 # runtime scalar
     alpha: pto.f32,                               # runtime scalar
     bias: pto.f32,                                # runtime scalar
     *,
     BLOCK: pto.constexpr = 128,                   # compile-time constant
 ):
-    rows, cols = X.shape[0], X.shape[1]
+    x_view = pto.make_tensor_view(X_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     # ... use alpha, bias, BLOCK inside the kernel body ...
     return
 ```
@@ -133,19 +140,19 @@ def scaled_bias_add(
 # Step 1 — compile: constexpr values go to .compile()
 compiled = scaled_bias_add.compile(BLOCK=64)
 
-# Step 2 — launch: tensors and runtime scalars go to compiled[grid, stream](...)
+# Step 2 — launch: pointers and runtime scalars go to compiled[grid, stream](...)
 import numpy as np
 X = np.random.randn(4, 128).astype(np.float32)
 O = np.empty_like(X)
-compiled[1, None](X, O, 2.0, 1.0)   # alpha=2.0, bias=1.0
+compiled[1, None](X.ctypes.data, O.ctypes.data, 4, 128, 2.0, 1.0)
 ```
 
 ### What is NOT accepted at the entry
 
 The following types are intentionally **not** accepted as `@pto.jit` parameters:
 
-- `pto.ptr(...)` — typed pointers are available inside the kernel body and
-  across sub-kernel boundaries, but not at the host/kernel entry.
+- `pto.tensor_spec(...)` — legacy host-tensor annotations are no longer part
+  of the public `@pto.jit` contract.
 - `Tile`, `PartitionTensorView`, `VReg` — these are created inside the kernel
   body, not passed from the host.
 
@@ -165,9 +172,8 @@ programming model:
   everything available in `auto`.
 
 `mode` changes what you can write **inside the kernel body**. It does **not**
-change the recommended host-visible entry ABI: both modes use the same
-`tensor_spec(...)` + runtime scalar + `constexpr` contract at the `@pto.jit`
-boundary.
+change the host-visible entry ABI: both modes use the same
+`ptr + runtime scalar + constexpr` contract at the `@pto.jit` boundary.
 
 Section 3.2 covers the two models in detail.
 
@@ -181,17 +187,17 @@ import numpy as np
 # Compile (traces the body, lowers through PTOAS, caches the result)
 compiled = kernel_name.compile(CONST_A=128, CONST_B=64)
 
-# Allocate or obtain concrete tensors that match the declared host ABI.
+# Allocate or obtain concrete buffers that match the declared host ABI.
 A = np.random.randn(4, 128).astype(np.float32)
 O = np.empty_like(A)
 
 # Launch on NPU
-compiled[grid, stream](A, O)
+compiled[grid, stream](A.ctypes.data, O.ctypes.data, 4, 128)
 ```
 
 - `.compile(**constexprs)` — traces the kernel body with the given constexpr
   values, lowers the IR, and returns a compiled handle. Subsequent calls with
-  the same specialization key (function identity, tensor ABI signature,
+  the same specialization key (function identity, entry annotation signature,
   constexpr values) hit the cache.
 - `compiled[grid, stream](args...)` — launches the compiled kernel. `grid` is
   the number of SPMD blocks (an integer); `stream` is the NPU stream (`None`
@@ -213,17 +219,17 @@ Available inside a `@pto.jit` body:
 ```python
 @pto.jit(target="a5", mode="auto")
 def my_kernel(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=B.shape, strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
@@ -256,11 +262,11 @@ def add_rows(
     a_tile: pto.Tile,
     b_tile: pto.Tile,
     o_tile: pto.Tile,
-    rows: pto.index,
-    cols: pto.index,
+    rows: pto.i32,
+    cols: pto.i32,
 ):
     VEC = pto.elements_per_vreg(pto.f32)
-    initial_remained = scalar.index_cast(pto.i32, cols)
+    initial_remained = cols
     with pto.for_(0, rows, step=1) as r:
         col_loop = pto.for_(0, cols, step=VEC).carry(remained=initial_remained)
         with col_loop:
@@ -275,17 +281,17 @@ def add_rows(
 
 @pto.jit(target="a5", mode="auto")
 def my_kernel(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=B.shape, strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
 
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     b_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
@@ -504,9 +510,9 @@ constants.
 ```python
 @pto.simd
 def add_rows(a_tile: pto.Tile, b_tile: pto.Tile, o_tile: pto.Tile,
-             rows: pto.index, cols: pto.index):
+             rows: pto.i32, cols: pto.i32):
     VEC = pto.elements_per_vreg(pto.f32)
-    initial_remained = scalar.index_cast(pto.i32, cols)
+    initial_remained = cols
     with pto.for_(0, rows, step=1) as r:
         col_loop = pto.for_(0, cols, step=VEC).carry(remained=initial_remained)
         with col_loop:
@@ -645,7 +651,7 @@ pointers:
 
 | Boundary | Allowed |
 |----------|---------|
-| Host → `@pto.jit` | Python-native tensors |
+| Host → `@pto.jit` | explicit GM pointers + runtime scalars |
 | `@pto.jit(mode="auto")` → sub-kernel | `Tile`, PTO scalars (compiler handles staging + sync) |
 | `@pto.jit(mode="explicit")` → sub-kernel | `Tile`, `PartitionTensorView`, `pto.ptr`, PTO scalars |
 | `@pto.jit` → `with pto.{cube,simd,simt}:` | `Tile` captured from enclosing scope |
@@ -658,13 +664,13 @@ pointers:
 `pto.constexpr` marks a `@pto.jit` keyword-only parameter as a compile-time
 constant. The compiler specializes the kernel for each combination of constexpr
 values, and the compiled artifact is cached by specialization key together with
-the kernel's tensor ABI contract.
+the kernel's entry annotation contract.
 
 <!-- ptodsl-doc-test: {"mode":"compile","symbol":"kernel","compile":{}} -->
 ```python
 @pto.jit(target="a5")
 def kernel(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
     *,
     BLOCK: pto.constexpr = 128,
     DTYPE: pto.constexpr = pto.f32,
@@ -685,6 +691,6 @@ Python value is expected: tile shapes, loop bounds that are known at compile
 time, dtype arguments, etc. They are evaluated at trace time, so `for i in
 range(BLOCK)` would unroll `BLOCK` times.
 
-In contrast, values derived from runtime tensor shapes (e.g., `A.shape[0]`)
-are dynamic — they vary per launch and should be used with `pto.for_` to
-produce device-side loops.
+In contrast, values passed as runtime shape/stride scalars (for example,
+`rows`, `cols`, or `x_stride0`) are dynamic — they vary per launch and should
+be used with `pto.for_` to produce device-side loops.

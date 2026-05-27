@@ -13,10 +13,14 @@ import inspect
 from dataclasses import dataclass
 
 from ._diagnostics import (
+    jit_constexpr_missing_default_error,
     jit_illegal_formal_annotation_error,
+    jit_keyword_only_non_constexpr_error,
+    jit_legacy_tensor_spec_entry_error,
     jit_missing_annotation_error,
+    jit_non_gm_ptr_entry_error,
 )
-from ._host_tensors import bind_host_tensor_argument, infer_jit_host_tensor_spec
+from ._host_tensors import TensorSpec
 from ._surface_values import wrap_surface_value
 from ._surface_types import constexpr as _constexpr_marker
 from ._types import _DType, _MaskDescriptor, _PtrDescriptor, _VRegDescriptor, _resolve
@@ -68,14 +72,17 @@ class TensorSpecParameterSpec:
     name: str
     tensor_spec: object
 
+    def _raise_legacy_entry_error(self):
+        raise jit_legacy_tensor_spec_entry_error(self.name, self.tensor_spec)
+
     def entry_arg_types(self):
-        return tuple(self.tensor_spec.entry_arg_types())
+        self._raise_legacy_entry_error()
 
     def bind_entry_arguments(self, entry_arguments):
-        return bind_host_tensor_argument(self.name, self.tensor_spec, entry_arguments)
+        self._raise_legacy_entry_error()
 
     def abi_signature(self):
-        return ("tensor", self.name, self.tensor_spec.abi_signature())
+        self._raise_legacy_entry_error()
 
 
 @dataclass(frozen=True)
@@ -107,6 +114,13 @@ def _is_supported_runtime_scalar_annotation(annotation) -> bool:
     return (
         isinstance(annotation, _DType)
         and not isinstance(annotation, (_PtrDescriptor, _VRegDescriptor, _MaskDescriptor))
+    )
+
+
+def _is_explicit_gm_ptr_annotation(annotation) -> bool:
+    return (
+        isinstance(annotation, _PtrDescriptor)
+        and str(getattr(annotation, "_space", "")).lower() == "gm"
     )
 
 
@@ -175,10 +189,13 @@ def parse_jit_kernel_signature(py_fn) -> KernelSignature:
         }:
             if param.annotation is inspect.Parameter.empty:
                 raise jit_missing_annotation_error(param.name)
-            host_tensor_spec = infer_jit_host_tensor_spec(param)
-            if host_tensor_spec is not None:
+            if isinstance(param.annotation, TensorSpec):
+                raise jit_legacy_tensor_spec_entry_error(param.name, param.annotation)
+            if isinstance(param.annotation, _PtrDescriptor):
+                if not _is_explicit_gm_ptr_annotation(param.annotation):
+                    raise jit_non_gm_ptr_entry_error(param.name, param.annotation)
                 positional_parameters.append(
-                    TensorSpecParameterSpec(param.name, host_tensor_spec)
+                    DeviceParameterSpec(param.name, param.annotation)
                 )
             elif _is_supported_runtime_scalar_annotation(param.annotation):
                 positional_parameters.append(
@@ -190,15 +207,9 @@ def parse_jit_kernel_signature(py_fn) -> KernelSignature:
 
         if param.kind is inspect.Parameter.KEYWORD_ONLY:
             if param.annotation is not _constexpr_marker:
-                raise TypeError(
-                    f"@pto.jit keyword-only parameter '{param.name}' must be annotated "
-                    "with pto.constexpr in PTODSL v1"
-                )
+                raise jit_keyword_only_non_constexpr_error(param.name, param.annotation)
             if param.default is inspect.Parameter.empty:
-                raise TypeError(
-                    f"@pto.jit constexpr parameter '{param.name}' must declare a default "
-                    "value until explicit compile-time specialization is implemented"
-                )
+                raise jit_constexpr_missing_default_error(param.name)
             constexpr_parameters.append(ConstexprParameterSpec(param.name, param.default))
             continue
 

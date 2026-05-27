@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
 from ptodsl import pto, scalar
 from ptodsl import _types as pto_types
 from ptodsl._bootstrap import make_context
+from ptodsl._runtime.cache import artifact_paths
+from ptodsl._runtime.codegen import generate_launch_cpp
+from ptodsl._runtime.launch import _marshal_launch_args
 from ptodsl._tracing import current_session
 from mlir.ir import InsertionPoint, Location, Module
 
@@ -62,15 +65,15 @@ expect_raises(
 
 @pto.jit(target="a5")
 def host_vec_copy(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
@@ -81,15 +84,15 @@ def host_vec_copy(
 
 @pto.jit(target="a5", mode="explicit")
 def host_vec_copy_explicit(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
@@ -98,47 +101,68 @@ def host_vec_copy_explicit(
     pto.tile.store(o_tile, out)
 
 
+@pto.jit(target="a5")
+def pointer_runtime_shape_specialization_probe(
+    x_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    row_stride: pto.i32,
+    *,
+    BLOCK: pto.constexpr = 128,
+):
+    x_view = pto.make_tensor_view(x_ptr, shape=[rows, cols], strides=[row_stride, 1])
+    x_part = pto.partition_view(x_view, offsets=[0, 0], sizes=[rows, cols])
+    x_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[1, cols])
+    pto.tile.load(x_part, x_tile)
+
+
 @pto.jit(target="a5", insert_sync=False)
 def host_vec_copy_no_insert_sync(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32)
-    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[A.shape[0], A.shape[1]])
-    out = pto.partition_view(o_view, offsets=[0, 0], sizes=[O.shape[0], O.shape[1]])
+    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
+    out = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
     pto.tile.load(part, a_tile)
     pto.tile.store(o_tile, out)
 
 
 @pto.jit(target="a5", mode="explicit", insert_sync=True)
 def host_vec_copy_explicit_insert_sync(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32)
-    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[A.shape[0], A.shape[1]])
-    out = pto.partition_view(o_view, offsets=[0, 0], sizes=[O.shape[0], O.shape[1]])
+    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
+    out = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
     pto.tile.load(part, a_tile)
     pto.tile.store(o_tile, out)
 
 
 @pto.jit(target="a5")
 def runtime_metadata_kernel(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    row_stride: pto.i32,
+    col_stride: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A)
-    o_view = pto.make_tensor_view(O)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[row_stride, col_stride])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[row_stride, col_stride])
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[rows, cols])
     o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, valid_shape=[rows, cols])
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
@@ -149,24 +173,22 @@ def runtime_metadata_kernel(
 
 @pto.jit(target="a5", mode="explicit")
 def authored_addr_tile_surface_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
     tile = pto.alloc_tile(shape=[1, 128], dtype=pto.f32, addr=0, valid_shape=[rows, cols])
     _ = tile
 
 
 @pto.jit(target="a5", mode="explicit")
 def dynamic_addr_tile_surface_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
     tile = pto.alloc_tile(
         shape=[1, 128],
         dtype=pto.f32,
-        addr=scalar.index_cast(pto.i64, rows),
+        addr=scalar.index_cast(pto.i64, scalar.index_cast(rows)),
         valid_shape=[rows, cols],
     )
     _ = tile
@@ -310,15 +332,15 @@ def branch_handle_merge_probe():
 
 @pto.jit(target="a5")
 def runtime_scalar_operator_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    row_stride: pto.i32,
     *,
     BLOCK: pto.constexpr = 8,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
     block_idx = pto.get_block_idx()
-    o_view = pto.make_tensor_view(O)
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[row_stride, 1])
     o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
     o_ptr = o_part.as_ptr()
 
@@ -360,15 +382,15 @@ def runtime_scalar_operator_probe(
 
 @pto.jit(target="a5")
 def host_runtime_scalar_entry_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     limit: pto.i32,
     alpha: pto.f32,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A)
-    o_view = pto.make_tensor_view(O)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
     o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
     a_tile = pto.alloc_tile(shape=[1, 8], dtype=pto.f32, valid_shape=[1, cols])
@@ -410,12 +432,11 @@ def tile_slice_1d_surface_probe(*, BLOCK: pto.constexpr = 128):
 
 @pto.jit(target="a5")
 def tile_valid_shape_update_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
     tile = pto.alloc_tile(
         shape=[1, BLOCK],
         dtype=pto.f32,
@@ -426,11 +447,10 @@ def tile_valid_shape_update_probe(
 
 @pto.jit(target="a5")
 def tile_valid_shape_update_1d_probe(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
+    length: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    length = A.shape[0]
     tile = pto.alloc_tile(
         shape=[BLOCK],
         dtype=pto.f32,
@@ -441,9 +461,8 @@ def tile_valid_shape_update_1d_probe(
 
 @pto.jit(target="a5", mode="explicit")
 def make_mask_index_roundtrip_probe(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
+    cols: pto.i32,
 ):
-    cols = A.shape[0]
     col_loop = pto.for_(0, cols, step=64).carry(remained=cols)
     with col_loop:
         remained = col_loop.remained
@@ -554,14 +573,16 @@ def public_cube_surface_probe(
 
 @pto.jit(target="a5", mode="explicit")
 def public_surface_exports_probe(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
 ):
     pto.mem_bar(pto.BarrierType.VST_VLD)
     pto.pipe_barrier(pto.Pipe.ALL)
 
-    a_view = pto.make_tensor_view(A)
-    o_view = pto.make_tensor_view(O)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[1, 16])
     o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[1, 16])
     dma_tile = pto.alloc_tile(shape=[1, 128], dtype=pto.f32, valid_shape=[1, 16])
@@ -1235,6 +1256,11 @@ def main() -> None:
     expect(len(host_vec_copy.cached_specializations()) == 2, "expected exactly two cached specializations")
     expect(default_compiled.constexpr_bindings == {"BLOCK": 128}, "default constexpr binding mismatch")
     expect(block64.constexpr_bindings == {"BLOCK": 64}, "BLOCK=64 constexpr binding mismatch")
+    expect_raises(
+        TypeError,
+        lambda: host_vec_copy.compile(BLOCK=[128]),
+        "@pto.jit constexpr parameter 'BLOCK' must be hashable",
+    )
     expect(
         default_compiled.specialization_key.abi_signature == block64.specialization_key.abi_signature,
         "ABI signature should stay stable across constexpr-only specializations",
@@ -1243,6 +1269,72 @@ def main() -> None:
         default_compiled.specialization_key.constexpr_signature
         != block64.specialization_key.constexpr_signature,
         "constexpr specialization key should differ when BLOCK changes",
+    )
+    pointer_default = pointer_runtime_shape_specialization_probe.compile()
+    pointer_explicit_default = pointer_runtime_shape_specialization_probe.compile(BLOCK=128)
+    pointer_block64 = pointer_runtime_shape_specialization_probe.compile(BLOCK=64)
+    expect(
+        pointer_default is pointer_explicit_default,
+        "pointer-first kernels should reuse the same specialization when only runtime launch values vary",
+    )
+    expect(
+        pointer_default is not pointer_block64,
+        "pointer-first kernels should still specialize on constexpr values",
+    )
+    expect(
+        pointer_default.specialization_key.abi_signature == pointer_block64.specialization_key.abi_signature,
+        "pointer-first runtime shape scalars should stay in the ABI signature, not the constexpr signature",
+    )
+    expect(
+        pointer_default.specialization_key.constexpr_signature == (("BLOCK", 128),),
+        "pointer-first specialization key should only capture constexpr bindings",
+    )
+    expect(
+        pointer_block64.specialization_key.constexpr_signature == (("BLOCK", 64),),
+        "pointer-first specialization key should change only with constexpr bindings",
+    )
+    pointer_artifacts_default = artifact_paths(
+        pointer_default._py_name,
+        pointer_default.ir_function_name,
+        pointer_default.specialization_key,
+    )
+    pointer_artifacts_explicit_default = artifact_paths(
+        pointer_explicit_default._py_name,
+        pointer_explicit_default.ir_function_name,
+        pointer_explicit_default.specialization_key,
+    )
+    pointer_artifacts_block64 = artifact_paths(
+        pointer_block64._py_name,
+        pointer_block64.ir_function_name,
+        pointer_block64.specialization_key,
+    )
+    expect(
+        pointer_artifacts_default.cache_dir == pointer_artifacts_explicit_default.cache_dir,
+        "native artifact paths should stay stable for the same pointer-first specialization",
+    )
+    expect(
+        pointer_artifacts_default.cache_dir != pointer_artifacts_block64.cache_dir,
+        "native artifact paths should only change when constexpr specializations change",
+    )
+    marshaled_small = _marshal_launch_args(pointer_default._kernel_signature, (0x1000, 16, 32, 32))
+    marshaled_padded = _marshal_launch_args(pointer_default._kernel_signature, (0x1000, 7, 29, 64))
+    expect(len(marshaled_small) == 4, "pointer-first launch ABI should marshal one pointer plus rows/cols/stride scalars")
+    expect(len(marshaled_padded) == 4, "pointer-first launch ABI width should stay constant across dynamic shape launches")
+    expect(
+        marshaled_small[1].value == 16 and marshaled_small[2].value == 32 and marshaled_small[3].value == 32,
+        "contiguous runtime-shape launch should preserve rows/cols/stride values",
+    )
+    expect(
+        marshaled_padded[1].value == 7 and marshaled_padded[2].value == 29 and marshaled_padded[3].value == 64,
+        "same compiled kernel should accept padded runtime shape/stride values without changing specialization",
+    )
+    launch_cpp = generate_launch_cpp(
+        ir_function_name=pointer_default.ir_function_name,
+        kernel_signature=pointer_default._kernel_signature,
+    )
+    expect(
+        "extern \"C\" void ptodsl_launch_" in launch_cpp and "int32_t rows" in launch_cpp,
+        "launch wrapper codegen should resolve pointer-first runtime scalar annotations without requiring an ambient MLIR Context",
     )
 
     default_text = default_compiled.mlir_text()
@@ -1301,8 +1393,11 @@ def main() -> None:
     runtime_metadata_text = runtime_metadata_kernel.compile().mlir_text()
     expect_parse_roundtrip_and_verify(runtime_metadata_text, "runtime metadata specialization")
     expect(
-        "pto.make_tensor_view %arg0, shape = [%arg1, %arg2], strides = [%arg3, %arg4]" in runtime_metadata_text,
-        "make_tensor_view(A) should materialize runtime shape/stride metadata from the tensor proxy",
+        re.search(
+            r"pto\.make_tensor_view %arg0, shape = \[%[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+\], strides = \[%[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+\]",
+            runtime_metadata_text,
+        ) is not None,
+        "make_tensor_view should preserve explicitly authored runtime shape/stride metadata",
     )
 
     tile_surface_text = tile_surface_compute_probe.compile().mlir_text()
@@ -1312,30 +1407,46 @@ def main() -> None:
     expect("pto.tadds" in tile_surface_text, "pto.tile.adds should lower to pto.tadds")
     expect("pto.tcmps" in tile_surface_text, "pto.tile.cmps should lower to pto.tcmps")
     expect(
-        "pto.alloc_tile valid_row = %arg1 valid_col = %arg2 : !pto.tile_buf<vec, 1x128xf32, valid=?x?>" in runtime_metadata_text,
+        re.search(
+            r"pto\.alloc_tile valid_row = %[a-zA-Z0-9_]+ valid_col = %[a-zA-Z0-9_]+ : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
+            runtime_metadata_text,
+        ) is not None,
         "alloc_tile(valid_shape=[rows, cols]) should lower runtime metadata through valid_row/valid_col operands",
     )
     expect(
-        "sizes = [%arg1, %arg2]" in runtime_metadata_text,
+        re.search(
+            r"sizes = \[%[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+\]",
+            runtime_metadata_text,
+        ) is not None,
         "partition_view sizes derived from tensor metadata should remain runtime MLIR values",
     )
 
     authored_addr_tile_text = authored_addr_tile_surface_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(authored_addr_tile_text, "authored alloc_tile addr specialization")
     expect(
-        "pto.alloc_tile addr = %c0_i64 valid_row = %arg1 valid_col = %arg2 : !pto.tile_buf<vec, 1x128xf32, valid=?x?>" in authored_addr_tile_text,
+        re.search(
+            r"pto\.alloc_tile addr = %c0_i64 valid_row = %[a-zA-Z0-9_]+ valid_col = %[a-zA-Z0-9_]+ : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
+            authored_addr_tile_text,
+        ) is not None,
         "alloc_tile(shape=..., dtype=..., addr=int, valid_shape=...) should coerce Python ints to i64 operands",
     )
 
     dynamic_addr_tile_text = dynamic_addr_tile_surface_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(dynamic_addr_tile_text, "dynamic alloc_tile addr specialization")
     expect(
-        "arith.index_cast %arg1 : index to i64" in dynamic_addr_tile_text,
-        "alloc_tile(addr=runtime index) should cast dynamic index metadata to i64 before lowering",
+        "arith.index_cast %arg0 : i32 to index" in dynamic_addr_tile_text,
+        "alloc_tile(addr=runtime integer metadata) should first bridge the public i32 scalar to index",
     )
     expect(
         re.search(
-            r"pto\.alloc_tile addr = %[0-9]+ valid_row = %arg1 valid_col = %arg2 : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
+            r"arith\.index_cast %[a-zA-Z0-9_]+ : index to i64",
+            dynamic_addr_tile_text,
+        ) is not None,
+        "alloc_tile(addr=runtime index) should still cast the bridged index metadata to i64 before lowering",
+    )
+    expect(
+        re.search(
+            r"pto\.alloc_tile addr = %[a-zA-Z0-9_]+ valid_row = %[a-zA-Z0-9_]+ valid_col = %[a-zA-Z0-9_]+ : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
             dynamic_addr_tile_text,
         ) is not None,
         "alloc_tile(shape=..., dtype=..., addr=runtime value, valid_shape=...) should accept dynamic i64-like operands",
@@ -1345,7 +1456,7 @@ def main() -> None:
     expect_parse_roundtrip_and_verify(tile_valid_shape_text, "tile valid-shape update specialization")
     expect(
         re.search(
-            r"pto\.set_validshape %[0-9]+, %arg1, %arg2 : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
+            r"pto\.set_validshape %[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+ : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
             tile_valid_shape_text,
         ) is not None,
         "tile.valid_shape = [rows, cols] should lower to pto.set_validshape on a dynamic-valid tile",
@@ -1355,7 +1466,7 @@ def main() -> None:
     expect_parse_roundtrip_and_verify(tile_valid_shape_1d_text, "1D tile valid-shape update specialization")
     expect(
         re.search(
-            r"pto\.set_validshape %[0-9]+, %[a-zA-Z0-9_]+, %arg1 : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
+            r"pto\.set_validshape %[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+, %[a-zA-Z0-9_]+ : !pto\.tile_buf<vec, 1x128xf32, valid=\?x\?>",
             tile_valid_shape_1d_text,
         ) is not None,
         "tile.valid_shape = [length] should lower to pto.set_validshape on a rank-1 dynamic-valid tile",
@@ -1364,25 +1475,22 @@ def main() -> None:
     make_mask_index_roundtrip_text = make_mask_index_roundtrip_probe.compile().mlir_text()
     expect_parse_roundtrip_and_verify(make_mask_index_roundtrip_text, "make_mask index round-trip specialization")
     expect(
-        re.search(
-            r"arith\.index_cast %[a-zA-Z0-9_]+ : index to i32",
-            make_mask_index_roundtrip_text,
-        ) is not None,
-        "make_mask(...) should still cast index counts to the hardware i32 tail-mask operand type",
+        "pto.plt_b32 %arg2 : i32 -> !pto.mask<b32>, i32" in make_mask_index_roundtrip_text,
+        "make_mask(...) should accept public i32 runtime counts directly at the hardware tail-mask operand type",
     )
     expect(
         re.search(
-            r"arith\.index_cast %[a-zA-Z0-9_]+ : i32 to index",
+            r"iter_args\(%[a-zA-Z0-9_]+ = %arg0\) -> \(i32\)",
             make_mask_index_roundtrip_text,
         ) is not None,
-        "make_mask(...) should restore index counts after tail-mask generation so loop-carried state stays in authored index form",
+        "make_mask(...) should allow loop-carried public i32 remainders without manual index casts",
     )
     expect(
         re.search(
-            r"scf\.yield %[a-zA-Z0-9_]+ : index",
+            r"scf\.yield %[a-zA-Z0-9_]+ : i32",
             make_mask_index_roundtrip_text,
         ) is not None,
-        "make_mask(...) should allow loop-carried index remainders without manual i32 casts",
+        "make_mask(...) should keep the carried remainder in public i32 form after tail-mask generation",
     )
 
     SUBKERNEL_OBSERVATIONS.clear()
@@ -1505,6 +1613,20 @@ def main() -> None:
     expect(
         "func.func @host_runtime_scalar_entry_probe" in host_runtime_scalar_entry_text,
         "host runtime scalar entry probe should compile into a launchable kernel",
+    )
+    expect(
+        host_runtime_scalar_entry_probe.compile() is host_runtime_scalar_entry_probe.compile(),
+        "kernels without constexpr parameters should still reuse one compiled specialization",
+    )
+    expect_raises(
+        TypeError,
+        lambda: host_runtime_scalar_entry_probe.compile(limit=4),
+        "unknown @pto.jit constexpr parameter(s): limit",
+    )
+    expect_raises(
+        TypeError,
+        lambda: host_runtime_scalar_entry_probe.compile(alpha=1.0),
+        "unknown @pto.jit constexpr parameter(s): alpha",
     )
     expect(
         "i32" in host_runtime_scalar_entry_text and "f32" in host_runtime_scalar_entry_text,

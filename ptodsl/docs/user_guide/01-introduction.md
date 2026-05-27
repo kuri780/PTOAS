@@ -74,10 +74,22 @@ The outermost layer is plain Python. It handles ergonomic runtime concerns: allo
 def flash_attention(Q, K, V, *, O=None, causal=False):
     if O is None:
         O = pto.empty_like(Q)
+    batch, seq_q, heads, dim = Q.shape
+    _, seq_k, _, _ = K.shape
     compiled = flash_attention_kernel.compile(
         BLOCK_Q=128, BLOCK_KV=128, CAUSAL=causal
     )
-    compiled[batch * heads, stream](Q, K, V, O)
+    compiled[batch * heads, stream](
+        Q.data_ptr(),
+        K.data_ptr(),
+        V.data_ptr(),
+        O.data_ptr(),
+        batch,
+        seq_q,
+        seq_k,
+        heads,
+        dim,
+    )
     return O
 ```
 
@@ -86,10 +98,10 @@ def flash_attention(Q, K, V, *, O=None, causal=False):
 Decorating a function with `@pto.jit` marks it as a launchable PTO kernel. This decoration means:
 
 - **Compilation**: the function body is traced once to record all PTO instructions, then lowered through the PTOAS compiler pipeline into an optimized NPU executable.
-- **Caching**: compiled kernels are cached by specialization key (function identity + tensor ABI signature + constexpr parameter values), so repeated calls with the same configuration skip recompilation.
+- **Caching**: compiled kernels are cached by specialization key (function identity + entry annotation signature + constexpr parameter values), so repeated calls with the same configuration skip recompilation.
 - **Launch binding**: the compiled kernel can be invoked with a grid and stream — `compiled[grid, stream](args...)` — which launches the executable on the NPU with the given SPMD grid.
 
-The parameters of a `@pto.jit` function are Python-native tensors (not PTODSL-specific descriptors). In PTODSL v1, their ABI contract is declared with `pto.tensor_spec(...)` in the function signature; this is a compile-time annotation, not a runtime object the Python wrapper must construct. The kernel body materializes `TensorView` descriptors from the runtime tensors via `make_tensor_view`, then partitions the problem with `partition_view`. Compile-time constants are declared as keyword-only arguments with `pto.constexpr`:
+The public `@pto.jit` entry contract is pointer-first. Device buffers are explicit GM pointers (`pto.ptr(..., "gm")`), launch-varying shape/stride metadata travels as runtime scalars, and the kernel body materializes `TensorView` descriptors with `make_tensor_view(ptr, shape=..., strides=...)`. Compile-time constants remain keyword-only `pto.constexpr` parameters:
 
 <!-- ptodsl-doc-test: {"mode":"compile","symbol":"flash_attention_kernel","compile":{"BLOCK_Q":128,"BLOCK_KV":128,"CAUSAL":false}} -->
 ```python
@@ -98,15 +110,25 @@ from ptodsl import pto
 
 @pto.jit(target="a5")
 def flash_attention_kernel(
-    Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-    K: pto.tensor_spec(rank=4, dtype=pto.f32),
-    V: pto.tensor_spec(rank=4, dtype=pto.f32),
-    O: pto.tensor_spec(rank=4, dtype=pto.f32),
+    Q_ptr: pto.ptr(pto.f32, "gm"),
+    K_ptr: pto.ptr(pto.f32, "gm"),
+    V_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    batch: pto.i32,
+    seq_q: pto.i32,
+    seq_k: pto.i32,
+    heads: pto.i32,
+    dim: pto.i32,
     *,
     BLOCK_Q: pto.constexpr = 128,
     BLOCK_KV: pto.constexpr = 128,
     CAUSAL: pto.constexpr = False,
 ):
+    q_view = pto.make_tensor_view(
+        Q_ptr,
+        shape=[batch, seq_q, heads, dim],
+        strides=[seq_q * heads * dim, heads * dim, dim, 1],
+    )
     # ... tile allocation, block partitioning, and sub-kernel dispatch ...
     return
 ```

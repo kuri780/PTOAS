@@ -40,8 +40,8 @@ def native_python_if_runtime_const_probe():
 
 
 @pto.jit(target="a5")
-def native_python_range_runtime_metadata_probe(A: pto.tensor_spec(rank=2, dtype=pto.f32)):
-    for _ in range(A.shape[0]):
+def native_python_range_runtime_metadata_probe(rows: pto.i32):
+    for _ in range(rows):
         pto.pipe_barrier(pto.Pipe.ALL)
 
 
@@ -104,6 +104,14 @@ def define_missing_constexpr_default_probe():
     return bad_probe
 
 
+def define_illegal_keyword_only_probe():
+    @pto.jit(target="a5")
+    def bad_probe(*, BLOCK: pto.i32 = 8):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
 def define_missing_entry_annotation_probe():
     @pto.jit(target="a5")
     def bad_probe(A):
@@ -112,12 +120,47 @@ def define_missing_entry_annotation_probe():
     return bad_probe
 
 
-def define_ptr_entry_annotation_probe():
+def define_gm_ptr_entry_annotation_probe():
     @pto.jit(target="a5")
-    def bad_probe(A: pto.ptr(pto.f32, "gm")):
+    def good_probe(A: pto.ptr(pto.f32, "gm"), rows: pto.i32):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return good_probe
+
+
+def define_default_ptr_entry_annotation_probe():
+    @pto.jit(target="a5")
+    def bad_probe(A: pto.ptr(pto.f32)):
         pto.pipe_barrier(pto.Pipe.ALL)
 
     return bad_probe
+
+
+def define_ub_ptr_entry_annotation_probe():
+    @pto.jit(target="a5")
+    def bad_probe(A: pto.ptr(pto.f32, "ub")):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+def define_legacy_tensor_spec_entry_probe():
+    @pto.jit(target="a5")
+    def bad_probe(A: pto.tensor_spec(rank=2, dtype=pto.f32)):
+        pto.pipe_barrier(pto.Pipe.ALL)
+
+    return bad_probe
+
+
+@pto.jit(target="a5")
+def make_tensor_view_missing_metadata_probe(
+    x_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+):
+    _ = rows
+    _ = cols
+    pto.make_tensor_view(x_ptr)
 
 
 @pto.jit(target="a5")
@@ -253,20 +296,51 @@ def main() -> None:
         define_missing_constexpr_default_probe,
         TypeError,
         "@pto.jit constexpr parameter 'BLOCK' must declare a default value",
+        ".compile(...)",
+    )
+    expect_raises(
+        define_illegal_keyword_only_probe,
+        TypeError,
+        "@pto.jit keyword-only parameter 'BLOCK' uses unsupported compile-time annotation",
+        "pto.constexpr",
+        "move runtime data to positional pointer/scalar parameters",
     )
     expect_raises(
         define_missing_entry_annotation_probe,
         TypeError,
         "@pto.jit positional parameter 'A' does not declare an entry ABI annotation",
-        "pto.tensor_spec(...)",
+        'pto.ptr(pto.f32, "gm")',
         "pto.i32/pto.f32/pto.i1",
     )
+    gm_ptr_entry_probe = define_gm_ptr_entry_annotation_probe()
+    expect(hasattr(gm_ptr_entry_probe, "compile"), "expected explicit GM pointer entry to be accepted")
     expect_raises(
-        define_ptr_entry_annotation_probe,
+        define_default_ptr_entry_annotation_probe,
         TypeError,
-        "@pto.jit positional parameter 'A' uses unsupported entry annotation",
-        "pto.ptr(",
-        "not at the host/kernel entry",
+        "@pto.jit positional parameter 'A' uses non-GM pointer entry annotation",
+        'pto.ptr(pto.f32, "gm")',
+        'spell out "gm" explicitly',
+    )
+    expect_raises(
+        define_ub_ptr_entry_annotation_probe,
+        TypeError,
+        "@pto.jit positional parameter 'A' uses non-GM pointer entry annotation",
+        'pto.ptr(pto.f32, "gm")',
+        "only accepts explicit GM pointers",
+    )
+    expect_raises(
+        define_legacy_tensor_spec_entry_probe,
+        TypeError,
+        "@pto.jit positional parameter 'A' still uses legacy host-tensor entry annotation",
+        "no longer accepts pto.tensor_spec(...)",
+        "pto.make_tensor_view(...)",
+    )
+    expect_raises(
+        make_tensor_view_missing_metadata_probe.compile,
+        TypeError,
+        "make_tensor_view(",
+        "requires explicit shape= and strides=",
+        "Do not rely on host tensor proxy metadata",
     )
     expect_raises(
         missing_if_branch_probe.compile,

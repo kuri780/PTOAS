@@ -75,11 +75,11 @@ def _tadd_tile(A, B, C, rows: int, cols: int) -> None:
     target="a5",
 )
 def TADD_f32_16x64(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    C: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tadd_tile(A, B, C, 16, 64)
+    _tadd_tile(A_ptr, B_ptr, C_ptr, 16, 64)
 
 
 @pto.jit(
@@ -88,11 +88,11 @@ def TADD_f32_16x64(
     target="a5",
 )
 def TADD_f32_32x32(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    C: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tadd_tile(A, B, C, 32, 32)
+    _tadd_tile(A_ptr, B_ptr, C_ptr, 32, 32)
 
 
 KERNELS = (TADD_f32_16x64, TADD_f32_32x32)
@@ -143,7 +143,7 @@ def run_case(case: dict, torch) -> None:
     compile_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    compiled[1, stream](a, b, c)
+    compiled[1, stream](a.data_ptr(), b.data_ptr(), c.data_ptr())
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0
 

@@ -25,7 +25,11 @@ Design rules:
 from functools import wraps
 
 from ._bootstrap import make_context  # noqa: F401 – ensure MLIR on sys.path
-from ._diagnostics import explicit_mode_required_with_context_error, tile_row_alignment_error
+from ._diagnostics import (
+    explicit_mode_required_with_context_error,
+    make_tensor_view_missing_metadata_error,
+    tile_row_alignment_error,
+)
 from ._host_tensors import resolve_tensor_data_entry
 from ._scalar_coercion import coerce_scalar_to_type, materialize_scalar_literal
 from ._runtime_scalar_ops import classify_runtime_scalar_type, emit_runtime_binary_op
@@ -1445,18 +1449,21 @@ def make_tensor_view(ptr, *, shape=None, strides=None):
 
     Type is inferred: rank from ``len(shape)``, element type from ``ptr``.
     """
-    authored_ptr = ptr
-    if shape is None:
-        shape = getattr(authored_ptr, "shape", None)
-    if strides is None:
-        strides = getattr(authored_ptr, "strides", None)
     if shape is None or strides is None:
-        raise TypeError("make_tensor_view() requires shape= and strides=, or a host tensor proxy carrying both")
-    ptr = resolve_tensor_data_entry(authored_ptr)
+        raise make_tensor_view_missing_metadata_error(ptr)
+    ptr = resolve_tensor_data_entry(ptr)
     rank = len(shape)
     raw_ptr = unwrap_surface_value(ptr)
     elem = _pto.PtrType(raw_ptr.type).element_type
-    static_dims = _static_index_dims(shape)
+    normalized_shape = [
+        _coerce_index(dim, context="make_tensor_view(shape=...)")
+        for dim in shape
+    ]
+    normalized_strides = [
+        _coerce_index(dim, context="make_tensor_view(strides=...)")
+        for dim in strides
+    ]
+    static_dims = _static_index_dims(normalized_shape)
     tv_type = (
         tensor_view_type_from_dims(static_dims, elem)
         if static_dims is not None
@@ -1465,8 +1472,8 @@ def make_tensor_view(ptr, *, shape=None, strides=None):
     value = _pto.MakeTensorViewOp(
         tv_type,
         raw_ptr,
-        _unwrap_sequence(shape),
-        _unwrap_sequence(strides),
+        _unwrap_sequence(normalized_shape),
+        _unwrap_sequence(normalized_strides),
     ).result
     return TensorViewValue(value, shape=tuple(shape), strides=tuple(strides))
 
@@ -1573,7 +1580,15 @@ def partition_view(tv, *, offsets, sizes):
     src_type = _pto.TensorViewType(raw_source.type)
     rank = src_type.rank
     elem = src_type.element_type
-    static_dims = _static_index_dims(sizes)
+    normalized_offsets = [
+        _coerce_index(offset, context="partition_view(offsets=...)")
+        for offset in offsets
+    ]
+    normalized_sizes = [
+        _coerce_index(size, context="partition_view(sizes=...)")
+        for size in sizes
+    ]
+    static_dims = _static_index_dims(normalized_sizes)
     ptv_type = (
         part_tensor_view_type_from_dims(static_dims, elem)
         if static_dims is not None
@@ -1582,8 +1597,8 @@ def partition_view(tv, *, offsets, sizes):
     value = _pto.PartitionViewOp(
         ptv_type,
         raw_source,
-        _unwrap_sequence(offsets),
-        _unwrap_sequence(sizes),
+        _unwrap_sequence(normalized_offsets),
+        _unwrap_sequence(normalized_sizes),
     ).result
     return wrap_surface_value(
         value,
@@ -1694,7 +1709,7 @@ def set_tile_valid_shape(tile, valid_shape):
                 "valid_shape=[...] so the physical valid row/col metadata remain dynamic"
             )
         valid_row = _coerce_index_value(1)
-        valid_col, = _unwrap_sequence(valid_shape)
+        valid_col = _coerce_index(valid_shape[0], context="tile.valid_shape assignment")
     else:
         if len(valid_shape) != 2:
             raise TypeError("tile.valid_shape assignment currently expects exactly two dimensions")
@@ -1703,7 +1718,8 @@ def set_tile_valid_shape(tile, valid_shape):
                 "tile.valid_shape assignment requires a tile allocated with fully dynamic "
                 "valid_shape=[..., ...]"
             )
-        valid_row, valid_col = _unwrap_sequence(valid_shape)
+        valid_row = _coerce_index(valid_shape[0], context="tile.valid_shape assignment")
+        valid_col = _coerce_index(valid_shape[1], context="tile.valid_shape assignment")
     _pto.SetValidShapeOp(
         unwrap_surface_value(tile),
         valid_row,

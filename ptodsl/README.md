@@ -253,11 +253,15 @@ def MyKernel():
 
 @pto.jit(name="Softmax", kernel_kind="vector", target="a5")
 def Softmax(
-    X: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    X_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
+    x_view = pto.make_tensor_view(X_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     ...
 
 print(MyKernel)               # prints MLIR text
@@ -271,17 +275,21 @@ flow.
 
 PTODSL v1 keeps the public `@pto.jit` entry ABI intentionally narrow:
 
-- positional parameters are Python-native tensors declared with
-  `pto.tensor_spec(...)`
+- positional device buffers are explicit GM pointers declared with
+  `pto.ptr(..., "gm")`
+- shape, stride, and other launch-varying metadata travel as positional runtime
+  scalars such as `pto.i32`, `pto.f32`, and `pto.i1`
+- kernel bodies reconstruct tensor descriptors explicitly with
+  `pto.make_tensor_view(ptr, shape=..., strides=...)`
 - positional runtime scalars use PTO scalar annotations such as `pto.i32`,
   `pto.f32`, and `pto.i1`, while launch-time values remain ordinary Python
   scalars
 - keyword-only parameters annotated with `pto.constexpr` are compile-time
   specialization knobs
 
-Typed pointers such as `pto.ptr(...)` remain valid PTODSL surface types inside
-kernel bodies and explicit-mode sub-kernels, but they are not the recommended
-host-visible `@pto.jit` parameter contract.
+The host wrapper is responsible for extracting or deriving whatever runtime
+metadata the kernel needs and passing it explicitly at launch time. PTODSL no
+longer uses `pto.tensor_spec(...)` as the public `@pto.jit` entry contract.
 
 Additional layered kernel entry modes and shared compute decorators are also
 exported on the public surface: `@pto.jit(mode="auto")`,

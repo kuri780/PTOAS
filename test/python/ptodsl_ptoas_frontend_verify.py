@@ -66,15 +66,15 @@ def run_ptoas_frontend_verify(ptoas_bin: Path, mlir_text: str, label: str) -> st
 
 @pto.jit(target="a5")
 def host_vec_copy(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    rows = A.shape[0]
-    cols = A.shape[1]
-    a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-    o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])

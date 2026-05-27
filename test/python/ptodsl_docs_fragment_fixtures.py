@@ -89,15 +89,15 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def type_system_partition_view_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 128,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
             dim = cols
             row_offset = 0
-            tv = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+            tv = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
             {SNIPPET_PLACEHOLDER}
         """
     ),
@@ -210,16 +210,15 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def quick_start_tile_io_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 128,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
-
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
             a_part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
             o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
             a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
@@ -229,15 +228,32 @@ FRAGMENT_FIXTURES = {
     ),
     "launch.flash_attention_wrapper": _fixture(
         f"""
-        import numpy as np
+        class _FakeTensor:
+            _next_ptr = 4096
+
+            def __init__(self, shape):
+                self.shape = tuple(shape)
+                self._ptr = _FakeTensor._next_ptr
+                _FakeTensor._next_ptr += 4096
+
+            def data_ptr(self):
+                return self._ptr
+
+            def new_empty(self, shape):
+                return _FakeTensor(shape)
 
 
         @pto.jit(target="a5")
         def flash_attention_kernel(
-            Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
-            O: pto.tensor_spec(rank=4, dtype=pto.f32),
+            Q_ptr: pto.ptr(pto.f32, "gm"),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            seq_q: pto.i32,
+            seq_k: pto.i32,
+            heads: pto.i32,
+            dim: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 128,
             BLOCK_KV: pto.constexpr = 128,
@@ -252,9 +268,9 @@ FRAGMENT_FIXTURES = {
         seq_k = 4
         dim = 8
         stream = object()
-        Q = np.random.randn(batch, seq_q, heads, dim).astype(np.float32)
-        K = np.random.randn(batch, seq_k, heads, dim).astype(np.float32)
-        V = np.random.randn(batch, seq_k, heads, dim).astype(np.float32)
+        Q = _FakeTensor((batch, seq_q, heads, dim))
+        K = _FakeTensor((batch, seq_k, heads, dim))
+        V = _FakeTensor((batch, seq_k, heads, dim))
 
         {SNIPPET_PLACEHOLDER}
 
@@ -264,27 +280,28 @@ FRAGMENT_FIXTURES = {
         record = PTODSL_DOC_LAUNCH_RECORDS[0]
         assert record.grid == batch * heads
         assert record.stream is stream
-        assert len(record.args) == 4
-        assert record.args[0] is Q
-        assert record.args[1] is K
-        assert record.args[2] is V
-        assert record.args[3] is O
-        assert record.marshaled_arg_count == 36
+        assert len(record.args) == 9
+        assert record.args[0] == Q.data_ptr()
+        assert record.args[1] == K.data_ptr()
+        assert record.args[2] == V.data_ptr()
+        assert record.args[3] == O.data_ptr()
+        assert record.args[4:] == (batch, seq_q, seq_k, heads, dim)
+        assert record.marshaled_arg_count == 9
         """
     ),
     "launch.blocked_copy_compile_and_launch": _fixture(
         f"""
         @pto.jit(target="a5")
         def blocked_copy(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 128,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
             tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
             with pto.for_(0, rows, step=1) as row:
                 a_part = pto.partition_view(a_view, offsets=[row, 0], sizes=[1, cols])
@@ -299,10 +316,9 @@ FRAGMENT_FIXTURES = {
         record = PTODSL_DOC_LAUNCH_RECORDS[0]
         assert record.grid == 1
         assert record.stream is None
-        assert len(record.args) == 2
-        assert record.args[0] is A
-        assert record.args[1] is O
-        assert record.marshaled_arg_count == 10
+        assert len(record.args) == 4
+        assert record.args == (A.ctypes.data, O.ctypes.data, 4, 128)
+        assert record.marshaled_arg_count == 4
         """
     ),
     "launch.generic_compile_and_launch": _fixture(
@@ -312,8 +328,10 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5")
         def kernel_name(
-            tensor_1: pto.tensor_spec(rank=2, dtype=pto.f32),
-            tensor_2: pto.tensor_spec(rank=2, dtype=pto.f32),
+            tensor_1_ptr: pto.ptr(pto.f32, "gm"),
+            tensor_2_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             CONST_A: pto.constexpr = 128,
             CONST_B: pto.constexpr = 64,
@@ -330,10 +348,9 @@ FRAGMENT_FIXTURES = {
         record = PTODSL_DOC_LAUNCH_RECORDS[0]
         assert record.grid == grid
         assert record.stream is stream
-        assert len(record.args) == 2
-        assert record.args[0] is A
-        assert record.args[1] is O
-        assert record.marshaled_arg_count == 10
+        assert len(record.args) == 4
+        assert record.args == (A.ctypes.data, O.ctypes.data, 4, 128)
+        assert record.marshaled_arg_count == 4
         """
     ),
     "launch.mat_add_wrapper": _fixture(
@@ -343,9 +360,12 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5")
         def mat_add(
-            A: pto.tensor_spec(rank=3, dtype=pto.f32),
-            B: pto.tensor_spec(rank=3, dtype=pto.f32),
-            O: pto.tensor_spec(rank=3, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            B_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK_M: pto.constexpr = 64,
             BLOCK_N: pto.constexpr = 128,
@@ -363,11 +383,9 @@ FRAGMENT_FIXTURES = {
         record = PTODSL_DOC_LAUNCH_RECORDS[0]
         assert record.grid == A.shape[0]
         assert record.stream is None
-        assert len(record.args) == 3
-        assert record.args[0] is A
-        assert record.args[1] is B
-        assert record.args[2] is O
-        assert record.marshaled_arg_count == 21
+        assert len(record.args) == 6
+        assert record.args == (A.ctypes.data, B.ctypes.data, O.ctypes.data, 2, 64, 128)
+        assert record.marshaled_arg_count == 6
         """
     ),
     "launch.gemm_wrapper": _fixture(
@@ -377,9 +395,12 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5")
         def gemm(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
-            B: pto.tensor_spec(rank=2, dtype=pto.f32),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            B_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            reduce_dim: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK_M: pto.constexpr = 64,
             BLOCK_K: pto.constexpr = 64,
@@ -398,29 +419,27 @@ FRAGMENT_FIXTURES = {
         record = PTODSL_DOC_LAUNCH_RECORDS[0]
         assert record.grid == 1
         assert record.stream is None
-        assert len(record.args) == 3
-        assert record.args[0] is A
-        assert record.args[1] is B
-        assert record.args[2] is O
-        assert record.marshaled_arg_count == 15
+        assert len(record.args) == 6
+        assert record.args == (A.ctypes.data, B.ctypes.data, O.ctypes.data, 64, 32, 16)
+        assert record.marshaled_arg_count == 6
         """
     ),
     "control_flow.basic_for": _fixture(
         f"""
         @pto.jit(target="a5")
         def control_flow_basic_for_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 8,
         ):
             start = pto.const(0, dtype=pto.i32)
             stop = pto.const(BLOCK, dtype=pto.i32)
             step = 1
-            rows = A.shape[0]
-            cols = A.shape[1]
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
             tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
             {SNIPPET_PLACEHOLDER}
         """
@@ -429,16 +448,16 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def control_flow_compare_loops_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 8,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
             num_blocks = rows
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
             tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
             {SNIPPET_PLACEHOLDER}
         """
@@ -447,12 +466,11 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def control_flow_nested_loops_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 8,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
             tile = pto.alloc_tile(shape=[2, BLOCK], dtype=pto.f32, valid_shape=[rows, cols])
             {SNIPPET_PLACEHOLDER}
         """
@@ -537,11 +555,13 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def kernel_entry_explicit_signature_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 16,
         ):
-            view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+            view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
             part = pto.partition_view(view, offsets=[0, 0], sizes=[1, BLOCK])
             tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
             scratch = pto.alloc_tile(shape=[8, BLOCK], dtype=pto.f32, memory_space=pto.MemorySpace.LEFT)
@@ -565,16 +585,16 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def kernel_entry_explicit_body_probe(
-            K: pto.tensor_spec(rank=2, dtype=pto.f16),
-            V: pto.tensor_spec(rank=2, dtype=pto.f16),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            K_ptr: pto.ptr(pto.f16, "gm"),
+            V_ptr: pto.ptr(pto.f16, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
             *,
             ROWS: pto.constexpr = 8,
             COLS: pto.constexpr = 16,
         ):
-            k_view = pto.make_tensor_view(K, shape=K.shape, strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=V.shape, strides=V.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            k_view = pto.make_tensor_view(K_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
             q_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             k_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             v_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
@@ -830,13 +850,13 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def scalar_ops_pointer_sources_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 8,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
             partition = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
             tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
             {SNIPPET_PLACEHOLDER}
@@ -856,14 +876,14 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def data_movement_tload_probe(
-            A: pto.tensor_spec(rank=2, dtype=pto.f32),
+            A_ptr: pto.ptr(pto.f32, "gm"),
+            rows: pto.i32,
+            cols: pto.i32,
             *,
             BLOCK: pto.constexpr = 128,
         ):
-            rows = A.shape[0]
-            cols = A.shape[1]
             offset = 0
-            a_view = pto.make_tensor_view(A, shape=A.shape, strides=A.strides)
+            a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
             {SNIPPET_PLACEHOLDER}
         """
     ),
@@ -884,16 +904,16 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def data_movement_explicit_dma_probe(
-            K: pto.tensor_spec(rank=2, dtype=pto.f16),
-            V: pto.tensor_spec(rank=2, dtype=pto.f16),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            K_ptr: pto.ptr(pto.f16, "gm"),
+            V_ptr: pto.ptr(pto.f16, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
             *,
             ROWS: pto.constexpr = 8,
             COLS: pto.constexpr = 16,
         ):
-            k_view = pto.make_tensor_view(K, shape=K.shape, strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=V.shape, strides=V.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            k_view = pto.make_tensor_view(K_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
             k_part = pto.partition_view(k_view, offsets=[0, 0], sizes=[ROWS, COLS])
             v_part = pto.partition_view(v_view, offsets=[0, 0], sizes=[ROWS, COLS])
             o_part = pto.partition_view(o_view, offsets=[0, 0], sizes=[ROWS, COLS])
@@ -920,16 +940,16 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def sync_ops_flag_pattern_explicit_probe(
-            K: pto.tensor_spec(rank=2, dtype=pto.f16),
-            V: pto.tensor_spec(rank=2, dtype=pto.f16),
-            O: pto.tensor_spec(rank=2, dtype=pto.f32),
+            K_ptr: pto.ptr(pto.f16, "gm"),
+            V_ptr: pto.ptr(pto.f16, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
             *,
             ROWS: pto.constexpr = 8,
             COLS: pto.constexpr = 16,
         ):
-            k_view = pto.make_tensor_view(K, shape=K.shape, strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=V.shape, strides=V.strides)
-            o_view = pto.make_tensor_view(O, shape=O.shape, strides=O.strides)
+            k_view = pto.make_tensor_view(K_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
             q_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             k_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             v_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
@@ -979,14 +999,14 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def sync_ops_phase_barrier_explicit_probe(
-            K: pto.tensor_spec(rank=2, dtype=pto.f16),
-            V: pto.tensor_spec(rank=2, dtype=pto.f16),
+            K_ptr: pto.ptr(pto.f16, "gm"),
+            V_ptr: pto.ptr(pto.f16, "gm"),
             *,
             ROWS: pto.constexpr = 8,
             COLS: pto.constexpr = 16,
         ):
-            k_view = pto.make_tensor_view(K, shape=K.shape, strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=V.shape, strides=V.strides)
+            k_view = pto.make_tensor_view(K_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[ROWS, COLS], strides=[COLS, 1])
             q_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             k_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
             v_tile = pto.alloc_tile(shape=[ROWS, COLS], dtype=pto.f16)
@@ -1152,21 +1172,21 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def flash_attention_l1_tensor_views_probe(
-            Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
-            O: pto.tensor_spec(rank=4, dtype=pto.f32),
+            Q_ptr: pto.ptr(pto.f32, "gm"),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            seq_q: pto.i32,
+            seq_k: pto.i32,
+            heads: pto.i32,
+            dim: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 128,
             BLOCK_KV: pto.constexpr = 128,
             CAUSAL: pto.constexpr = False,
             NUM_STAGES: pto.constexpr = 2,
         ):
-            batch = Q.shape[0]
-            seq_q = Q.shape[1]
-            seq_k = K.shape[1]
-            heads = Q.shape[2]
-            dim = Q.shape[3]
             Br = BLOCK_Q
             Bc = BLOCK_KV
             D = dim
@@ -1180,25 +1200,25 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def flash_attention_l1_partitions_probe(
-            Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
-            O: pto.tensor_spec(rank=4, dtype=pto.f32),
+            Q_ptr: pto.ptr(pto.f32, "gm"),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            seq_q: pto.i32,
+            seq_k: pto.i32,
+            heads: pto.i32,
+            dim: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 128,
             BLOCK_KV: pto.constexpr = 128,
             CAUSAL: pto.constexpr = False,
             NUM_STAGES: pto.constexpr = 2,
         ):
-            batch = Q.shape[0]
-            seq_q = Q.shape[1]
-            seq_k = K.shape[1]
-            heads = Q.shape[2]
-            dim = Q.shape[3]
-            q_view = pto.make_tensor_view(Q, shape=[batch, seq_q, heads, dim], strides=Q.strides)
-            k_view = pto.make_tensor_view(K, shape=[batch, seq_k, heads, dim], strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=[batch, seq_k, heads, dim], strides=V.strides)
-            o_view = pto.make_tensor_view(O, shape=[batch, seq_q, heads, dim], strides=O.strides)
+            q_view = pto.make_tensor_view(Q_ptr, shape=[batch, seq_q, heads, dim], strides=[seq_q * heads * dim, heads * dim, dim, 1])
+            k_view = pto.make_tensor_view(K_ptr, shape=[batch, seq_k, heads, dim], strides=[seq_k * heads * dim, heads * dim, dim, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[batch, seq_k, heads, dim], strides=[seq_k * heads * dim, heads * dim, dim, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[batch, seq_q, heads, dim], strides=[seq_q * heads * dim, heads * dim, dim, 1])
             block_idx = pto.get_block_idx()
             batch_idx = block_idx // heads
             head_idx = block_idx % heads
@@ -1209,20 +1229,20 @@ FRAGMENT_FIXTURES = {
         f"""
         @pto.jit(target="a5")
         def flash_attention_l1_tiles_probe(
-            Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
-            O: pto.tensor_spec(rank=4, dtype=pto.f32),
+            Q_ptr: pto.ptr(pto.f32, "gm"),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            seq_q: pto.i32,
+            seq_k: pto.i32,
+            heads: pto.i32,
+            dim: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 128,
             BLOCK_KV: pto.constexpr = 128,
             HEAD_DIM: pto.constexpr = 128,
         ):
-            batch = Q.shape[0]
-            seq_q = Q.shape[1]
-            seq_k = K.shape[1]
-            heads = Q.shape[2]
-            dim = Q.shape[3]
             Br = BLOCK_Q
             Bc = BLOCK_KV
             D = HEAD_DIM
@@ -1272,10 +1292,15 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def flash_attention_l1_loop_body_probe(
-            Q: pto.tensor_spec(rank=4, dtype=pto.f32),
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
-            O: pto.tensor_spec(rank=4, dtype=pto.f32),
+            Q_ptr: pto.ptr(pto.f32, "gm"),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            O_ptr: pto.ptr(pto.f32, "gm"),
+            batch: pto.i32,
+            seq_q: pto.i32,
+            seq_k: pto.i32,
+            heads: pto.i32,
+            dim: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 128,
             BLOCK_KV: pto.constexpr = 128,
@@ -1283,15 +1308,10 @@ FRAGMENT_FIXTURES = {
             CAUSAL: pto.constexpr = False,
             NUM_STAGES: pto.constexpr = 2,
         ):
-            batch = Q.shape[0]
-            seq_q = Q.shape[1]
-            seq_k = K.shape[1]
-            heads = Q.shape[2]
-            dim = Q.shape[3]
-            q_view = pto.make_tensor_view(Q, shape=[batch, seq_q, heads, dim], strides=Q.strides)
-            k_view = pto.make_tensor_view(K, shape=[batch, seq_k, heads, dim], strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=[batch, seq_k, heads, dim], strides=V.strides)
-            o_view = pto.make_tensor_view(O, shape=[batch, seq_q, heads, dim], strides=O.strides)
+            q_view = pto.make_tensor_view(Q_ptr, shape=[batch, seq_q, heads, dim], strides=[seq_q * heads * dim, heads * dim, dim, 1])
+            k_view = pto.make_tensor_view(K_ptr, shape=[batch, seq_k, heads, dim], strides=[seq_k * heads * dim, heads * dim, dim, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[batch, seq_k, heads, dim], strides=[seq_k * heads * dim, heads * dim, dim, 1])
+            o_view = pto.make_tensor_view(O_ptr, shape=[batch, seq_q, heads, dim], strides=[seq_q * heads * dim, heads * dim, dim, 1])
             block_idx = pto.get_block_idx()
             batch_idx = block_idx // heads
             head_idx = block_idx % heads
@@ -1459,8 +1479,9 @@ FRAGMENT_FIXTURES = {
 
         @pto.jit(target="a5", mode="explicit")
         def flash_attention_explicit_phase_probe(
-            K: pto.tensor_spec(rank=4, dtype=pto.f32),
-            V: pto.tensor_spec(rank=4, dtype=pto.f32),
+            K_ptr: pto.ptr(pto.f32, "gm"),
+            V_ptr: pto.ptr(pto.f32, "gm"),
+            seq_k: pto.i32,
             *,
             BLOCK_Q: pto.constexpr = 16,
             BLOCK_KV: pto.constexpr = 16,
@@ -1469,8 +1490,8 @@ FRAGMENT_FIXTURES = {
             Bc = BLOCK_KV
             D = 16
             one = 1
-            k_view = pto.make_tensor_view(K, shape=K.shape, strides=K.strides)
-            v_view = pto.make_tensor_view(V, shape=V.shape, strides=V.strides)
+            k_view = pto.make_tensor_view(K_ptr, shape=[1, seq_k, 1, D], strides=[seq_k * D, D, D, 1])
+            v_view = pto.make_tensor_view(V_ptr, shape=[1, seq_k, 1, D], strides=[seq_k * D, D, D, 1])
             k_part = pto.partition_view(k_view, offsets=[0, 0, 0, 0], sizes=[1, Bc, 1, D])
             v_part = pto.partition_view(v_view, offsets=[0, 0, 0, 0], sizes=[1, Bc, 1, D])
             q_mat = pto.alloc_tile(shape=[Br, D], dtype=pto.f32, memory_space=pto.MemorySpace.MAT, valid_shape=[Br, D], blayout="ColMajor", slayout="RowMajor")

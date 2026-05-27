@@ -12,18 +12,22 @@ from __future__ import annotations
 import ctypes
 from typing import TYPE_CHECKING
 
-from .._host_tensors import (
-    inspect_host_tensor_metadata,
-    looks_like_host_tensor,
-)
 from .._kernel_signature import DeviceParameterSpec, RuntimeScalarParameterSpec, TensorSpecParameterSpec
 from .._types import _resolve
 from .native_build import build_native_library
 
-from mlir.ir import BF16Type, F16Type, F32Type, IndexType, IntegerType
+from mlir.ir import BF16Type, Context, F16Type, F32Type, IndexType, IntegerType
 
 if TYPE_CHECKING:
     from .._kernel_compilation import CompiledKernelHandle
+
+
+def _legacy_tensor_entry_abi_error(name: str) -> TypeError:
+    return TypeError(
+        f"legacy host-tensor launch parameter '{name}' is no longer supported by the public @pto.jit "
+        'runtime ABI. Use an explicit GM pointer such as pto.ptr(pto.f32, "gm") plus runtime '
+        "shape/stride scalars instead."
+    )
 
 
 def _normalize_stream_ptr(stream):
@@ -56,7 +60,13 @@ def _as_void_ptr(value):
 
 
 def _ctype_for_runtime_scalar(annotation):
-    type_obj = _resolve(annotation)
+    try:
+        type_obj = _resolve(annotation)
+    except RuntimeError as exc:
+        if "requires a Context" not in str(exc):
+            raise
+        with Context():
+            type_obj = _resolve(annotation)
     if IndexType.isinstance(type_obj):
         return ctypes.c_int64
     if IntegerType.isinstance(type_obj):
@@ -104,17 +114,7 @@ def _marshal_launch_args(kernel_signature, args):
             marshaled.append(_marshal_runtime_scalar(param.annotation, value))
             continue
         if isinstance(param, TensorSpecParameterSpec):
-            if not looks_like_host_tensor(value):
-                raise TypeError(
-                    f"launch argument '{param.name}' expects a Python-native tensor-like object"
-                )
-            meta = inspect_host_tensor_metadata(value)
-            marshaled.append(_as_void_ptr(meta.data_handle))
-            for dim in meta.shape:
-                marshaled.append(ctypes.c_int64(dim))
-            for dim in meta.strides:
-                marshaled.append(ctypes.c_int64(dim))
-            continue
+            raise _legacy_tensor_entry_abi_error(param.name)
         raise TypeError(f"unsupported launch parameter spec: {param!r}")
     return marshaled
 
@@ -169,10 +169,7 @@ def _launch_argtypes(kernel_signature):
             argtypes.append(_ctype_for_runtime_scalar(param.annotation))
             continue
         if isinstance(param, TensorSpecParameterSpec):
-            argtypes.append(ctypes.c_void_p)
-            rank = param.tensor_spec.rank
-            argtypes.extend([ctypes.c_int64] * (rank + rank))
-            continue
+            raise _legacy_tensor_entry_abi_error(param.name)
         raise TypeError(f"unsupported launch parameter spec: {param!r}")
     return argtypes
 

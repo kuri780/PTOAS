@@ -8,17 +8,26 @@ Chapter 2 showed a 1D vector add with a single blocking dimension. Real workload
 
 ```python
 @pto.jit(target="a5")
-def mat_add(A, B, O, *, BLOCK_M: pto.constexpr = 64, BLOCK_N: pto.constexpr = 128):
-    M, N_ = A.shape
-
-    a_view = pto.make_tensor_view(A, shape=[M, N_], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[M, N_], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[M, N_], strides=O.strides)
+def mat_add(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    batch: pto.i32,
+    M: pto.i32,
+    N_: pto.i32,
+    *,
+    BLOCK_M: pto.constexpr = 64,
+    BLOCK_N: pto.constexpr = 128,
+):
+    a_view = pto.make_tensor_view(A_ptr, shape=[batch, M, N_], strides=[M * N_, N_, 1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[batch, M, N_], strides=[M * N_, N_, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[batch, M, N_], strides=[M * N_, N_, 1])
 
     a_tile = pto.alloc_tile(shape=[BLOCK_M, BLOCK_N], dtype=pto.f32)
     b_tile = pto.alloc_tile(shape=[BLOCK_M, BLOCK_N], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[BLOCK_M, BLOCK_N], dtype=pto.f32)
 
+    block_idx = pto.get_block_idx()
     num_m = (M + BLOCK_M - 1) // BLOCK_M
     num_n = (N_ + BLOCK_N - 1) // BLOCK_N
 
@@ -27,9 +36,9 @@ def mat_add(A, B, O, *, BLOCK_M: pto.constexpr = 64, BLOCK_N: pto.constexpr = 12
         with pto.for_(0, num_n, step=1) as ni:
             n_off = ni * BLOCK_N
 
-            a_part = pto.partition_view(a_view, offsets=[m_off, n_off], sizes=[BLOCK_M, BLOCK_N])
-            b_part = pto.partition_view(b_view, offsets=[m_off, n_off], sizes=[BLOCK_M, BLOCK_N])
-            o_part = pto.partition_view(o_view, offsets=[m_off, n_off], sizes=[BLOCK_M, BLOCK_N])
+            a_part = pto.partition_view(a_view, offsets=[block_idx, m_off, n_off], sizes=[1, BLOCK_M, BLOCK_N])
+            b_part = pto.partition_view(b_view, offsets=[block_idx, m_off, n_off], sizes=[1, BLOCK_M, BLOCK_N])
+            o_part = pto.partition_view(o_view, offsets=[block_idx, m_off, n_off], sizes=[1, BLOCK_M, BLOCK_N])
 
             pto.tile.load(a_part, a_tile)
             pto.tile.load(b_part, b_tile)
@@ -52,8 +61,8 @@ def mat_add_wrapper(A, B, O=None, stream=None):
     if O is None:
         O = pto.empty_like(A)
     compiled = mat_add.compile(BLOCK_M=64, BLOCK_N=128)
-    m, n = A.shape[1], A.shape[2]  # assuming batch-first: [batch, M, N]
-    compiled[A.shape[0], stream](A, B, O)
+    batch, m, n = A.shape
+    compiled[batch, stream](A.ctypes.data, B.ctypes.data, O.ctypes.data, batch, m, n)
     return O
 ```
 
@@ -104,17 +113,16 @@ At the Tile Op level, tail handling is built into `tile.load` and `tile.store`. 
 ```python
 @pto.jit(target="a5")
 def vec_add_with_tail(
-    A: pto.tensor_spec(rank=1, dtype=pto.f32),
-    B: pto.tensor_spec(rank=1, dtype=pto.f32),
-    O: pto.tensor_spec(rank=1, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    N: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    N = A.shape[0]
-
-    a_view = pto.make_tensor_view(A, shape=[N], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[N], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[N], strides=[1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[N], strides=[1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[N], strides=[1])
 
     a_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32, valid_shape=[pto.const(BLOCK)])
     b_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32, valid_shape=[pto.const(BLOCK)])
@@ -181,20 +189,20 @@ The cube sub-kernel consumes MAT staging tiles plus cube-local scratch buffers. 
 ```python
 @pto.jit(target="a5", mode="explicit")
 def gemm(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    O: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    M: pto.i32,
+    K_: pto.i32,
+    N_: pto.i32,
     *,
     BLOCK_M: pto.constexpr = 64,
     BLOCK_K: pto.constexpr = 64,
     BLOCK_N: pto.constexpr = 64,
 ):
-    M, K_ = A.shape
-    _, N_ = B.shape
-
-    a_view = pto.make_tensor_view(A, shape=[M, K_], strides=A.strides)
-    b_view = pto.make_tensor_view(B, shape=[K_, N_], strides=B.strides)
-    o_view = pto.make_tensor_view(O, shape=[M, N_], strides=O.strides)
+    a_view = pto.make_tensor_view(A_ptr, shape=[M, K_], strides=[K_, 1])
+    b_view = pto.make_tensor_view(B_ptr, shape=[K_, N_], strides=[N_, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[M, N_], strides=[N_, 1])
 
     a_mat = pto.alloc_tile(shape=[BLOCK_M, BLOCK_K], dtype=pto.f32,
                            memory_space=pto.MemorySpace.MAT)
@@ -257,7 +265,7 @@ def gemm_wrapper(A, B, O=None, stream=None):
     if O is None:
         O = np.empty((A.shape[0], B.shape[1]), dtype=A.dtype)
     compiled = gemm.compile(BLOCK_M=64, BLOCK_K=64, BLOCK_N=64)
-    compiled[1, stream](A, B, O)
+    compiled[1, stream](A.ctypes.data, B.ctypes.data, O.ctypes.data, A.shape[0], A.shape[1], B.shape[1])
     return O
 ```
 
@@ -288,14 +296,14 @@ The example below keeps the whole pattern inside one `@pto.jit` kernel. The firs
 ```python
 @pto.jit(target="a5")
 def online_layernorm(
-    X: pto.tensor_spec(rank=1, dtype=pto.f32),
-    O: pto.tensor_spec(rank=1, dtype=pto.f32),
+    X_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    N: pto.i32,
     *,
     BLOCK: pto.constexpr = 128,
 ):
-    N = X.shape[0]
-    x_view = pto.make_tensor_view(X, shape=[N], strides=X.strides)
-    o_view = pto.make_tensor_view(O, shape=[N], strides=O.strides)
+    x_view = pto.make_tensor_view(X_ptr, shape=[N], strides=[1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[N], strides=[1])
 
     x_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32, valid_shape=[pto.const(BLOCK)])
     o_tile = pto.alloc_tile(shape=[BLOCK], dtype=pto.f32, valid_shape=[pto.const(BLOCK)])

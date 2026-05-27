@@ -136,10 +136,15 @@ def emit_flash_attention_mlir(
 
 @pto.jit(target="a5", mode="explicit")
 def flash_attention_kernel(
-    Q: pto.tensor_spec(rank=4, dtype=pto.f32),  # Python/framework tensor, logical [batch, seq_q, heads, dim]
-    K: pto.tensor_spec(rank=4, dtype=pto.f32),  # Python/framework tensor, logical [batch, seq_k, heads, dim]
-    V: pto.tensor_spec(rank=4, dtype=pto.f32),  # Python/framework tensor, logical [batch, seq_k, heads, dim]
-    O: pto.tensor_spec(rank=4, dtype=pto.f32),  # Python/framework tensor, logical [batch, seq_q, heads, dim]
+    Q_ptr: pto.ptr(pto.f32, "gm"),
+    K_ptr: pto.ptr(pto.f32, "gm"),
+    V_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    batch: pto.i32,
+    seq_q: pto.i32,
+    seq_k: pto.i32,
+    heads: pto.i32,
+    dim: pto.i32,
     *,
     BLOCK_Q: pto.constexpr = 128,
     BLOCK_KV: pto.constexpr = 128,
@@ -151,21 +156,22 @@ def flash_attention_kernel(
     Launchable device entry.
 
     ``@pto.jit`` is the compile boundary.  Inputs/outputs at this
-    boundary are Python-native tensor objects; PTO-specific ``TensorView``
-    descriptors are materialized inside the JIT body rather than exposed in the
-    public signature.  Tile sizes and specialization knobs remain constexpr
-    metadata.
+    boundary are explicit GM pointers plus runtime shape metadata; PTO-specific
+    ``TensorView`` descriptors are materialized inside the JIT body rather than
+    exposed in the public signature.  Tile sizes and specialization knobs
+    remain constexpr metadata.
 
     A launch instance is responsible for one ``(batch, head)`` slice.  The
     per-slice logical tiling is expressed directly in this top-level JIT entry.
     """
-    batch, seq_q, heads, dim = Q.shape
-    _, seq_k, _, _ = K.shape
+    q_strides = [seq_q * heads * dim, heads * dim, dim, 1]
+    kv_strides = [seq_k * heads * dim, heads * dim, dim, 1]
+    o_strides = [seq_q * heads * dim, heads * dim, dim, 1]
 
-    q_view = pto.make_tensor_view(Q)
-    k_view = pto.make_tensor_view(K)
-    v_view = pto.make_tensor_view(V)
-    o_view = pto.make_tensor_view(O)
+    q_view = pto.make_tensor_view(Q_ptr, shape=[batch, seq_q, heads, dim], strides=q_strides)
+    k_view = pto.make_tensor_view(K_ptr, shape=[batch, seq_k, heads, dim], strides=kv_strides)
+    v_view = pto.make_tensor_view(V_ptr, shape=[batch, seq_k, heads, dim], strides=kv_strides)
+    o_view = pto.make_tensor_view(O_ptr, shape=[batch, seq_q, heads, dim], strides=o_strides)
 
     # Make the SPMD launch contract explicit in the authored surface.
     # This sketch uses one block per (batch, head) slice and does not further
