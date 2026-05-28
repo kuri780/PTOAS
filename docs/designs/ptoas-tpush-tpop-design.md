@@ -385,7 +385,9 @@ func.func @vector_kernel(%gm_slot_buffer : !pto.ptr<f32>,
   `reserve_buffer.size == SLOT_SIZE * EFFECTIVE_LOCAL_SLOT_NUM`，其中
   `EFFECTIVE_LOCAL_SLOT_NUM` 为显式 `local_slot_num`，缺省时为有效
   `slot_num`。A5 L2L 路径不支持 `local_slot_num`，要求
-  `reserve_buffer.size == SLOT_SIZE * 4`
+  `reserve_buffer.size == SLOT_SIZE * EFFECTIVE_SLOT_NUM`。这里的
+  `EFFECTIVE_SLOT_NUM` 为显式 `slot_num`，缺省时 `DIR_MASK=1/2` 为 `8`、
+  `DIR_MASK=3` 为 `4`
 - 使用 consumer 侧 local FIFO buffer 时，C2V consumer 的 `reserve_buffer.location` 必须是 `VEC`
 - 使用 consumer 侧 local FIFO buffer 时，V2C consumer 的 `reserve_buffer.location` 必须是 `MAT`
 - `reserve_buffer.name` 在本函数内必须唯一
@@ -674,8 +676,9 @@ pto.tfree(%entry, %pipe : !pto.tensor_view<128x512xf32>, !pto.pipe) {split = 0}
 
 - `pto.aic_initialize_pipe` 和 `pto.aiv_initialize_pipe` lower 为 `pto.initialize_l2l_pipe`
 - A5 不支持 `local_slot_num`；前端 init 若显式携带该属性，verifier 会报错
-- A5 的 consumer 侧 `reserve_buffer.size` 不由 `local_slot_num` 决定；当前
-  L2L pipe 约定按 `slot_size * 4` 预留本地 FIFO buffer
+- A5 的 consumer 侧 `reserve_buffer.size` 不由 `local_slot_num` 决定；A5
+  L2L pipe 本地 FIFO 地址按 `slot_num` 取模，按
+  `slot_size * effective_slot_num` 预留本地 FIFO buffer
 
 ### 6.2 `DIR_MASK=1/2`
 
@@ -995,7 +998,8 @@ pass 在模块级按两步执行：
 - `SLOT_SIZE > 0`
 - 使用 consumer 侧 local FIFO buffer 时，`reserve_buffer.size` 必须匹配对应
   pipe 的本地 FIFO 字节数：A2/A3 GM FIFO 路径为
-  `SLOT_SIZE * EFFECTIVE_LOCAL_SLOT_NUM`，A5 L2L 路径为 `SLOT_SIZE * 4`
+  `SLOT_SIZE * EFFECTIVE_LOCAL_SLOT_NUM`，A5 L2L 路径为
+  `SLOT_SIZE * EFFECTIVE_SLOT_NUM`
 - 使用 consumer 侧 local FIFO buffer 时，`reserve_buffer.location` 与 consumer 函数类型匹配
 - `reserve_buffer.name` 在函数内唯一
 - `import_reserved_buffer` 的 `(name, peer_func)` 在函数内唯一

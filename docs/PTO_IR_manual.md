@@ -8347,9 +8347,9 @@ frontend/framework generated IR. The detailed design document is:
 - `slot_size` is expressed in bytes and uses the pre-split logical pipe-entry
   size.
 - `slot_num` is an optional compile-time integer attribute on
-  `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`. It controls the GM
-  ring FIFO depth and defaults to `8` for `dir_mask = 1/2` or `4` for
-  `dir_mask = 3`.
+  `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`. It controls the pipe
+  FIFO depth. The `effective_slot_num` is the explicit value when present, or
+  the default value: `8` for `dir_mask = 1/2` or `4` for `dir_mask = 3`.
 - `local_slot_num` is an optional compile-time integer attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
   On A2/A3 it overrides the default consumer-side local FIFO slot count only
@@ -8360,7 +8360,7 @@ frontend/framework generated IR. The detailed design document is:
   `slot_size * effective_local_slot_num`, where `effective_local_slot_num` is
   the explicit `local_slot_num` when present or the effective `slot_num`
   otherwise. For A5 local FIFO pipes, `local_slot_num` is not configurable and
-  the reserved byte size should be `slot_size * 4`.
+  the reserved byte size should be `slot_size * effective_slot_num`.
 - `nosplit` is an optional compile-time boolean attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
 - `split` is a compile-time attribute, not a runtime SSA operand.
@@ -8454,7 +8454,8 @@ When the address is already fixed in the input IR:
 - `name`: string attribute identifying the logical reserved buffer
 - `size`: reserved buffer size in bytes. For A2/A3 local FIFO pipes this is
   `slot_size * effective_local_slot_num`; for A5 local FIFO pipes this is
-  `slot_size * 4`. Global-only GM FIFO pipes do not use `pto.reserve_buffer`.
+  `slot_size * effective_slot_num`. Global-only GM FIFO pipes do not use
+  `pto.reserve_buffer`.
 - `location`: local address-space attribute, typically `vec` or `mat`
 - `auto`: boolean allocation-mode flag in textual IR
 - `base`: optional explicit local base address
@@ -8575,7 +8576,7 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - On A5, `local_slot_num` must be omitted; A5 frontend pipes lower to
   `pto.initialize_l2l_pipe`, which does not use a local FIFO slot-count
   template parameter. Its consumer-side `pto.reserve_buffer.size` should be
-  `slot_size * 4`
+  `slot_size * effective_slot_num`
 - A global-only GM FIFO initialize carries only `gm_slot_tensor`; it must not
   carry `gm_slot_buffer`, `local_slot_num`, `c2v_consumer_buf`, or
   `v2c_consumer_buf`; it may carry `slot_num`
