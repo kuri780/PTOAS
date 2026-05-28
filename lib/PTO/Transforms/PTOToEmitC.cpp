@@ -6814,11 +6814,9 @@ struct PTODeclareLocalArrayToEmitC
   }
 };
 
-// pto.local_array_get %a[%i0, %i1, ...] -> rvalue.
-// Lowers to a single emitc.subscript with the full index pack; the C++ emitter
-// prints it as `a[i0][i1]...`. The adaptor already exposes target-typed values
-// (the type converter has remapped !pto.local_array -> !emitc.array and
-// index/integer indices), so they're forwarded directly to the builder.
+// pto.local_array_get %a[%i0, %i1, ...] -> scalar snapshot.
+// Materialize the subscript read immediately so the MLIR SSA result keeps its
+// value even if a later pto.local_array_set mutates the same backing array slot.
 struct PTOLocalArrayGetToEmitC
     : public OpConversionPattern<mlir::pto::LocalArrayGetOp> {
   using OpConversionPattern<
@@ -6833,9 +6831,22 @@ struct PTOLocalArrayGetToEmitC
       return rewriter.notifyMatchFailure(
           op, "failed to map local_array element type");
 
+    Value array = peelUnrealized(adaptor.getArray());
+    SmallVector<Value> indices;
+    indices.reserve(adaptor.getIndices().size());
+    for (Value index : adaptor.getIndices())
+      indices.push_back(peelUnrealized(index));
+
     auto sub = rewriter.create<emitc::SubscriptOp>(
-        op.getLoc(), resultTy, adaptor.getArray(), adaptor.getIndices());
-    rewriter.replaceOp(op, sub.getResult());
+        op.getLoc(), resultTy, array, indices);
+    auto snapshot =
+        rewriter
+            .create<emitc::VariableOp>(
+                op.getLoc(), resultTy,
+                emitc::OpaqueAttr::get(rewriter.getContext(), ""))
+            .getResult();
+    rewriter.create<emitc::AssignOp>(op.getLoc(), snapshot, sub.getResult());
+    rewriter.replaceOp(op, snapshot);
     return success();
   }
 };

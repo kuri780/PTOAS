@@ -9,8 +9,8 @@
 // RUN: ptoas %s 2>&1 | FileCheck %s
 
 // Stack-local 1D array: declare, set by dynamic index, get by another dynamic
-// index, set the read-back. Expected: lowers to `int32_t a[16];` plus
-// `a[i] = v;` / `a[i] = a[j];` in the emitted C++.
+// index, set the read-back. Expected: the get is snapshotted before the later
+// set reuses the value.
 
 module {
   func.func @local_array_1d(%i : index, %j : index, %v : i32) {
@@ -25,4 +25,6 @@ module {
 // CHECK-LABEL: local_array_1d
 // CHECK: int32_t [[A:v[0-9]+]][16];
 // CHECK: [[A]][{{v[0-9]+}}] = {{v[0-9]+}};
-// CHECK: [[A]][{{v[0-9]+}}] = [[A]][{{v[0-9]+}}];
+// CHECK: int32_t [[R:v[0-9]+]];
+// CHECK: [[R]] = [[A]][{{v[0-9]+}}];
+// CHECK: [[A]][{{v[0-9]+}}] = [[R]];

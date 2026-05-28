@@ -8,9 +8,8 @@
 
 // RUN: ptoas %s 2>&1 | FileCheck %s
 
-// Verify that pto.local_array_get behaves as a real scalar rvalue: its result
-// flows into arith ops without an explicit load. The expected C++ shape is
-// `t = a[j] + 1; a[i] = t;` (or any expression-folded equivalent).
+// Verify that pto.local_array_get behaves as a real scalar SSA value: its
+// result is snapshotted before it flows into later arith ops.
 
 module {
   func.func @local_array_get_rvalue(%i : index, %j : index) {
@@ -25,7 +24,7 @@ module {
 
 // CHECK-LABEL: local_array_get_rvalue
 // CHECK: int32_t [[A:v[0-9]+]][16];
-// `a[i] = ...a[j]... + ...;` — confirms the get result flows through arith as
-// a scalar rvalue. The exact cast/paren shape comes from arith.addi's signless
-// overflow-aware lowering; we only pin the subscript-rvalue flow here.
-// CHECK: [[A]][{{v[0-9]+}}] = {{.*}}[[A]][{{v[0-9]+}}]{{.*}};
+// CHECK: int32_t [[R:v[0-9]+]];
+// CHECK: [[R]] = [[A]][{{v[0-9]+}}];
+// CHECK: uint32_t [[R_U:v[0-9]+]] = (uint32_t) [[R]];
+// CHECK: [[A]][{{v[0-9]+}}] = {{.*}}[[R_U]]{{.*}};

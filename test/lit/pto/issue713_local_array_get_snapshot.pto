@@ -1,0 +1,47 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a3 %s -o - 2>&1 | FileCheck %s --check-prefix=CPP
+
+module {
+  func.func @issue713_local_array_get_snapshot(%out: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_index = arith.constant 0 : index
+    %c1_index = arith.constant 1 : index
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c100_i32 = arith.constant 100 : i32
+    %c7_i32 = arith.constant 7 : i32
+
+    %arr = pto.declare_local_array -> !pto.local_array<2xi32>
+    pto.local_array_set %arr[%c0_index], %c7_i32 : !pto.local_array<2xi32>, i32
+    pto.local_array_set %arr[%c1_index], %c0_i32 : !pto.local_array<2xi32>, i32
+
+    %cur = pto.local_array_get %arr[%c0_index] : !pto.local_array<2xi32> -> i32
+    %new = arith.addi %cur, %c1_i32 : i32
+    pto.local_array_set %arr[%c0_index], %new : !pto.local_array<2xi32>, i32
+
+    %sum = arith.addi %c100_i32, %cur : i32
+    pto.store_scalar %sum, %out[%c0_index] : !pto.ptr<i32>, i32
+    return
+  }
+}
+
+// CPP-LABEL: AICORE void issue713_local_array_get_snapshot
+// CPP-SAME: (__gm__ int32_t* [[OUT:v[0-9]+]])
+// CPP: int32_t [[ARR:v[0-9]+]][2];
+// CPP: [[ARR]][{{v[0-9]+}}] = {{v[0-9]+}};
+// CPP: [[ARR]][{{v[0-9]+}}] = {{v[0-9]+}};
+// CPP: int32_t [[CUR:v[0-9]+]];
+// CPP-NEXT: [[CUR]] = [[ARR]][{{v[0-9]+}}];
+// CPP-NEXT: uint32_t [[NEW_U:v[0-9]+]] = (uint32_t) [[CUR]];
+// CPP-NEXT: [[ARR]][{{v[0-9]+}}] = {{.*}}[[NEW_U]]{{.*}};
+// CPP-NOT: [[ARR]][
+// CPP: uint32_t [[SUM_U:v[0-9]+]] = (uint32_t) [[CUR]];
+// CPP-NEXT: int32_t [[SUM:v[0-9]+]] = {{.*}}[[SUM_U]]{{.*}};
+// CPP-NEXT: [[OUT]][{{v[0-9]+}}] = [[SUM]];

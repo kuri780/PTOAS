@@ -2252,8 +2252,9 @@ def DeclareLocalArrayOp : PTO_Op<"declare_local_array"> {
 def LocalArrayGetOp : PTO_Op<"local_array_get"> {
   let summary = "Read one element from a stack-local array";
   let description = [{
-    Lowers to `a[i0][i1]...[iN-1]` (an rvalue) in the emitted C++. The number
-    of indices must equal the array's rank.
+    Lowers to a scalar snapshot initialized from `a[i0][i1]...[iN-1]` in the
+    emitted C++. This preserves SSA value semantics if the array is mutated
+    later. The number of indices must equal the array's rank.
   }];
 
   let arguments = (ins

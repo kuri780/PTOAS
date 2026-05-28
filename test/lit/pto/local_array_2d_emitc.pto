@@ -9,8 +9,8 @@
 // RUN: ptoas %s 2>&1 | FileCheck %s
 
 // Stack-local 2D array: declare, set at (i, j), get at (j, i), set the
-// read-back to (i, j). Expected: lowers to `float m[8][8];` plus chained
-// `m[i][j] = v;` / `m[i][j] = m[j][i];` in the emitted C++.
+// read-back to (i, j). Expected: the get is snapshotted before the later set
+// reuses the value.
 
 module {
   func.func @local_array_2d(%i : index, %j : index, %v : f32) {
@@ -25,4 +25,6 @@ module {
 // CHECK-LABEL: local_array_2d
 // CHECK: float [[M:v[0-9]+]][8][8];
 // CHECK: [[M]][{{v[0-9]+}}][{{v[0-9]+}}] = {{v[0-9]+}};
-// CHECK: [[M]][{{v[0-9]+}}][{{v[0-9]+}}] = [[M]][{{v[0-9]+}}][{{v[0-9]+}}];
+// CHECK: float [[R:v[0-9]+]];
+// CHECK: [[R]] = [[M]][{{v[0-9]+}}][{{v[0-9]+}}];
+// CHECK: [[M]][{{v[0-9]+}}][{{v[0-9]+}}] = [[R]];
