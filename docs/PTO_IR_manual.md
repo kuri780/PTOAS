@@ -9373,6 +9373,16 @@ pto.comm.tget(%dst, %src, buf(%ping, %pong) : !pto.partition_tensor_view<128xf32
 - `signal` must be a GM-shaped value with element type `i32`.
 - `value` / `cmpValue` must be signless integer scalars.
 
+**Lowering ordering guarantee:**
+
+- `pto.comm.tnotify` is lowered with a `pipe_barrier(PIPE_ALL)` emitted
+  immediately before the `pto::comm::TNOTIFY(...)` call. `TNOTIFY_IMPL` writes
+  the signal on the scalar pipe and only issues its trailing barrier *after*
+  the store, so this preceding drain is what makes the
+  `peer_TWAIT_returns ⇒ everything I issued before my TNOTIFY is visible`
+  contract hold across `pto.tload` / `pto.tstore` (local or peer-addressed).
+  Callers do not need to insert manual sync.
+
 **Examples:**
 
 ```mlir

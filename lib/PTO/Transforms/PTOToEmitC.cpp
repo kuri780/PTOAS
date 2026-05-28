@@ -6387,6 +6387,20 @@ static std::string notifyOpTok(pto::NotifyOp op) {
   return "pto::comm::NotifyOp::Set";
 }
 
+// Issue #711: TNOTIFY writes its signal on the scalar pipe, and
+// TNOTIFY_IMPL's trailing pipe_barrier(PIPE_ALL) runs *after* that store.
+// If any prior pto.tload / pto.tstore (local or peer) is still in flight on
+// an MTE pipe when the signal lands, the receiver's matching TWAIT can
+// return before the data is visible. The lowering of pto.comm.tnotify must
+// drain MTE-side pipes itself; callers cannot be required to insert sync.
+static void emitTNotifyMteDrain(ConversionPatternRewriter &rewriter,
+                                Location loc) {
+  auto *ctx = rewriter.getContext();
+  auto args = rewriter.getArrayAttr({emitc::OpaqueAttr::get(ctx, "PIPE_ALL")});
+  rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "pipe_barrier", args,
+                                       ArrayAttr{}, ValueRange{});
+}
+
 static std::string waitCmpTok(pto::WaitCmp cmp) {
   switch (cmp) {
   case pto::WaitCmp::EQ:
@@ -6641,6 +6655,9 @@ struct PTOSignalCommToEmitC : public OpConversionPattern<SignalOp> {
           rewriter, op.getLoc(), notifyTy, notifyOpTok(op.getNotifyOp()));
       SmallVector<Value> operands{*signalGT, peelUnrealized(adaptor.getValue()),
                                   notifyOp};
+      // See emitTNotifyMteDrain comment: drain in-flight MTE work before the
+      // scalar-pipe signal store so the notify/wait handshake is honored.
+      emitTNotifyMteDrain(rewriter, op.getLoc());
       rewriter.create<emitc::CallOpaqueOp>(op.getLoc(), TypeRange{}, callee,
                                            ArrayAttr{}, ArrayAttr{}, operands);
       rewriter.eraseOp(op);
