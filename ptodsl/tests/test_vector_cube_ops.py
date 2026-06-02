@@ -32,6 +32,7 @@ class VectorCubeSurfaceTest(unittest.TestCase):
             "vcmin", "vcgmin", "vcpadd",
             "vadds", "vmuls", "vmaxs", "vmins", "vlrelu",
             "vaxpy", "vaddrelu", "vsubrelu", "vsel",
+            "mte_gm_l1", "mte_l1_ub", "mte_gm_l1_frac", "mte_l1_bt", "mte_l1_fb",
             "mad_acc", "mad_bias", "mad_mx", "mad_mx_acc", "mad_mx_bias",
         ]
 
@@ -245,6 +246,86 @@ class VectorCubeSurfaceTest(unittest.TestCase):
                     with patch.object(_ops._pto, op_name, op_ctor):
                         getattr(_ops, func_name)(*args)
                     self.assertEqual(op_ctor.call_args.args, expected_call)
+
+    def test_mad_option_wrappers_dispatch_to_generated_ops(self):
+        lhs = object()
+        rhs = object()
+        dst = object()
+        bias = object()
+        mad_options = {
+            "unit_flag_mode": "unit_flag_attr",
+            "disable_gemv": True,
+            "sat_mode": "sat_attr",
+            "tf32_mode": "tf32_attr",
+            "n_dir": True,
+        }
+        mad_mx_options = {
+            "unit_flag_mode": "unit_flag_attr",
+            "disable_gemv": True,
+            "sat_mode": "sat_attr",
+            "n_dir": True,
+        }
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops, "_coerce_i64", side_effect=lambda value, *, context: f"i64:{value}"), \
+             patch.object(_ops, "_mad_options", return_value=mad_options) as normalize_mad, \
+             patch.object(_ops._pto, "MadOp", MagicMock()) as mad_op:
+            _ops.mad(
+                lhs,
+                rhs,
+                dst,
+                1,
+                2,
+                3,
+                unit_flag="check_only",
+                disable_gemv=True,
+                sat="nosat",
+                tf32_mode="round_even",
+                n_dir=True,
+            )
+        normalize_mad.assert_called_once_with(
+            unit_flag="check_only",
+            disable_gemv=True,
+            sat="nosat",
+            tf32_mode="round_even",
+            n_dir=True,
+        )
+        self.assertEqual(mad_op.call_args.args, (lhs, rhs, dst, "i64:1", "i64:2", "i64:3"))
+        self.assertEqual(mad_op.call_args.kwargs, mad_options)
+
+        with patch.object(_ops, "unwrap_surface_value", side_effect=_identity), \
+             patch.object(_ops, "_coerce_i64", side_effect=lambda value, *, context: f"i64:{value}"), \
+             patch.object(_ops, "_mad_mx_options", return_value=mad_mx_options) as normalize_mx, \
+             patch.object(_ops._pto, "MadMxBiasOp", MagicMock()) as mad_mx_bias_op:
+            _ops.mad_mx_bias(
+                lhs,
+                rhs,
+                dst,
+                bias,
+                1,
+                2,
+                3,
+                unit_flag="check_and_set",
+                disable_gemv=True,
+                sat="sat",
+                n_dir=True,
+            )
+        normalize_mx.assert_called_once_with(
+            unit_flag="check_and_set",
+            disable_gemv=True,
+            sat="sat",
+            n_dir=True,
+        )
+        self.assertEqual(mad_mx_bias_op.call_args.args, (lhs, rhs, dst, bias, "i64:1", "i64:2", "i64:3"))
+        self.assertEqual(mad_mx_bias_op.call_args.kwargs, mad_mx_options)
+
+    def test_mte_l0c_ub_dst_mode_accepts_enum_like_subblock_value(self):
+        enum_like = SimpleNamespace(value=1)
+        with patch.object(_ops, "_acc_store_ub_dst_mode_attr", return_value="single_attr"), \
+             patch.object(_ops, "_coerce_i64", side_effect=lambda value, *, context: f"i64:{value}"):
+            attr, sub_blockid = _ops._mte_l0c_ub_dst_mode(enum_like)
+        self.assertEqual(attr, "single_attr")
+        self.assertEqual(sub_blockid, "i64:1")
 
     def test_tile_selection_surface_exposes_optional_tmp(self):
         for func, expected in [
