@@ -781,7 +781,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ### Staging: GM → L1 and L1 → UB
 
-#### `pto.mte_gm_l1(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int] = (1, 0, 0), loops: list[tuple[int, int, int]] | None = None) -> None`
+#### `pto.mte_gm_l1(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int], loops: list[tuple[int, int, int]] | None = None) -> None`
 
 **Description**: Structured GM-to-L1 (cbuf) data movement.
 
@@ -799,7 +799,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ---
 
-#### `pto.mte_gm_l1_frac(src: PtrType, dst: PtrType, mode: FractalMode, *, shape: tuple[int, int], src_layout: tuple[int, int], dst_group: tuple[int, int, int, int], ctrl: tuple[int, bool]) -> None`
+#### `pto.mte_gm_l1_frac(src: PtrType, dst: PtrType, mode: pto.FractalMode, *, shape: tuple[int, int], src_layout: tuple[int] | tuple[int, int], dst_group: tuple[int, int, int, int], ctrl: tuple[int, bool]) -> None`
 
 **Description**: Fractal GM-to-L1 load for specialized layouts (`ND2NZ`, `DN2NZ`).
 
@@ -809,9 +809,9 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 |-----------|------|-------------|
 | `src` | `PtrType` (GM) | Global Memory source pointer |
 | `dst` | `PtrType` (L1) | L1 destination pointer |
-| `mode` | `FractalMode` | `ND2NZ` or `DN2NZ` |
+| `mode` | `pto.FractalMode` | `pto.FractalMode.ND2NZ` or `pto.FractalMode.DN2NZ` |
 | `shape` | `tuple[int, int]` | `(n_value, d_value)` |
-| `src_layout` | `tuple[int, int]` | `(inner_stride, outer_stride)` |
+| `src_layout` | `tuple[int]` or `tuple[int, int]` | `(inner_stride,)` or `(inner_stride, outer_stride)` |
 | `dst_group` | `tuple[int, int, int, int]` | `(group_count, loop2_stride, loop3_stride, loop4_stride)` |
 | `ctrl` | `tuple[int, bool]` | `(l2_cache_ctrl, smallc0_en)` |
 
@@ -819,7 +819,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ---
 
-#### `pto.mte_l1_ub(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int] = (1, 0, 0), loops: list[tuple[int, int, int]] | None = None) -> None`
+#### `pto.mte_l1_ub(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int], loops: list[tuple[int, int, int]] | None = None) -> None`
 
 **Description**: Structured L1 (cbuf) to UB data movement.
 
@@ -839,7 +839,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ### Operand loading: L1 → L0A / L0B
 
-#### `pto.mte_l1_l0a(src: PtrType, dst: PtrType, m: int, k: int) -> None`
+#### `pto.mte_l1_l0a(src: PtrType, dst: PtrType, m: int, k: int, *, transpose: bool = False) -> None`
 
 **Description**: Structured L1-to-L0A (left-operand buffer) load.
 
@@ -851,6 +851,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 | `dst` | `PtrType` (L0A) | L0A destination pointer |
 | `m` | `int` | M dimension size |
 | `k` | `int` | K dimension size |
+| `transpose` | `bool` | Whether to load in transposed order |
 
 **Returns**: None (side-effect operation).
 
@@ -874,25 +875,28 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ---
 
-#### `pto.mte_l1_l0a_mx(src: PtrType, dst: PtrType, m: int, k: int) -> None`
-#### `pto.mte_l1_l0b_mx(src: PtrType, dst: PtrType, k: int, n: int) -> None`
+#### `pto.mte_l1_l0a_mx(src: PtrType, dst: PtrType, m: int, k: int, *, transpose: bool = False) -> None`
+#### `pto.mte_l1_l0b_mx(src: PtrType, dst: PtrType, k: int, n: int, *, transpose: bool = False) -> None`
 
-**Description**: MX-mode variants of `mte_l1_l0a` and `mte_l1_l0b` for MX-capable dtypes. Parameters same as their non-MX counterparts.
+**Description**: MX-mode variants of `mte_l1_l0a` and `mte_l1_l0b` for MX-capable dtypes. Parameters match their non-MX counterparts.
+
+**Compatibility note**: `transpose` is part of the TileLang DSL-compatible API surface. Current VPTO MX backend lowering does not yet consume MX `transpose=True`, so it should be treated as an accepted compatibility flag until the backend path is completed.
 
 ---
 
-### Bias loading
+### Bias and factor loading
 
-#### `pto.mte_l1_bias(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int] = (1, 0, 0)) -> None`
+#### `pto.mte_l1_bt(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int]) -> None`
+#### `pto.mte_l1_fb(src: PtrType, dst: PtrType, len_burst: int, *, nburst: tuple[int, int, int]) -> None`
 
-**Description**: Structured L1 (cbuf) to bias table load.
+**Description**: Structured L1 (cbuf) to bias table (`BT`) or factor/scaling buffer (`FB`) load.
 
 **Parameters**:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `src` | `PtrType` (L1) | L1 source pointer |
-| `dst` | `PtrType` (BIAS) | Bias table destination pointer |
+| `dst` | `PtrType` (BIAS/SCALING) | BT or FB destination pointer |
 | `len_burst` | `int` | Burst length in bytes |
 | `nburst` | `tuple[int, int, int]` | `(count, src_gap, dst_gap)` |
 
@@ -902,7 +906,7 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 
 ### Accumulator writeback: L0C → L1 / GM / UB
 
-#### `pto.mte_l0c_l1(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, *, mode: FractalMode = FractalMode.NZ2ND, loop0_src_stride: int | None = None, split: int | None = None, loop3: tuple[int, int, int] | None = None) -> None`
+#### `pto.mte_l0c_l1(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, *, unit_flag: pto.AccStoreUnitFlagCtrl | None = None, pre_quant: tuple[object, str] | None = None, pre_relu: tuple[str, object | None, object | None] | None = None, layout: object | None = None, loop3: tuple[int, int, int] | None = None, sat: pto.SatMode | None = None) -> None`
 
 **Description**: Structured L0C (acc) to L1 (cbuf) writeback.
 
@@ -916,13 +920,18 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 | `n` | `int` | N dimension size |
 | `src_stride` | `int` | Source stride |
 | `dst_stride` | `int` | Destination stride |
-| `mode` | `FractalMode` | `NZ2ND` (default), `NZ2DN`, or `NZ2NZ` |
+| `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
+| `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
+| `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
+| `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
 
 **Returns**: None (side-effect operation).
 
 ---
 
-#### `pto.mte_l0c_gm(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, *, sid: int = 0, l2_cache_ctrl: int = 0, mode: FractalMode = FractalMode.NZ2ND, loop0_src_stride: int | None = None, split: int | None = None, loop3: tuple[int, int, int] | None = None) -> None`
+#### `pto.mte_l0c_gm(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, sid: int, l2_cache_ctrl: int, *, unit_flag: pto.AccStoreUnitFlagCtrl | None = None, pre_quant: tuple[object, str] | None = None, pre_relu: tuple[str, object | None, object | None] | None = None, layout: object | None = None, loop3: tuple[int, int, int] | None = None, sat: pto.SatMode | None = None, atomic: tuple[str, str] | None = None) -> None`
 
 **Description**: Structured L0C (acc) to GM writeback.
 
@@ -936,18 +945,21 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 | `n` | `int` | N dimension size |
 | `src_stride` | `int` | Source stride |
 | `dst_stride` | `int` | Destination stride |
-| `sid` | `int` | Stream ID (default 0) |
-| `l2_cache_ctrl` | `int` | L2 cache control (default 0) |
-| `mode` | `FractalMode` | `NZ2ND` (default), `NZ2DN`, or `NZ2NZ` |
-| `loop0_src_stride` | `int` or `None` | Loop level 0 source stride |
-| `split` | `int` or `None` | Split parameter |
-| `loop3` | `tuple[int, int, int]` or `None` | Loop level 3 parameters |
+| `sid` | `int` | Stream ID |
+| `l2_cache_ctrl` | `int` | L2 cache control |
+| `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
+| `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
+| `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
+| `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
+| `atomic` | `tuple[str, str]` or `None` | Optional GM-only atomic `(type, op)`, e.g. `("f32", "add")` |
 
 **Returns**: None (side-effect operation).
 
 ---
 
-#### `pto.mte_l0c_ub(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, sub_blockid: int = 0, *, dst_mode: str = "single") -> None`
+#### `pto.mte_l0c_ub(src: PtrType, dst: PtrType, m: int, n: int, src_stride: int, dst_stride: int, sub_blockid: int = 0, *, split: pto.SplitMode | None = None, unit_flag: pto.AccStoreUnitFlagCtrl | None = None, pre_quant: tuple[object, str] | None = None, pre_relu: tuple[str, object | None, object | None] | None = None, layout: object | None = None, loop3: tuple[int, int, int] | None = None, sat: pto.SatMode | None = None) -> None`
 
 **Description**: Structured L0C (acc) directly to UB. This is the most common writeback path for cube kernels that feed results into subsequent processing.
 
@@ -961,10 +973,27 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 | `n` | `int` | N dimension size |
 | `src_stride` | `int` | Source stride |
 | `dst_stride` | `int` | Destination stride |
-| `sub_blockid` | `int` | Sub-block ID (default 0) |
-| `dst_mode` | `str` | Destination mode, currently `"single"` by default |
+| `sub_blockid` | `int` | `0` or `1` for single-destination sub-block writeback |
+| `split` | `pto.SplitMode` or `None` | `M` or `N` for dual-destination split; cannot be combined with non-default `sub_blockid` |
+| `unit_flag` | `pto.AccStoreUnitFlagCtrl` or `None` | `CHECK_ONLY` or `CHECK_AND_CLEAR` |
+| `pre_quant` | `tuple[object, str]` or `None` | Optional pre-quantization payload and mode |
+| `pre_relu` | `tuple[str, object | None, object | None]` or `None` | Optional ReLU mode, payload, and clip payload |
+| `layout` | `object` or `None` | `None`, `"nz2nd"`, or a layout tuple such as `("nz2dn", loop0_src_stride)` / `("nz2nz", split)` |
+| `loop3` | `tuple[int, int, int]` or `None` | Optional loop-3 group `(count, src_stride, dst_stride)` |
+| `sat` | `pto.SatMode` or `None` | `ON`, `OFF`, or `PRESERVE_NAN` |
 
 **Returns**: None (side-effect operation).
+
+`sub_blockid` / `split` forms:
+
+```python
+pto.mte_l0c_ub(acc, ub, 16, 32, 16, 32)                         # sub-block 0
+pto.mte_l0c_ub(acc, ub, 16, 32, 16, 32, sub_blockid=1)           # sub-block 1
+pto.mte_l0c_ub(acc, ub, 16, 32, 16, 32, split=pto.SplitMode.M)   # split M
+pto.mte_l0c_ub(acc, ub, 16, 32, 16, 32, split=pto.SplitMode.N)   # split N
+```
+
+`atomic` is not supported on `mte_l0c_l1` or `mte_l0c_ub`; use `mte_l0c_gm(..., atomic=(type, op))` for GM atomic writeback.
 
 ---
 
@@ -979,7 +1008,8 @@ Inside `@pto.cube`, data flows through a hierarchy of private buffers: GM → L1
 | L1 → L0B | `mte_l1_l0b` | l1 | l0b |
 | L1 → L0A (MX) | `mte_l1_l0a_mx` | l1 | l0a |
 | L1 → L0B (MX) | `mte_l1_l0b_mx` | l1 | l0b |
-| L1 → Bias | `mte_l1_bias` | l1 | bt |
+| L1 → Bias table | `mte_l1_bt` | l1 | bt |
+| L1 → Factor buffer | `mte_l1_fb` | l1 | fb |
 | L0C → L1 | `mte_l0c_l1` | l0c | l1 |
 | L0C → GM | `mte_l0c_gm` | l0c | gm |
 | L0C → UB | `mte_l0c_ub` | l0c | ub |
@@ -996,8 +1026,8 @@ def qk_matmul(q_tile, k_tile, q_l0a, k_l0b, s_acc, s_tile):
     k = q_tile.valid_shape[1]
     n = k_tile.valid_shape[0]
 
-    pto.mte_l1_l0a(q_tile.as_ptr(), q_l0a.as_ptr(), m, k)          # UB tile → L0A
-    pto.mte_l1_l0b(k_tile.as_ptr(), k_l0b.as_ptr(), k, n, transpose=True)  # UB tile → L0B
+    pto.mte_l1_l0a(q_tile.as_ptr(), q_l0a.as_ptr(), m, k)          # L1 tile → L0A
+    pto.mte_l1_l0b(k_tile.as_ptr(), k_l0b.as_ptr(), k, n, transpose=True)  # L1 tile → L0B
     pto.mad(q_l0a.as_ptr(), k_l0b.as_ptr(), s_acc.as_ptr(), m, n, k)        # L0A × L0B → L0C
     pto.mte_l0c_ub(s_acc.as_ptr(), s_tile.as_ptr(), m, n, n, n, 0)          # L0C → UB tile
 ```

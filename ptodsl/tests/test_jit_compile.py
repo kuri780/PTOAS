@@ -557,18 +557,74 @@ def public_vector_surface_probe(inp_tile: pto.Tile, out_tile: pto.Tile, stats_ti
 def public_cube_surface_probe(
     lhs_tile: pto.Tile,
     rhs_tile: pto.Tile,
+    lhs_tile_mx: pto.Tile,
+    rhs_tile_mx: pto.Tile,
     lhs_l0a: pto.Tile,
     rhs_l0b: pto.Tile,
+    lhs_l0a_f32: pto.Tile,
+    rhs_l0b_f32: pto.Tile,
+    lhs_l0a_mx: pto.Tile,
+    rhs_l0b_mx: pto.Tile,
     acc_tile: pto.Tile,
+    bias_tile: pto.Tile,
+    l1_out_tile: pto.Tile,
     out_tile: pto.Tile,
+    gm_out_ptr,
 ):
     m = pto.const(16)
     k = pto.const(16)
     n = pto.const(16)
     pto.mte_l1_l0a(lhs_tile.as_ptr(), lhs_l0a.as_ptr(), m, k)
     pto.mte_l1_l0b(rhs_tile.as_ptr(), rhs_l0b.as_ptr(), k, n, transpose=True)
-    pto.mad(lhs_l0a.as_ptr(), rhs_l0b.as_ptr(), acc_tile.as_ptr(), m, n, k)
+    pto.mte_l1_l0a_mx(lhs_tile_mx.as_ptr(), lhs_l0a_mx.as_ptr(), m, k, transpose=True)
+    pto.mte_l1_l0b_mx(rhs_tile_mx.as_ptr(), rhs_l0b_mx.as_ptr(), k, n, transpose=True)
+    pto.mad(
+        lhs_l0a.as_ptr(),
+        rhs_l0b.as_ptr(),
+        acc_tile.as_ptr(),
+        m,
+        n,
+        k,
+        unit_flag=pto.MadUnitFlagMode.CHECK_ONLY,
+        disable_gemv=True,
+        sat=pto.SatMode.OFF,
+        n_dir=True,
+    )
+    pto.mad(lhs_l0a_f32.as_ptr(), rhs_l0b_f32.as_ptr(), acc_tile.as_ptr(), m, n, k, tf32_mode=pto.Tf32Mode.ROUND_EVEN)
+    pto.mad_acc(lhs_l0a.as_ptr(), rhs_l0b.as_ptr(), acc_tile.as_ptr(), m, n, k, unit_flag=pto.MadUnitFlagMode.CHECK_AND_SET)
+    pto.mad_bias(lhs_l0a.as_ptr(), rhs_l0b.as_ptr(), acc_tile.as_ptr(), bias_tile.as_ptr(), m, n, k, sat=pto.SatMode.ON)
+    pto.mad_mx(lhs_l0a_mx.as_ptr(), rhs_l0b_mx.as_ptr(), acc_tile.as_ptr(), m, n, k, unit_flag=pto.MadUnitFlagMode.CHECK_ONLY)
+    pto.mad_mx_acc(lhs_l0a_mx.as_ptr(), rhs_l0b_mx.as_ptr(), acc_tile.as_ptr(), m, n, k, disable_gemv=True)
+    pto.mad_mx_bias(lhs_l0a_mx.as_ptr(), rhs_l0b_mx.as_ptr(), acc_tile.as_ptr(), bias_tile.as_ptr(), m, n, k, n_dir=True)
+    pto.mte_l0c_l1(
+        acc_tile.as_ptr(),
+        l1_out_tile.as_ptr(),
+        m,
+        n,
+        n,
+        n,
+        unit_flag=pto.AccStoreUnitFlagCtrl.CHECK_ONLY,
+        layout="nz2nd",
+        loop3=(1, n, n),
+        sat=pto.SatMode.ON,
+    )
+    pto.mte_l0c_gm(
+        acc_tile.as_ptr(),
+        gm_out_ptr,
+        m,
+        n,
+        n,
+        n,
+        0,
+        0,
+        layout=("nz2dn", n),
+        loop3=(1, n, n),
+        sat=pto.SatMode.OFF,
+        atomic=("f32", "add"),
+    )
     pto.mte_l0c_ub(acc_tile.as_ptr(), out_tile.as_ptr(), m, n, n, n, 0)
+    pto.mte_l0c_ub(acc_tile.as_ptr(), out_tile.as_ptr(), m, n, n, n, split=pto.SplitMode.M, layout="nz2nd")
+    pto.mte_l0c_ub(acc_tile.as_ptr(), out_tile.as_ptr(), m, n, n, n, 1, layout=("nz2nz", 1), sat=pto.SatMode.PRESERVE_NAN)
 
 
 @pto.jit(target="a5", mode="explicit")
@@ -607,6 +663,18 @@ def public_surface_exports_probe(
         memory_space=pto.MemorySpace.MAT,
         valid_shape=[16, 16],
     )
+    lhs_tile_mx = pto.alloc_tile(
+        shape=[16, 32],
+        dtype=pto.f8e4m3,
+        memory_space=pto.MemorySpace.MAT,
+        valid_shape=[16, 16],
+    )
+    rhs_tile_mx = pto.alloc_tile(
+        shape=[16, 32],
+        dtype=pto.f8e4m3,
+        memory_space=pto.MemorySpace.MAT,
+        valid_shape=[16, 16],
+    )
     lhs_l0a = pto.alloc_tile(
         shape=[16, 16],
         dtype=pto.f16,
@@ -619,14 +687,66 @@ def public_surface_exports_probe(
         memory_space=pto.MemorySpace.RIGHT,
         valid_shape=[16, 16],
     )
+    lhs_l0a_f32 = pto.alloc_tile(
+        shape=[16, 16],
+        dtype=pto.f32,
+        memory_space=pto.MemorySpace.LEFT,
+        valid_shape=[16, 16],
+    )
+    rhs_l0b_f32 = pto.alloc_tile(
+        shape=[16, 16],
+        dtype=pto.f32,
+        memory_space=pto.MemorySpace.RIGHT,
+        valid_shape=[16, 16],
+    )
+    lhs_l0a_mx = pto.alloc_tile(
+        shape=[16, 32],
+        dtype=pto.f8e4m3,
+        memory_space=pto.MemorySpace.LEFT,
+        valid_shape=[16, 16],
+    )
+    rhs_l0b_mx = pto.alloc_tile(
+        shape=[16, 32],
+        dtype=pto.f8e4m3,
+        memory_space=pto.MemorySpace.RIGHT,
+        valid_shape=[16, 16],
+    )
     acc_tile = pto.alloc_tile(
         shape=[16, 16],
         dtype=pto.f32,
         memory_space=pto.MemorySpace.ACC,
         valid_shape=[16, 16],
     )
+    bias_tile = pto.alloc_tile(
+        shape=[16, 16],
+        dtype=pto.f32,
+        memory_space=pto.MemorySpace.BIAS,
+        valid_shape=[16, 16],
+    )
+    l1_out = pto.alloc_tile(
+        shape=[16, 16],
+        dtype=pto.f32,
+        memory_space=pto.MemorySpace.MAT,
+        valid_shape=[16, 16],
+    )
     cube_out = pto.alloc_tile(shape=[16, 16], dtype=pto.f32, valid_shape=[16, 16])
-    public_cube_surface_probe(lhs_tile, rhs_tile, lhs_l0a, rhs_l0b, acc_tile, cube_out)
+    public_cube_surface_probe(
+        lhs_tile,
+        rhs_tile,
+        lhs_tile_mx,
+        rhs_tile_mx,
+        lhs_l0a,
+        rhs_l0b,
+        lhs_l0a_f32,
+        rhs_l0b_f32,
+        lhs_l0a_mx,
+        rhs_l0b_mx,
+        acc_tile,
+        bias_tile,
+        l1_out,
+        cube_out,
+        O_ptr,
+    )
 
 
 @pto.jit(target="a5")
@@ -855,7 +975,9 @@ def public_data_movement_surface_probe():
     gm_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "gm"))
     ub_src = pto.castptr(zero_u64, pto.ptr(pto.f16, "ub"))
     ub_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "ub"))
-    l1_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "left"))
+    l1_dst = pto.castptr(zero_u64, pto.ptr(pto.f16, "mat"))
+    bias_dst = pto.castptr(zero_u64, pto.ptr(pto.f32, pto.MemorySpace.BIAS))
+    scaling_dst = pto.castptr(zero_u64, pto.ptr(pto.f32, pto.MemorySpace.SCALING))
     ub_src_f32 = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
     ub_dst_f32 = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
 
@@ -864,6 +986,19 @@ def public_data_movement_surface_probe():
     pto.mte_ub_gm(ub_src, gm_dst, 256, nburst=(64, 256, 1024))
     pto.mte_ub_ub(ub_src, ub_dst, 8, nburst=(16, 0, 4))
     pto.mte_ub_l1(ub_src, l1_dst, 8, nburst=(16, 0, 4))
+    pto.mte_gm_l1(gm_src, l1_dst, 256, nburst=(8, 256, 256), loops=[(2, 2048, 2048)])
+    pto.mte_l1_ub(l1_dst, ub_dst, 256, nburst=(8, 256, 256), loops=[(2, 2048, 2048)])
+    pto.mte_gm_l1_frac(
+        gm_src,
+        l1_dst,
+        pto.FractalMode.ND2NZ,
+        shape=(16, 16),
+        src_layout=(16, 256),
+        dst_group=(1, 0, 0, 0),
+        ctrl=(0, False),
+    )
+    pto.mte_l1_bt(l1_dst, bias_dst, 8, nburst=(1, 0, 0))
+    pto.mte_l1_fb(l1_dst, scaling_dst, 8, nburst=(1, 0, 0))
 
     load_align0 = pto.vldas(ub_src)
     vec0, load_align1 = pto.vldus(ub_src, load_align0)
@@ -1020,6 +1155,11 @@ def main() -> None:
         "mte_ub_gm",
         "mte_ub_ub",
         "mte_ub_l1",
+        "mte_gm_l1",
+        "mte_l1_ub",
+        "mte_gm_l1_frac",
+        "mte_l1_bt",
+        "mte_l1_fb",
         "vldsx2",
         "vldas",
         "vldus",
@@ -1036,8 +1176,17 @@ def main() -> None:
         "vstus",
         "mte_l1_l0a",
         "mte_l1_l0b",
+        "mte_l1_l0a_mx",
+        "mte_l1_l0b_mx",
+        "mte_l0c_l1",
+        "mte_l0c_gm",
         "mte_l0c_ub",
         "mad",
+        "mad_acc",
+        "mad_bias",
+        "mad_mx",
+        "mad_mx_acc",
+        "mad_mx_bias",
         "empty_like",
     ]
     for name in expected_public_exports:
@@ -1815,6 +1964,11 @@ def main() -> None:
     expect("pto.mte_ub_gm" in data_movement_surface_text, "public grouped UB->GM wrapper should lower to pto.mte_ub_gm")
     expect("pto.mte_ub_ub" in data_movement_surface_text, "public grouped UB->UB wrapper should lower to pto.mte_ub_ub")
     expect("pto.mte_ub_l1" in data_movement_surface_text, "public grouped UB->L1 wrapper should lower to pto.mte_ub_l1")
+    expect("pto.mte_gm_l1" in data_movement_surface_text, "public grouped GM->L1 wrapper should lower to pto.mte_gm_l1")
+    expect("pto.mte_l1_ub" in data_movement_surface_text, "public grouped L1->UB wrapper should lower to pto.mte_l1_ub")
+    expect("pto.mte_gm_l1_frac" in data_movement_surface_text, "public GM->L1 frac wrapper should lower to pto.mte_gm_l1_frac")
+    expect("pto.mte_l1_bt" in data_movement_surface_text, "public L1->BT wrapper should lower to pto.mte_l1_bt")
+    expect("pto.mte_l1_fb" in data_movement_surface_text, "public L1->FB wrapper should lower to pto.mte_l1_fb")
     expect("pto.vldas" in data_movement_surface_text, "vldas(...) should lower to pto.vldas")
     expect("pto.vldus" in data_movement_surface_text, "vldus(...) should lower to pto.vldus")
     expect("pto.vldsx2" in data_movement_surface_text, "vldsx2(...) should lower to pto.vldsx2")
@@ -1838,8 +1992,21 @@ def main() -> None:
     expect("pto.vstar" in data_movement_surface_text, "vstar(...) should lower to pto.vstar")
     expect("pto.vstas" in data_movement_surface_text, "vstas(...) should lower to pto.vstas")
     expect("pto.mte_l1_l0b" in public_surface_text, "mte_l1_l0b(...) should lower to pto.mte_l1_l0b")
-    expect("pto.mte_l0c_ub" in public_surface_text, "mte_l0c_ub(...) should lower to pto.mte_l0c_ub")
+    expect("pto.mte_l1_l0a_mx" in public_surface_text, "mte_l1_l0a_mx(...) should lower to pto.mte_l1_l0a_mx")
+    expect("pto.mte_l1_l0b_mx" in public_surface_text, "mte_l1_l0b_mx(...) should lower to pto.mte_l1_l0b_mx")
+    expect("pto.mte_l0c_l1" in public_surface_text, "mte_l0c_l1(...) should lower to pto.mte_l0c_l1")
+    expect("pto.mte_l0c_gm" in public_surface_text, "mte_l0c_gm(...) should lower to pto.mte_l0c_gm")
+    expect(public_surface_text.count("pto.mte_l0c_ub") >= 2, "mte_l0c_ub(...) should lower sub-block and split modes")
     expect("pto.mad" in public_surface_text, "mad(...) should lower to pto.mad")
+    expect("unit_flag(check_only)" in public_surface_text, "mad unit_flag option should lower to PTO unit_flag clause")
+    expect("disable_gemv" in public_surface_text, "mad disable_gemv option should lower to PTO disable_gemv clause")
+    expect("tf32_mode(round_even)" in public_surface_text, "mad tf32_mode option should lower to PTO tf32_mode clause")
+    expect("n_dir" in public_surface_text, "mad n_dir option should lower to PTO n_dir clause")
+    expect("pto.mad_acc" in public_surface_text, "mad_acc(...) should lower to pto.mad_acc")
+    expect("pto.mad_bias" in public_surface_text, "mad_bias(...) should lower to pto.mad_bias")
+    expect("pto.mad_mx" in public_surface_text, "mad_mx(...) should lower to pto.mad_mx")
+    expect("pto.mad_mx_acc" in public_surface_text, "mad_mx_acc(...) should lower to pto.mad_mx_acc")
+    expect("pto.mad_mx_bias" in public_surface_text, "mad_mx_bias(...) should lower to pto.mad_mx_bias")
     expect("!pto.tile_buf<vec, 128x64xf8E4M3FN>" in low_precision_storage_text, "low-precision tile allocation should preserve float8 element types in MLIR")
     expect("!pto.tile_buf<vec, 64x64x!pto.hif8>" in low_precision_storage_text, "low-precision tile allocation should preserve HiF8 element types in MLIR")
     expect("pto.vlds" in pointer_vlds_text, "vlds(ptr, offset) should still lower to pto.vlds")

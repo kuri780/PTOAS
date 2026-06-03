@@ -7,6 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """Public PTODSL surface markers and enums."""
 
+from enum import Enum
+
 from ._bootstrap import make_context  # noqa: F401
 from ._host_tensors import TensorSpec, tensor_spec
 
@@ -163,6 +165,52 @@ class PostUpdate:
     ON = "POST_UPDATE"
 
 
+class FractalMode(str, Enum):
+    """Cube fractal-layout conversion modes."""
+
+    ND2NZ = "nd2nz"
+    DN2NZ = "dn2nz"
+    NZ2ND = "nz2nd"
+    NZ2DN = "nz2dn"
+    NZ2NZ = "nz2nz"
+
+
+class AccStoreUnitFlagCtrl(str, Enum):
+    """Accumulator-store unit-flag modes."""
+
+    CHECK_ONLY = "check_only"
+    CHECK_AND_CLEAR = "check_and_clear"
+
+
+class MadUnitFlagMode(str, Enum):
+    """MAD producer unit-flag modes."""
+
+    CHECK_ONLY = "check_only"
+    CHECK_AND_SET = "check_and_set"
+
+
+class SatMode(str, Enum):
+    """Saturation policy values used by cube compute/store surfaces."""
+
+    ON = "on"
+    OFF = "off"
+    PRESERVE_NAN = "preserve_nan"
+
+
+class Tf32Mode(str, Enum):
+    """TF32 rounding mode for f32 cube MAD operations."""
+
+    ROUND_EVEN = "round_even"
+    ROUND_AWAY = "round_away"
+
+
+class SplitMode(str, Enum):
+    """Dual-destination split axis for accumulator stores to UB."""
+
+    M = "M"
+    N = "N"
+
+
 AlignType = _pto.AlignType
 DivPrecision = _pto.DivPrecision
 ExpPrecision = _pto.ExpPrecision
@@ -198,6 +246,12 @@ __all__ = [
     "DeinterleaveDist",
     "InterleaveDist",
     "PostUpdate",
+    "FractalMode",
+    "AccStoreUnitFlagCtrl",
+    "MadUnitFlagMode",
+    "SatMode",
+    "Tf32Mode",
+    "SplitMode",
     "AlignType",
     "DivPrecision",
     "ExpPrecision",

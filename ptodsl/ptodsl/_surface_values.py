@@ -595,7 +595,25 @@ def infer_ptr_type_from_surface_value(surface_value):
     if space_enum is None:
         raise RuntimeError("unable to infer tile pointer type: unsupported tile memory space")
 
-    return _resolve(ptr(tile_type.element_type, space_enum))
+    try:
+        return _resolve(ptr(tile_type.element_type, space_enum))
+    except TypeError as exc:
+        if "storage-only low-precision type" not in str(exc):
+            raise
+        return _resolve_storage_tile_ptr_type(tile_type.element_type, space_enum)
+
+
+def _resolve_storage_tile_ptr_type(element_type, space_enum):
+    space_attr = _pto.AddressSpaceAttr.get(space_enum)
+    try:
+        return _pto.PtrType.get(element_type, memory_space=space_attr)
+    except TypeError:
+        ptr_get_impl = getattr(_pto, "_ptr_type_get_impl", None)
+        if ptr_get_impl is None:
+            raise
+        if space_enum != _pto.AddressSpace.GM:
+            return ptr_get_impl(element_type, space_attr)
+        return _pto.PtrType.get(element_type)
 
 
 def emit_as_ptr(surface_value):

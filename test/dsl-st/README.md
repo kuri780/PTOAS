@@ -120,12 +120,14 @@ auto_main(globals())
 可以直接参考：
 
 - [predicate_pack_launch.py](/home/zhangzhendong/ptoas-workspace/PTOAS/test/dsl-st/predicate_pack_launch.py)
+- [cube_matrix_pipeline.py](/home/zhangzhendong/ptoas-workspace/PTOAS/test/dsl-st/cube_matrix_pipeline.py)
 
 它演示了：
 
 - PTODSL kernel authoring
 - raw predicate image 的 host golden 写法
 - `golden_output_case(...)` 的标准接入方式
+- cube matrix pipeline 的端到端 simulator/ST 写法
 
 ## 运行方式
 

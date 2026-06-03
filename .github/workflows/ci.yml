@@ -488,6 +488,21 @@ jobs:
           PTOAS_BIN="${PTOAS_BIN}" \
           scripts/sim_dsl.sh test/dsl-st/predicate_pack_launch.py \
             2>&1 | tee "${TILELANG_DSL_WORKSPACE}/ptodsl-dsl-st.log"
+          ASCEND_HOME_PATH="${ASCEND_HOME_PATH}" \
+          PTOAS_BIN="${PTOAS_BIN}" \
+          scripts/sim_dsl.sh test/dsl-st/cube_matrix_pipeline.py \
+            2>&1 | tee "${TILELANG_DSL_WORKSPACE}/cube-matrix-pipeline-st.log"
+          PYTHONPATH="${PWD}/build/python:${PWD}/ptodsl:${MLIR_PYTHONPATH}:${PYTHONPATH:-}" \
+            python3 test/dsl-st/cube_matrix_pipeline.py --emit-mlir \
+            > "${TILELANG_DSL_WORKSPACE}/cube_matrix_pipeline.mlir"
+          "${PTOAS_BIN}" \
+            --pto-arch=a5 \
+            --pto-backend=vpto \
+            --pto-level=level3 \
+            --enable-tile-op-expand \
+            "${TILELANG_DSL_WORKSPACE}/cube_matrix_pipeline.mlir" \
+            --emit-pto-ir \
+            -o "${TILELANG_DSL_WORKSPACE}/cube_matrix_pipeline.pto"
 
       - name: Upload TileLang DSL logs
         if: always()

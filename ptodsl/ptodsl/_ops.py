@@ -2665,6 +2665,33 @@ def _coerce_i64(value, *, context: str):
     return signless_value
 
 
+def _coerce_i1(value, *, context: str):
+    raw_value = unwrap_surface_value(value)
+    i1_type = IntegerType.get_signless(1)
+    if isinstance(raw_value, bool):
+        return _materialize_integer_literal(i1_type, int(raw_value))
+    if isinstance(raw_value, int):
+        if raw_value not in (0, 1):
+            raise ValueError(f"{context} expects a bool or 0/1 integer, got {raw_value}")
+        return _materialize_integer_literal(i1_type, raw_value)
+    kind = classify_runtime_scalar_type(raw_value.type)
+    if kind == "float":
+        raise TypeError(f"{context} expects a bool or integer-like scalar, got {raw_value.type}")
+    if kind == "index":
+        return arith.IndexCastOp(i1_type, raw_value).result
+    signless_value = _strip_integer_signedness(raw_value)
+    if signless_value.type == i1_type:
+        return signless_value
+    width = IntegerType(raw_value.type).width
+    if width < 1:
+        if _integer_signedness(raw_value.type) == "unsigned":
+            return arith.ExtUIOp(i1_type, signless_value).result
+        return arith.ExtSIOp(i1_type, signless_value).result
+    if width > 1:
+        return arith.TruncIOp(i1_type, signless_value).result
+    return signless_value
+
+
 def _i64_zero():
     return arith.ConstantOp(IntegerType.get_signless(64), 0).result
 
@@ -2714,18 +2741,318 @@ def _membar_attr(kind: str):
     return Attribute.parse(f"#pto.membar<{normalized}>")
 
 
+def _normalize_token(value, *, context: str):
+    token = getattr(value, "value", value)
+    if not isinstance(token, str):
+        token = str(token)
+        if "." in token:
+            token = token.rsplit(".", 1)[-1]
+    return token.strip().lower()
+
+
+def _normalize_sat_mode(sat, *, context: str, allow_preserve_nan: bool):
+    normalized = _normalize_token(sat, context=context)
+    aliases = {
+        "on": "sat",
+        "off": "nosat",
+        "preserve_nan": "sat_preserve_nan",
+        "sat": "sat",
+        "nosat": "nosat",
+        "sat_preserve_nan": "sat_preserve_nan",
+        "sat(preserve_nan)": "sat_preserve_nan",
+    }
+    token = aliases.get(normalized)
+    if token is None:
+        expected = "on/off" + ("/preserve_nan" if allow_preserve_nan else "")
+        raise ValueError(f"{context} does not support {sat!r}; expected {expected}")
+    if token == "sat_preserve_nan" and not allow_preserve_nan:
+        raise ValueError(f"{context} does not support preserve_nan saturation")
+    return token
+
+
+def _enum_attr(kind, value, *, supported: set[str], context: str):
+    normalized = _normalize_token(value, context=context)
+    if normalized not in supported:
+        expected = ", ".join(sorted(supported))
+        raise ValueError(f"{context} does not support {value!r}; expected one of {expected}")
+    return Attribute.parse(f"#pto<{kind} {normalized}>")
+
+
 def _acc_store_ub_dst_mode_attr(mode):
-    normalized = {
-        0: "single",
-        1: "split_m",
-        2: "split_n",
-        "single": "single",
+    return _enum_attr(
+        "acc_store_ub_dst_mode",
+        mode,
+        supported={"single", "split_m", "split_n"},
+        context="mte_l0c_ub dst_mode",
+    )
+
+
+def _acc_store_unit_flag_attr(unit_flag):
+    if unit_flag is None:
+        return None
+    return _enum_attr(
+        "unit_flag_ctrl",
+        unit_flag,
+        supported={"check_only", "check_and_clear"},
+        context="acc store unit_flag",
+    )
+
+
+def _acc_store_pre_quant(pre_quant):
+    if pre_quant is None:
+        return None, None
+    if not isinstance(pre_quant, tuple) or len(pre_quant) != 2:
+        raise TypeError("acc store pre_quant expects (payload, mode)")
+    payload, mode = pre_quant
+    return (
+        unwrap_surface_value(payload),
+        Attribute.parse(f"#pto<quant_pre_mode {_normalize_token(mode, context='acc store pre_quant mode')}>"),
+    )
+
+
+def _acc_store_pre_relu(pre_relu):
+    if pre_relu is None:
+        return None, None, None
+    if not isinstance(pre_relu, tuple) or len(pre_relu) != 3:
+        raise TypeError("acc store pre_relu expects (mode, payload, clip)")
+    mode, payload, clip = pre_relu
+    return (
+        None if payload is None else unwrap_surface_value(payload),
+        Attribute.parse(f"#pto<relu_pre_mode {_normalize_token(mode, context='acc store pre_relu mode')}>"),
+        None if clip is None else unwrap_surface_value(clip),
+    )
+
+
+def _acc_store_layout(layout):
+    if layout is None:
+        return None, None, None
+    if isinstance(layout, tuple):
+        if len(layout) != 2:
+            raise TypeError("acc store layout tuple expects (mode, operand)")
+        mode, operand = layout
+        normalized = _normalize_token(mode, context="acc store layout")
+        if normalized == "nz2dn":
+            return Attribute.parse("#pto<acc_store_mode nz2dn>"), None, _coerce_i64(operand, context="acc store layout nz2dn")
+        if normalized == "nz2nz":
+            return Attribute.parse("#pto<acc_store_mode nz2nz>"), _coerce_i64(operand, context="acc store layout nz2nz"), None
+        raise ValueError("acc store layout tuple only supports nz2dn or nz2nz")
+    normalized = _normalize_token(layout, context="acc store layout")
+    if normalized != "nz2nd":
+        raise ValueError("acc store layout string only supports nz2nd; use (mode, operand) for nz2dn/nz2nz")
+    return Attribute.parse("#pto<acc_store_mode nz2nd>"), None, None
+
+
+def _acc_store_loop3(loop3):
+    if loop3 is None:
+        return None, None, None
+    if not isinstance(loop3, tuple) or len(loop3) != 3:
+        raise TypeError("acc store loop3 expects (count, src_stride, dst_stride)")
+    count, src_stride, dst_stride = loop3
+    return (
+        _coerce_i64(count, context="acc store loop3 count"),
+        _coerce_i64(src_stride, context="acc store loop3 src_stride"),
+        _coerce_i64(dst_stride, context="acc store loop3 dst_stride"),
+    )
+
+
+def _acc_store_sat_attr(sat):
+    if sat is None:
+        return None
+    return _enum_attr(
+        "acc_store_sat_mode",
+        _normalize_sat_mode(sat, context="acc store sat", allow_preserve_nan=True),
+        supported={"sat", "nosat", "sat_preserve_nan"},
+        context="acc store sat",
+    )
+
+
+def _acc_store_atomic_attrs(atomic):
+    if atomic is None:
+        return None, None
+    if not isinstance(atomic, tuple) or len(atomic) != 2:
+        raise TypeError("acc store atomic expects (type, op)")
+    atomic_type, atomic_op = atomic
+    return (
+        _enum_attr(
+            "acc_store_atomic_type",
+            atomic_type,
+            supported={"f32", "f16", "bf16", "s32", "s16", "s8"},
+            context="acc store atomic type",
+        ),
+        _enum_attr(
+            "acc_store_atomic_op",
+            atomic_op,
+            supported={"add", "max", "min"},
+            context="acc store atomic op",
+        ),
+    )
+
+
+def _acc_store_options(unit_flag=None, pre_quant=None, pre_relu=None, layout=None, loop3=None, sat=None, atomic=None):
+    pre_quant_value, pre_quant_mode = _acc_store_pre_quant(pre_quant)
+    pre_relu_value, pre_relu_mode, clip_value = _acc_store_pre_relu(pre_relu)
+    mode, split, loop0_src_stride = _acc_store_layout(layout)
+    loop3_count, loop3_src_stride, loop3_dst_stride = _acc_store_loop3(loop3)
+    atomic_type, atomic_op = _acc_store_atomic_attrs(atomic)
+    return {
+        "pre_quant": pre_quant_value,
+        "pre_relu": pre_relu_value,
+        "clip_value": clip_value,
+        "split": split,
+        "loop0_src_stride": loop0_src_stride,
+        "loop3_count": loop3_count,
+        "loop3_src_stride": loop3_src_stride,
+        "loop3_dst_stride": loop3_dst_stride,
+        "mode": mode,
+        "unit_flag": _acc_store_unit_flag_attr(unit_flag),
+        "pre_quant_mode": pre_quant_mode,
+        "pre_relu_mode": pre_relu_mode,
+        "sat_mode": _acc_store_sat_attr(sat),
+        "atomic_type": atomic_type,
+        "atomic_op": atomic_op,
+    }
+
+
+def _normalize_ub_split(split):
+    normalized = _normalize_token(split, context="mte_l0c_ub split")
+    aliases = {
+        "m": "split_m",
+        "n": "split_n",
         "split_m": "split_m",
         "split_n": "split_n",
-    }.get(mode if isinstance(mode, int) else str(mode).lower())
-    if normalized is None:
-        raise ValueError(f"unsupported mte_l0c_ub dst_mode {mode!r}")
-    return Attribute.parse(f"#pto<acc_store_ub_dst_mode {normalized}>")
+    }
+    mode = aliases.get(normalized)
+    if mode is None:
+        raise ValueError("mte_l0c_ub split expects M or N")
+    return mode
+
+
+def _mte_l0c_ub_dst_mode(sub_blockid=0, *, split=None):
+    if split is not None:
+        token = getattr(sub_blockid, "value", sub_blockid)
+        if token not in {0, None}:
+            raise ValueError("mte_l0c_ub split cannot be combined with non-default sub_blockid")
+        return _acc_store_ub_dst_mode_attr(_normalize_ub_split(split)), None
+    token = getattr(sub_blockid, "value", sub_blockid)
+    if isinstance(token, str):
+        raise TypeError("mte_l0c_ub sub_blockid expects 0 or 1; use split='M' or split='N' for dual-destination stores")
+    if isinstance(token, bool):
+        raise TypeError("mte_l0c_ub sub_blockid bool is not supported; use sub-block 0/1 or split='M'/'N'")
+    if isinstance(token, int) and token not in {0, 1}:
+        raise ValueError("mte_l0c_ub sub_blockid constant must be 0 or 1")
+    return _acc_store_ub_dst_mode_attr("single"), _coerce_i64(token, context="mte_l0c_ub sub_blockid")
+
+
+def _cube_load_frac_mode_attr(mode):
+    return _enum_attr(
+        "cube_load_frac_mode",
+        mode,
+        supported={"nd2nz", "dn2nz"},
+        context="mte_gm_l1_frac mode",
+    )
+
+
+def _normalize_pair(name, pair, *, context: str):
+    if not isinstance(pair, tuple) or len(pair) != 2:
+        raise TypeError(f"{context} expects {name}=(value0, value1)")
+    first, second = pair
+    return (
+        _coerce_i64(first, context=f"{context} {name}[0]"),
+        _coerce_i64(second, context=f"{context} {name}[1]"),
+    )
+
+
+def _normalize_frac_src_layout(src_layout, *, context: str):
+    if not isinstance(src_layout, tuple) or len(src_layout) not in (1, 2):
+        raise TypeError(f"{context} expects src_layout=(inner_stride,) or (inner_stride, outer_stride)")
+    inner = _coerce_i64(src_layout[0], context=f"{context} src_layout[0]")
+    outer = None
+    if len(src_layout) == 2:
+        outer = _coerce_i64(src_layout[1], context=f"{context} src_layout[1]")
+    return inner, outer
+
+
+def _normalize_frac_dst_group(dst_group, *, context: str):
+    if not isinstance(dst_group, tuple) or len(dst_group) != 4:
+        raise TypeError(f"{context} expects dst_group=(group_count, loop2_stride, loop3_stride, loop4_stride)")
+    group_count, loop2_stride, loop3_stride, loop4_stride = dst_group
+    return (
+        _coerce_i64(group_count, context=f"{context} dst_group[0]"),
+        _coerce_i64(loop2_stride, context=f"{context} dst_group[1]"),
+        _coerce_i64(loop3_stride, context=f"{context} dst_group[2]"),
+        _coerce_i64(loop4_stride, context=f"{context} dst_group[3]"),
+    )
+
+
+def _normalize_frac_ctrl(ctrl, *, context: str):
+    if not isinstance(ctrl, tuple) or len(ctrl) != 2:
+        raise TypeError(f"{context} expects ctrl=(l2_cache_ctrl, smallc0_en)")
+    l2_cache_ctrl, smallc0_en = ctrl
+    return (
+        _coerce_i64(l2_cache_ctrl, context=f"{context} ctrl[0]"),
+        _coerce_i1(smallc0_en, context=f"{context} ctrl[1]"),
+    )
+
+
+def _mad_unit_flag_attr(unit_flag):
+    if unit_flag is None:
+        return None
+    return _enum_attr(
+        "mad_unit_flag_mode",
+        unit_flag,
+        supported={"check_only", "check_and_set"},
+        context="mad unit_flag",
+    )
+
+
+def _mad_sat_attr(sat):
+    if sat is None:
+        return None
+    return _enum_attr(
+        "mad_sat_mode",
+        _normalize_sat_mode(sat, context="mad sat", allow_preserve_nan=False),
+        supported={"sat", "nosat"},
+        context="mad sat",
+    )
+
+
+def _tf32_mode_attr(tf32_mode):
+    if tf32_mode is None:
+        return None
+    return _enum_attr(
+        "tf32_mode",
+        tf32_mode,
+        supported={"round_even", "round_away"},
+        context="mad tf32_mode",
+    )
+
+
+def _mad_options(unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
+    if not isinstance(disable_gemv, bool):
+        raise TypeError("mad disable_gemv expects bool")
+    if not isinstance(n_dir, bool):
+        raise TypeError("mad n_dir expects bool")
+    return {
+        "unit_flag_mode": _mad_unit_flag_attr(unit_flag),
+        "disable_gemv": disable_gemv,
+        "sat_mode": _mad_sat_attr(sat),
+        "tf32_mode": _tf32_mode_attr(tf32_mode),
+        "n_dir": n_dir,
+    }
+
+
+def _mad_mx_options(unit_flag=None, disable_gemv=False, sat=None, n_dir=False):
+    return {
+        key: value
+        for key, value in _mad_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            tf32_mode=None,
+            n_dir=n_dir,
+        ).items()
+        if key != "tf32_mode"
+    }
 
 
 def _infer_dma_partition_row_stride(partition: PartitionTensorViewValue):
@@ -3013,6 +3340,122 @@ def mte_ub_l1(source, destination, len_burst, *, nburst):
     )
 
 
+@_explicit_mode_only("pto.mte_gm_l1(...)")
+def mte_gm_l1(source, destination, len_burst, *, nburst, loops=None):
+    """``pto.mte_gm_l1`` – grouped GM-to-L1/CBUF DMA surface."""
+    n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
+        "nburst",
+        nburst,
+        context="mte_gm_l1(...)",
+    )
+    loop_counts, loop_src_strides, loop_dst_strides = _normalize_dma_loops(
+        loops,
+        context="mte_gm_l1(...)",
+    )
+    _pto.MteGmL1Op(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(len_burst, context="mte_gm_l1 len_burst"),
+        n_burst,
+        nburst_src_stride,
+        nburst_dst_stride,
+        loop_counts,
+        loop_src_strides,
+        loop_dst_strides,
+    )
+
+
+@_explicit_mode_only("pto.mte_l1_ub(...)")
+def mte_l1_ub(source, destination, len_burst, *, nburst, loops=None):
+    """``pto.mte_l1_ub`` – grouped L1/CBUF-to-UB DMA surface."""
+    n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
+        "nburst",
+        nburst,
+        context="mte_l1_ub(...)",
+    )
+    loop_counts, loop_src_strides, loop_dst_strides = _normalize_dma_loops(
+        loops,
+        context="mte_l1_ub(...)",
+    )
+    _pto.MteL1UbOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(len_burst, context="mte_l1_ub len_burst"),
+        n_burst,
+        nburst_src_stride,
+        nburst_dst_stride,
+        loop_counts,
+        loop_src_strides,
+        loop_dst_strides,
+    )
+
+
+@_explicit_mode_only("pto.mte_gm_l1_frac(...)")
+def mte_gm_l1_frac(source, destination, mode, *, shape, src_layout, dst_group, ctrl):
+    """``pto.mte_gm_l1_frac`` – GM-to-L1 load with fractal layout conversion."""
+    n_value, d_value = _normalize_pair("shape", shape, context="mte_gm_l1_frac(...)")
+    src_inner_stride, src_outer_stride = _normalize_frac_src_layout(
+        src_layout,
+        context="mte_gm_l1_frac(...)",
+    )
+    group_count, dst_loop2_stride, dst_loop3_stride, dst_loop4_stride = _normalize_frac_dst_group(
+        dst_group,
+        context="mte_gm_l1_frac(...)",
+    )
+    l2_cache_ctrl, smallc0_en = _normalize_frac_ctrl(ctrl, context="mte_gm_l1_frac(...)")
+    _pto.MteGmL1FracOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        n_value,
+        d_value,
+        src_inner_stride,
+        group_count,
+        dst_loop2_stride,
+        dst_loop3_stride,
+        dst_loop4_stride,
+        l2_cache_ctrl,
+        smallc0_en,
+        _cube_load_frac_mode_attr(mode),
+        src_outer_stride=src_outer_stride,
+    )
+
+
+@_explicit_mode_only("pto.mte_l1_bt(...)")
+def mte_l1_bt(source, destination, len_burst, *, nburst):
+    """``pto.mte_l1_bt`` – grouped L1-to-BT auxiliary staging."""
+    n_burst, nburst_src_gap, nburst_dst_gap = _normalize_dma_group(
+        "nburst",
+        nburst,
+        context="mte_l1_bt(...)",
+    )
+    _pto.MteL1BtOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(len_burst, context="mte_l1_bt len_burst"),
+        n_burst,
+        nburst_src_gap,
+        nburst_dst_gap,
+    )
+
+
+@_explicit_mode_only("pto.mte_l1_fb(...)")
+def mte_l1_fb(source, destination, len_burst, *, nburst):
+    """``pto.mte_l1_fb`` – grouped L1-to-FB auxiliary staging."""
+    n_burst, nburst_src_gap, nburst_dst_gap = _normalize_dma_group(
+        "nburst",
+        nburst,
+        context="mte_l1_fb(...)",
+    )
+    _pto.MteL1FbOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(len_burst, context="mte_l1_fb len_burst"),
+        n_burst,
+        nburst_src_gap,
+        nburst_dst_gap,
+    )
+
+
 def mem_bar(barrier_type):
     """``pto.mem_bar`` with a small authored enum surface."""
     barrier_name = getattr(barrier_type, "value", barrier_type)
@@ -3043,9 +3486,145 @@ def mte_l1_l0b(source, destination, k, n, *, transpose=False):
     )
 
 
+@_explicit_mode_only("pto.mte_l1_l0a_mx(...)")
+def mte_l1_l0a_mx(source, destination, m, k, *, transpose=False):
+    """``pto.mte_l1_l0a_mx`` – MX cube-side LEFT staging.
+
+    The current VPTO MX backend path does not consume ``transpose`` yet. The
+    flag is accepted to keep the PTODSL API aligned with TileLang DSL.
+    """
+    _pto.MteL1L0aMxOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(m, context="mte_l1_l0a_mx m"),
+        _coerce_i64(k, context="mte_l1_l0a_mx k"),
+    )
+
+
+@_explicit_mode_only("pto.mte_l1_l0b_mx(...)")
+def mte_l1_l0b_mx(source, destination, k, n, *, transpose=False):
+    """``pto.mte_l1_l0b_mx`` – MX cube-side RIGHT staging.
+
+    The current VPTO MX backend path does not consume ``transpose`` yet. The
+    flag is accepted to keep the PTODSL API aligned with TileLang DSL.
+    """
+    _pto.MteL1L0bMxOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(k, context="mte_l1_l0b_mx k"),
+        _coerce_i64(n, context="mte_l1_l0b_mx n"),
+    )
+
+
+@_explicit_mode_only("pto.mte_l0c_l1(...)")
+def mte_l0c_l1(
+    source,
+    destination,
+    m,
+    n,
+    src_stride,
+    dst_stride,
+    *,
+    unit_flag=None,
+    pre_quant=None,
+    pre_relu=None,
+    layout=None,
+    loop3=None,
+    sat=None,
+):
+    """``pto.mte_l0c_l1`` – ACC to L1 structured writeback."""
+    options = _acc_store_options(
+        unit_flag=unit_flag,
+        pre_quant=pre_quant,
+        pre_relu=pre_relu,
+        layout=layout,
+        loop3=loop3,
+        sat=sat,
+    )
+    options.pop("atomic_type")
+    options.pop("atomic_op")
+    _pto.MteL0cL1Op(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(m, context="mte_l0c_l1 m"),
+        _coerce_i64(n, context="mte_l0c_l1 n"),
+        _coerce_i64(src_stride, context="mte_l0c_l1 src_stride"),
+        _coerce_i64(dst_stride, context="mte_l0c_l1 dst_stride"),
+        **options,
+    )
+
+
+@_explicit_mode_only("pto.mte_l0c_gm(...)")
+def mte_l0c_gm(
+    source,
+    destination,
+    m,
+    n,
+    src_stride,
+    dst_stride,
+    sid,
+    l2_cache_ctrl,
+    *,
+    unit_flag=None,
+    pre_quant=None,
+    pre_relu=None,
+    layout=None,
+    loop3=None,
+    sat=None,
+    atomic=None,
+):
+    """``pto.mte_l0c_gm`` – ACC to GM structured writeback."""
+    _pto.MteL0cGmOp(
+        unwrap_surface_value(source),
+        unwrap_surface_value(destination),
+        _coerce_i64(m, context="mte_l0c_gm m"),
+        _coerce_i64(n, context="mte_l0c_gm n"),
+        _coerce_i64(src_stride, context="mte_l0c_gm src_stride"),
+        _coerce_i64(dst_stride, context="mte_l0c_gm dst_stride"),
+        _coerce_i64(sid, context="mte_l0c_gm sid"),
+        _coerce_i64(l2_cache_ctrl, context="mte_l0c_gm l2_cache_ctrl"),
+        **_acc_store_options(
+            unit_flag=unit_flag,
+            pre_quant=pre_quant,
+            pre_relu=pre_relu,
+            layout=layout,
+            loop3=loop3,
+            sat=sat,
+            atomic=atomic,
+        ),
+    )
+
+
 @_explicit_mode_only("pto.mte_l0c_ub(...)")
-def mte_l0c_ub(source, destination, m, n, src_stride, dst_stride, sub_blockid=0, *, dst_mode="single"):
+def mte_l0c_ub(
+    source,
+    destination,
+    m,
+    n,
+    src_stride,
+    dst_stride,
+    sub_blockid=0,
+    *,
+    split=None,
+    unit_flag=None,
+    pre_quant=None,
+    pre_relu=None,
+    layout=None,
+    loop3=None,
+    sat=None,
+):
     """``pto.mte_l0c_ub`` – ACC to UB store."""
+    dst_mode_attr, sub_blockid_value = _mte_l0c_ub_dst_mode(sub_blockid, split=split)
+    options = _acc_store_options(
+        unit_flag=unit_flag,
+        pre_quant=pre_quant,
+        pre_relu=pre_relu,
+        layout=layout,
+        loop3=loop3,
+        sat=sat,
+    )
+    options.pop("atomic_type")
+    options.pop("atomic_op")
     _pto.MteL0cUbOp(
         unwrap_surface_value(source),
         unwrap_surface_value(destination),
@@ -3053,12 +3632,13 @@ def mte_l0c_ub(source, destination, m, n, src_stride, dst_stride, sub_blockid=0,
         _coerce_i64(n, context="mte_l0c_ub n"),
         _coerce_i64(src_stride, context="mte_l0c_ub src_stride"),
         _coerce_i64(dst_stride, context="mte_l0c_ub dst_stride"),
-        _acc_store_ub_dst_mode_attr(dst_mode),
-        sub_blockid=_coerce_i64(sub_blockid, context="mte_l0c_ub sub_blockid"),
+        dst_mode_attr,
+        sub_blockid=sub_blockid_value,
+        **options,
     )
 
 
-def mad(lhs, rhs, dst, m, n, k):
+def mad(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
     """``pto.mad`` – cube matmul accumulate."""
     _pto.MadOp(
         unwrap_surface_value(lhs),
@@ -3067,10 +3647,17 @@ def mad(lhs, rhs, dst, m, n, k):
         _coerce_i64(m, context="mad m"),
         _coerce_i64(n, context="mad n"),
         _coerce_i64(k, context="mad k"),
+        **_mad_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            tf32_mode=tf32_mode,
+            n_dir=n_dir,
+        ),
     )
 
 
-def mad_acc(lhs, rhs, dst, m, n, k):
+def mad_acc(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
     """``pto.mad_acc`` – cube matmul accumulate into an existing accumulator."""
     _pto.MadAccOp(
         unwrap_surface_value(lhs),
@@ -3079,10 +3666,17 @@ def mad_acc(lhs, rhs, dst, m, n, k):
         _coerce_i64(m, context="mad_acc m"),
         _coerce_i64(n, context="mad_acc n"),
         _coerce_i64(k, context="mad_acc k"),
+        **_mad_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            tf32_mode=tf32_mode,
+            n_dir=n_dir,
+        ),
     )
 
 
-def mad_bias(lhs, rhs, dst, bias, m, n, k):
+def mad_bias(lhs, rhs, dst, bias, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, tf32_mode=None, n_dir=False):
     """``pto.mad_bias`` – cube matmul initialized from a bias buffer."""
     _pto.MadBiasOp(
         unwrap_surface_value(lhs),
@@ -3092,10 +3686,17 @@ def mad_bias(lhs, rhs, dst, bias, m, n, k):
         _coerce_i64(m, context="mad_bias m"),
         _coerce_i64(n, context="mad_bias n"),
         _coerce_i64(k, context="mad_bias k"),
+        **_mad_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            tf32_mode=tf32_mode,
+            n_dir=n_dir,
+        ),
     )
 
 
-def mad_mx(lhs, rhs, dst, m, n, k):
+def mad_mx(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, n_dir=False):
     """``pto.mad_mx`` – MX-format cube matmul."""
     _pto.MadMxOp(
         unwrap_surface_value(lhs),
@@ -3104,10 +3705,16 @@ def mad_mx(lhs, rhs, dst, m, n, k):
         _coerce_i64(m, context="mad_mx m"),
         _coerce_i64(n, context="mad_mx n"),
         _coerce_i64(k, context="mad_mx k"),
+        **_mad_mx_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            n_dir=n_dir,
+        ),
     )
 
 
-def mad_mx_acc(lhs, rhs, dst, m, n, k):
+def mad_mx_acc(lhs, rhs, dst, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, n_dir=False):
     """``pto.mad_mx_acc`` – MX-format cube matmul accumulate."""
     _pto.MadMxAccOp(
         unwrap_surface_value(lhs),
@@ -3116,10 +3723,16 @@ def mad_mx_acc(lhs, rhs, dst, m, n, k):
         _coerce_i64(m, context="mad_mx_acc m"),
         _coerce_i64(n, context="mad_mx_acc n"),
         _coerce_i64(k, context="mad_mx_acc k"),
+        **_mad_mx_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            n_dir=n_dir,
+        ),
     )
 
 
-def mad_mx_bias(lhs, rhs, dst, bias, m, n, k):
+def mad_mx_bias(lhs, rhs, dst, bias, m, n, k, *, unit_flag=None, disable_gemv=False, sat=None, n_dir=False):
     """``pto.mad_mx_bias`` – MX-format cube matmul initialized from a bias buffer."""
     _pto.MadMxBiasOp(
         unwrap_surface_value(lhs),
@@ -3129,6 +3742,12 @@ def mad_mx_bias(lhs, rhs, dst, bias, m, n, k):
         _coerce_i64(m, context="mad_mx_bias m"),
         _coerce_i64(n, context="mad_mx_bias n"),
         _coerce_i64(k, context="mad_mx_bias k"),
+        **_mad_mx_options(
+            unit_flag=unit_flag,
+            disable_gemv=disable_gemv,
+            sat=sat,
+            n_dir=n_dir,
+        ),
     )
 
 def get_block_idx():
@@ -3315,8 +3934,10 @@ __all__ = [
     "tpartadd", "tpartmul", "tpartmax", "tpartmin",
     "tfillpad", "tfillpad_expand", "tfillpad_inplace",
     "as_ptr",
-    "mte_load", "mte_store", "mte_gm_ub", "mte_ub_gm", "mte_ub_ub", "mte_ub_l1", "mem_bar",
-    "mte_l1_l0a", "mte_l1_l0b", "mte_l0c_ub",
+    "mte_load", "mte_store", "mte_gm_ub", "mte_ub_gm", "mte_ub_ub", "mte_ub_l1",
+    "mte_gm_l1", "mte_l1_ub", "mte_gm_l1_frac", "mte_l1_bt", "mte_l1_fb", "mem_bar",
+    "mte_l1_l0a", "mte_l1_l0b", "mte_l1_l0a_mx", "mte_l1_l0b_mx",
+    "mte_l0c_l1", "mte_l0c_gm", "mte_l0c_ub",
     "mad", "mad_acc", "mad_bias", "mad_mx", "mad_mx_acc", "mad_mx_bias",
     "get_block_idx", "get_block_num", "get_subblock_idx", "get_subblock_num",
     "store_vfsimt_info", "get_tid_x", "get_tid_y", "get_tid_z",
