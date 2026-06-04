@@ -63,6 +63,13 @@ struct PTOInsertSyncPass : public mlir::pto::impl::PTOInsertSyncBase<PTOInsertSy
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
+    // Backend-partitioned PTODSL containers carry private func declarations
+    // in the outer child module to model cross-child calls. Those declaration
+    // funcs have a function type but no entry block arguments, so the
+    // translator's argument walk must not run on them.
+    if (func.isDeclaration())
+      return;
+
     // If the function already contains explicit synchronization ops (either
     // low-level pipe flags or the higher-level record/wait events), do not run
     // the automatic insertion pass again. Re-inserting on top of manual sync
