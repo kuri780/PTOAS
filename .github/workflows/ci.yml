@@ -361,11 +361,6 @@ jobs:
             apt_packages+=(python3 python3-pip git cmake ninja-build make)
           fi
 
-          if ! command -v "clang-${PTOAS_CLANG_MAJOR}" >/dev/null 2>&1 || \
-             ! command -v "clang++-${PTOAS_CLANG_MAJOR}" >/dev/null 2>&1; then
-            apt_packages+=("clang-${PTOAS_CLANG_MAJOR}" "lld-${PTOAS_CLANG_MAJOR}")
-          fi
-
           if [[ "${#apt_packages[@]}" -gt 0 ]]; then
             if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update
@@ -376,8 +371,12 @@ jobs:
                 echo "ERROR: automatic installation requires sudo + apt-get" >&2
                 exit 1
               fi
-              echo "WARN: clang-${PTOAS_CLANG_MAJOR} is unavailable on self-hosted runner; will try system clang or LLVM clang fallback" >&2
             fi
+          fi
+
+          if ! command -v "clang-${PTOAS_CLANG_MAJOR}" >/dev/null 2>&1 || \
+             ! command -v "clang++-${PTOAS_CLANG_MAJOR}" >/dev/null 2>&1; then
+            echo "WARN: clang-${PTOAS_CLANG_MAJOR} is unavailable on self-hosted runner; will try system clang or LLVM clang fallback" >&2
           fi
 
           python3 -m pip --version >/dev/null 2>&1 || {
