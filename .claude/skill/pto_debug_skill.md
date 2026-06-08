@@ -344,7 +344,7 @@ pto_tilelang_vec_st(tadd)
 | `launch.cpp` 参数 | `src, dst, scalar` | `a, b(float*), c(int8_t*)` | `src, dst`（2 个 ptr） | `src, dst`（2 个 ptr） |
 | `main.cpp` 输入文件 | `input.bin`（1 个） | `input1.bin + input2.bin` | `input.bin`（1 个） | `input.bin`（1 个） |
 | `cases.py` 额外字段 | `"scalar": 2.5` | `"dst_dtype": np.int8, "cmp_mode": "eq"` | `"dst_shape", "dst_valid_shape"` | 无 |
-| golden 公式 | `input + scalar` | `(a == b).astype(np.int8)` | `np.max(a, axis=0)` | `np.exp(a)` |
+| golden 公式 | `input + scalar` | 见 1.3 节（packed bitmask，不可直接用 astype） | `np.max(a, axis=0)` | `np.exp(a)` |
 
 **不自动生成的类别**：E（Cube+Vector）、G（Broadcast）、H（tcvt）。参考现有 testcase 目录手工编写。
 
@@ -682,8 +682,8 @@ python3 test/tilelang_st/script/run_st.py -r sim -v a5 -t tadd -p build/tools/pt
 # 只运行特定 case
 python3 test/tilelang_st/script/run_st.py -r sim -v a5 -t tadd -c f32_16x64 -p build/tools/ptoas/ptoas
 
-# 只生成数据 + 编译（不跑模拟器）
-python3 test/tilelang_st/script/run_st.py -r sim -v a5 -t tadd -p build/tools/ptoas/ptoas --build-only
+# 跳过构建（使用已有 build）
+python3 test/tilelang_st/script/run_st.py -r sim -v a5 -t tadd -p build/tools/ptoas/ptoas --without-build
 ```
 
 ---
