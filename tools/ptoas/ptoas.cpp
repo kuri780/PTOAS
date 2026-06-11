@@ -586,6 +586,11 @@ static LogicalResult emitSharedPreBackendSeamIR(ModuleOp module,
   return success();
 }
 
+static void printSharedPreBackendSeamIR(ModuleOp module) {
+  module->print(llvm::errs());
+  llvm::errs() << "\n";
+}
+
 static bool hasUnexpandedTileOps(ModuleOp module) {
   bool found = false;
   module.walk([&](Operation *op) {
@@ -1942,10 +1947,8 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
 
-    if (ptoPrintSeamIR) {
-      module->print(llvm::errs());
-      llvm::errs() << "\n";
-    }
+    if (ptoPrintSeamIR)
+      printSharedPreBackendSeamIR(*module);
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
@@ -1955,15 +1958,34 @@ int mlir::pto::compilePTOASModule(
                                  context.getCANNVersionOrDefault());
   }
 
-  if (arch == "a3") {
-    pm.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A3));
-  } else {
-    pm.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A5));
-  }
-  pm.addPass(emitc::createFormExpressionsPass());
-  pm.addPass(mlir::createCSEPass());
-
   if (failed(pm.run(*module))) {
+    llvm::errs() << "Error: Pass execution failed.\n";
+    return 1;
+  }
+
+  if (ptoPrintSeamIR)
+    printSharedPreBackendSeamIR(*module);
+  if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
+    return 1;
+  if (ptoPrintSeamIR || !ptoSeamIRFile.empty()) {
+    result.kind = PTOASCompileResultKind::Text;
+    return 0;
+  }
+
+  PassManager emitcPM(module->getContext());
+  emitcPM.enableVerifier();
+  if (arch == "a3") {
+    emitcPM.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A3));
+  } else {
+    emitcPM.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A5));
+  }
+  emitcPM.addPass(emitc::createFormExpressionsPass());
+  emitcPM.addPass(mlir::createCSEPass());
+  if (failed(applyConfiguredPassManagerCLOptions(
+          emitcPM, "EmitC backend pipeline")))
+    return 1;
+
+  if (failed(emitcPM.run(*module))) {
     llvm::errs() << "Error: Pass execution failed.\n";
     return 1;
   }
