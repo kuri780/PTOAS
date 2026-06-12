@@ -56,7 +56,8 @@ static size_t GetDstElemCount(const TestCase &tc) {
     }
     const size_t repeatElm = 256 / tc.srcElemSize;
     const size_t repeatTimes = (tc.validCols + repeatElm - 1) / repeatElm;
-    return tc.validRows * repeatTimes * 16;
+    const size_t bytesPerIter = (tc.srcElemSize == sizeof(uint8_t)) ? 32 : 16;
+    return tc.validRows * repeatTimes * bytesPerIter;
 }
 
 static const TestCase kCases[] = {
