@@ -16,7 +16,7 @@ module {
   }
 }
 
-// CHECK-LABEL: __global__ AICORE void eventid_array_get_set_get() {
+// CHECK-LABEL: AICORE void eventid_array_get_set_get() {
 // CHECK: PTOAS_EventIdArray<4> [[ARR:v[0-9]+]];
 // CHECK: [[ARR]][{{v[0-9]+}}] = {{v[0-9]+}};
 // CHECK: [[ARR]][{{v[0-9]+}}] = {{v[0-9]+}};
