@@ -191,12 +191,13 @@ jobs:
 
           need_pip_install=0
           python3 -c "import numpy" >/dev/null 2>&1 || need_pip_install=1
+          python3 -c "import setuptools, wheel" >/dev/null 2>&1 || need_pip_install=1
           python3 -m pybind11 --cmakedir >/dev/null 2>&1 || need_pip_install=1
           python3 -c "import ml_dtypes" >/dev/null 2>&1 || need_pip_install=1
 
           if [[ "${need_pip_install}" -eq 1 ]]; then
             python3 -m pip install --upgrade pip
-            python3 -m pip install 'pybind11<3' numpy ml-dtypes
+            python3 -m pip install setuptools wheel 'pybind11<3' numpy ml-dtypes
           fi
 
       - name: Clean CI work dirs
