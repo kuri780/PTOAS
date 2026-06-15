@@ -1,0 +1,212 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// -----------------------------------------------------------------------------
+// case: kernels/gemm-residual-c2v-split-m
+// family: gemm-residual
+// target_ops: pto.mad, pto.mte_l0c_ub (split_m), pto.vcvt (bf16->f32),
+//   pto.vadd, pto.mte_gm_ub, pto.mte_ub_gm, pto.sync.set, pto.sync.wait,
+//   pto.get_subblock_idx
+// scenarios: bf16-gemm-c2v-split-m, bf16-residual-convert-add, fp32-output
+//
+// Data flow (NO intermediate GM write for GEMM result):
+//   [Cube]  BF16 A/B GM -> L1 -> L0A/L0B -> MAD (BF16*BF16->FP32 L0C)
+//   [Cube]  L0C -> C2V FIXPIPE (split_m) -> Vector UB (per subblock)
+//   [Vector] BF16 Residual GM -> UB -> vcvt BF16->FP32
+//   [Vector] FP32 GEMM tile + FP32 Residual -> VADD -> FP32 Output UB
+//   [Vector] FP32 Output UB -> MTE3 -> Output GM
+//
+// CONSTRAINT: No pto.mte_l0c_gm in this kernel.
+//   GEMM FP32 result must NOT be written to GM before Residual Add.
+// -----------------------------------------------------------------------------
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @gemm_residual_c2v_split_m_kernel(
+      %a_gm: !pto.ptr<bf16, gm>,
+      %b_gm: !pto.ptr<bf16, gm>,
+      %residual_gm_0: !pto.ptr<bf16, gm>,
+      %residual_gm_1: !pto.ptr<bf16, gm>,
+      %out_gm_0: !pto.ptr<f32, gm>,
+      %out_gm_1: !pto.ptr<f32, gm>)
+    attributes {pto.kernel} {
+    // ── constants ──────────────────────────────────────────────────────────
+    %c0_i64 = arith.constant 0 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %c8_i64 = arith.constant 8 : i64
+    %c16_i64 = arith.constant 16 : i64
+    %c32_i64 = arith.constant 32 : i64
+    %c64_i64 = arith.constant 64 : i64
+    %c128_i64 = arith.constant 128 : i64
+    %c256_i64 = arith.constant 256 : i64
+    %c512_i64 = arith.constant 512 : i64
+    %c2048_i64 = arith.constant 2048 : i64
+    %c4096_i64 = arith.constant 4096 : i64
+    %c8192_i64 = arith.constant 8192 : i64
+    %c1024_i64 = arith.constant 1024 : i64
+    %c20480_i64 = arith.constant 20480 : i64
+    %c24576_i64 = arith.constant 24576 : i64
+
+    %false = arith.constant false
+
+    // ── memory layout ──────────────────────────────────────────────────────
+    // L1
+    %l1_a = pto.castptr %c0_i64 : i64 -> !pto.ptr<bf16, l1>
+    %l1_b = pto.castptr %c4096_i64 : i64 -> !pto.ptr<bf16, l1>
+    // L0
+    %l0a = pto.castptr %c0_i64 : i64 -> !pto.ptr<bf16, l0a>
+    %l0b = pto.castptr %c0_i64 : i64 -> !pto.ptr<bf16, l0b>
+    %l0c = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, l0c>
+
+    // UB layout per subblock:
+    //   [0,       8192): C2V GEMM FP32 tile [8,256]
+    //   [8192,   12288): Residual BF16 input [8,256]
+    //   [20480,  28672): Residual FP32 converted [8,256]
+    %ub_c2v = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+    %ub_residual_bf16 = pto.castptr %c8192_i64 : i64 -> !pto.ptr<bf16, ub>
+    %ub_residual_f32 = pto.castptr %c20480_i64 : i64 -> !pto.ptr<f32, ub>
+
+    // ── cube section ───────────────────────────────────────────────────────
+    pto.section.cube {
+      // --- step C1: GM → L1 (MTE2) -----------------------------------------
+      // A: bf16[16,64], 16 rows × 64 cols, row stride = 128 bytes
+      pto.mte_gm_l1_frac %a_gm, %l1_a, nd2nz,
+          shape(%c16_i64, %c64_i64),
+          src_layout(%c128_i64),
+          dst_group(%c1_i64, %c1_i64, %c16_i64, %c0_i64),
+          ctrl(%c0_i64, %false)
+        : !pto.ptr<bf16, gm>, !pto.ptr<bf16, l1>, nd2nz,
+          shape i64, i64, src_layout(i64),
+          dst_group i64, i64, i64, i64, ctrl i64, i1
+      // B: bf16[64,256], 64 rows × 256 cols, row stride = 512 bytes
+      pto.mte_gm_l1_frac %b_gm, %l1_b, nd2nz,
+          shape(%c64_i64, %c256_i64),
+          src_layout(%c512_i64),
+          dst_group(%c1_i64, %c1_i64, %c64_i64, %c0_i64),
+          ctrl(%c0_i64, %false)
+        : !pto.ptr<bf16, gm>, !pto.ptr<bf16, l1>, nd2nz,
+          shape i64, i64, src_layout(i64),
+          dst_group i64, i64, i64, i64, ctrl i64, i1
+
+      // --- step C2: L1 → L0A/L0B (MTE1) ------------------------------------
+      pto.set_flag["PIPE_MTE2", "PIPE_MTE1", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE2", "PIPE_MTE1", "EVENT_ID0"]
+      pto.mte_l1_l0a %l1_a, %l0a, %c16_i64, %c64_i64, %c0_i64, %c0_i64
+        : !pto.ptr<bf16, l1>, !pto.ptr<bf16, l0a>, i64, i64, i64, i64
+      pto.mte_l1_l0b %l1_b, %l0b, %c64_i64, %c256_i64, %c0_i64, %c0_i64 {transpose = true}
+        : !pto.ptr<bf16, l1>, !pto.ptr<bf16, l0b>, i64, i64, i64, i64
+
+      // --- step C3: MAD BF16*BF16→FP32 (MTE1→M) ----------------------------
+      pto.set_flag["PIPE_MTE1", "PIPE_M", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE1", "PIPE_M", "EVENT_ID0"]
+      pto.mad %l0a, %l0b, %l0c, %c16_i64, %c256_i64, %c64_i64
+        : !pto.ptr<bf16, l0a>, !pto.ptr<bf16, l0b>, !pto.ptr<f32, l0c>, i64, i64, i64
+
+      // --- step C4: L0C → UB via FIXPIPE split_m (M→FIX) -------------------
+      pto.set_flag["PIPE_M", "PIPE_FIX", "EVENT_ID1"]
+      pto.wait_flag["PIPE_M", "PIPE_FIX", "EVENT_ID1"]
+      pto.set_flag["PIPE_MTE2", "PIPE_FIX", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE2", "PIPE_FIX", "EVENT_ID0"]
+      // C2V: FP32[16,256] L0C → UB, split along M → 2×[8,256] per subblock
+      pto.mte_l0c_ub %l0c, %ub_c2v, %c16_i64, %c256_i64, %c16_i64, %c256_i64,
+        dst_mode(split_m),
+        nz2nd,
+        sat
+        : !pto.ptr<f32, l0c>, !pto.ptr<f32, ub>, i64, i64, i64, i64
+
+      // --- step C5: notify Vector subblocks via sync events -----------------
+      pto.sync.set <PIPE_FIX>, 1
+      pto.sync.set <PIPE_FIX>, 17
+    }
+
+    // ── vector section ─────────────────────────────────────────────────────
+    pto.section.vector {
+      %subblock = pto.get_subblock_idx
+      %is_subblock0 = arith.cmpi eq, %subblock, %c0_i64 : i64
+      %is_subblock1 = arith.cmpi eq, %subblock, %c1_i64 : i64
+
+      // --- step V1: wait for C2V, signal V pipeline -------------------------
+      pto.sync.wait <PIPE_MTE3>, 1
+      pto.set_flag["PIPE_MTE3", "PIPE_V", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE3", "PIPE_V", "EVENT_ID0"]
+
+      // --- step V2: load BF16 residual from GM → UB (MTE2) -----------------
+      scf.if %is_subblock0 {
+        pto.mte_gm_ub %residual_gm_0, %ub_residual_bf16, %c0_i64, %c512_i64
+          nburst(%c8_i64, %c512_i64, %c512_i64)
+          : !pto.ptr<bf16, gm>, !pto.ptr<bf16, ub>, i64, i64, i64, i64, i64
+      }
+      scf.if %is_subblock1 {
+        pto.mte_gm_ub %residual_gm_1, %ub_residual_bf16, %c0_i64, %c512_i64
+          nburst(%c8_i64, %c512_i64, %c512_i64)
+          : !pto.ptr<bf16, gm>, !pto.ptr<bf16, ub>, i64, i64, i64, i64, i64
+      }
+
+      // --- step V3: signal MTE2→V for residual load completion -------------
+      pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+      pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+
+      // --- step V4: BF16→FP32 conversion + VADD (Vector) -------------------
+      pto.get_buf "PIPE_V", 0, 0
+      pto.get_buf "PIPE_V", 1, 0
+      pto.get_buf "PIPE_V", 2, 0
+
+      pto.vecscope {
+        %c0_idx = arith.constant 0 : index
+        %c64_idx = arith.constant 64 : index
+        %c2048_idx = arith.constant 2048 : index
+        %init_remaining = arith.constant 2048 : i32
+        %cvt_mask = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
+
+        // Single combined loop: convert bf16→f32, vadd with C2V, store
+        %loop_result = scf.for %offset = %c0_idx to %c2048_idx step %c64_idx
+            iter_args(%remaining = %init_remaining) -> (i32) {
+          %mask, %next_remaining = pto.plt_b32 %remaining : i32 -> !pto.mask<b32>, i32
+          // Load and convert BF16 residual → FP32
+          %loaded = pto.vlds %ub_residual_bf16[%offset] {dist = "UNPK_B16"}
+            : !pto.ptr<bf16, ub> -> !pto.vreg<128xbf16>
+          %converted = pto.vcvt %loaded, %cvt_mask {part = "EVEN"}
+            : !pto.vreg<128xbf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
+          // Load C2V GEMM tile
+          %gemm_tile = pto.vlds %ub_c2v[%offset]
+            : !pto.ptr<f32, ub> -> !pto.vreg<64xf32>
+          // FP32 addition: GEMM + Residual
+          %sum = pto.vadd %gemm_tile, %converted, %mask
+            : !pto.vreg<64xf32>, !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xf32>
+          // Store sum back to C2V region for MTE3 writeback
+          pto.vsts %sum, %ub_c2v[%offset], %mask
+            : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+          scf.yield %next_remaining : i32
+        }
+      }
+
+      pto.rls_buf "PIPE_V", 0, 0
+      pto.rls_buf "PIPE_V", 1, 0
+      pto.rls_buf "PIPE_V", 2, 0
+
+      // --- step V5: signal V→MTE3, wait for completion ----------------------
+      pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+      pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+
+      // --- step V6: write FP32 result to Output GM (MTE3) ------------------
+      pto.get_buf "PIPE_MTE3", 2, 0
+      scf.if %is_subblock0 {
+        pto.mte_ub_gm %ub_c2v, %out_gm_0, %c1024_i64
+          nburst(%c8_i64, %c1024_i64, %c1024_i64)
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+      }
+      scf.if %is_subblock1 {
+        pto.mte_ub_gm %ub_c2v, %out_gm_1, %c1024_i64
+          nburst(%c8_i64, %c1024_i64, %c1024_i64)
+          : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+      }
+      pto.rls_buf "PIPE_MTE3", 2, 0
+      pto.barrier #pto.pipe<PIPE_ALL>
+    }
+    return
+  }
+}
