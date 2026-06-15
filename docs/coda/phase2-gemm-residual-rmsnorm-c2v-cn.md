@@ -26,17 +26,39 @@ Output[m,n]  = x[m,n] × inv_rms[m] × Gamma[n]
 | 服务器 | x86_64 Linux, CANN 9.0.0 |
 | 编译器 | bisheng (clang 15.0.5) |
 | 模拟器 | dav_3510 (Ascend950PR) |
-| git rev | 4f599b62 |
+| git rev | 基于 coda-style-fusion 分支，验证提交见测试记录 |
 
-## 新增文件
+## 新增/相关文件
+
+### 融合版（测试通过）
 
 ```
 test/vpto/cases/kernels/gemm-residual-rmsnorm-c2v-split-m/
 ├── kernel.pto      # Cube: MAD + mte_l0c_ub split_m; Vector: 两遍 vreg RMSNorm
 ├── golden.py       # BF16截断 + chunked FP32 row reduction + RMSNorm + Gamma
-├── compare.py      # max absolute/relative error 输出
+├── compare.py      # atol=1e-4, rtol=1e-4 数值验证
 ├── launch.cpp      # ACL launch wrapper（7 参数）
 └── main.cpp        # ACL host runner（含 Gamma buffer）
+```
+
+### 未融合基线（待实测对比）
+
+```
+test/vpto/cases/kernels/gemm-residual-rmsnorm-no-c2v/
+├── kernel.pto      # GEMM→C2V→UB→GM→UB→RMSNorm（含 GM round-trip）
+├── golden.py       # 与融合版相同的 golden 生成逻辑
+├── compare.py      # 相同门限
+├── launch.cpp      # ACL launch wrapper（9 参数，含 gemm_gm temp）
+└── main.cpp        # ACL host runner
+```
+
+### 实验性用例（非门禁）
+
+```
+test/vpto/experimental/gemm-residual-tile-c2v-split-m/
+├── README.md       # 已知失败说明与非阻塞状态
+├── kernel.pto      # Tile dialect: tmatmul + tpush_to_aiv 等
+└── ...             # 其他配套文件
 ```
 
 ## 数据流
@@ -195,10 +217,24 @@ Vector section:
 
 ## 测试结果
 
-| 测试 | 结果 | Max Abs Error | Max Rel Error | Tick |
-|------|------|---------------|---------------|------|
-| gemm-residual-rmsnorm-c2v-split-m (new) | **PASS** | 9.54e-07 | 2.37e-07 | 4,690 |
-| gemm-residual-c2v-split-m (regression) | **PASS** | 0.0 | 0.0 | 4,279 |
+### 实测（已验证通过）
+
+| 测试用例 | 结果 | Max Abs Error | Max Rel Error | Tick | 门限 |
+|---------|------|---------------|---------------|------|------|
+| gemm-residual-rmsnorm-c2v-split-m (融合版) | **PASS** | 见 compare.py 输出 | 见 compare.py 输出 | 4,690 | atol=1e-4, rtol=1e-4 |
+| gemm-residual-c2v-split-m (Phase 1 回归) | **PASS** | 0.0 | 0.0 | 4,279 | atol=1e-4, rtol=1e-4 |
+
+### 推测（基于分析的预期收益）
+
+- C2V 融合避免了 GEMM 结果的 GM 写+读 round-trip
+- 融合版在 UB 内完成 RMSNorm，消除额外的 MTE3/MTE2 传输开销
+
+### 尚未完成
+
+| 项目 | 说明 |
+|------|------|
+| 公平未融合性能基线 | `test/vpto/cases/kernels/gemm-residual-rmsnorm-no-c2v/` 已添加，待实测对比 |
+| msprof 对比 | 融合版 vs 未融合基线的硬件性能计数器对比 |
 
 ### 编译命令
 
@@ -248,33 +284,54 @@ RMSNorm 增加 ~411 ticks（~9.6%），主要在：
 - Scalar chain: vmuls + vadds + vsqrt + vdiv + vdup per row
 - Pass 2: vlds(x) + vlds(gamma) + vmul×2 per row
 
-在 UB 内完成 RMSNorm 相比先写 GM 再读回执行 RMSNorm，消除了额外的 MTE3 写 +
-MTE2 读开销（Phase 1 非融合基线中这部分约 1,140 cycles）。
+### 融合收益估计（待确认）
+
+上述 4,690 ticks 是 **实测值**（GEMM+Residual+RMSNorm 全部融合在单个 kernel 内）。
+
+**推测**：若拆分为「GEMM+Residual C2V → GM」+「GM → UB RMSNorm → GM」两个独立 kernel，
+中间 GM round-trip 理论上会引入额外 MTE3 写 + MTE2 读开销。
+
+**尚未完成**：与完整未融合基线（统一 kernel 内，GEMM 中间结果经 GM round-trip，详见
+`test/vpto/cases/kernels/gemm-residual-rmsnorm-no-c2v/`）的公平性能对比。
+在公平基线测试完成前，不对外宣称具体 tick 节省数字。
 
 ## 与 PTODSL / Tile PTO 的关系
 
 本阶段刻意不接入 PTODSL 和 Tile PTO 编译链：
 
 - **不使用** `pto.tload`、`pto.tstore`、`pto.tmatmul` 等 PTODSL op
-- **不使用** `ExpandTileOp` pass（当前 VPTO 后端不支持）
+- **不使用** `ExpandTileOp` pass
 - **全部 vreg 操作**（`pto.vcvt`、`pto.vadd`、`pto.vmul`、`pto.vcadd`、`pto.vdiv`、
   `pto.vsqrt`、`pto.vmuls`、`pto.vadds`、`pto.vdup`、`pto.vbr`）
 - 内存搬运使用底层 `pto.mte_*` 指令
 
+### 底层 vreg 原型与 Tile PTO 的关系
+
+当前底层 vreg 原型 **不依赖** ExpandTileOp。所有 RMSNorm 计算使用 `pto.v*` 操作
+（vreg 级别），不触发任何 OpPipeInterface tile compute pass。
+
+Tile PTO 的标准 module-level `pto.kernel_kind` 输入是可以用文本 IR 表达的（通过
+`module attributes {pto.kernel_kind = ...}` 或单一 `pto.kernel` 标记函数内的
+`pto.section.cube` / `pto.section.vector` 区域）。本阶段使用的正是这种形式，
+无 C++ API 依赖。
+
 ### 已知限制
 
-1. **ExpandTileOp 不兼容 VPTO 后端**：任何 OpPipeInterface tile compute op
-   （trowsum、trecip、tcolexpandmul 等）会触发 ExpandTileOp → 失败。
-2. **VPTOSplitCVModule 不识别函数级 pto.kernel_kind**：PTODSL 的 cube/vector
-   函数标记方式无法被 VPTO container 管道识别。
-3. **Module 级 pto.kernel_kind 在文本 IR 中不可表达**：只能通过 C++ API 设置，
-   无法在 .pto 文件中手写。
+1. **VPTOSplitCVModule 不识别 `pto.entry` + 多个 function-level `pto.kernel_kind` 的
+   container 结构**：PTODSL 前端生成的 `pto.entry` 包装函数 + 多个带有
+   `pto.kernel_kind = #pto.kernel_kind<cube/vector>` 的子函数结构，尚不能被
+   VPTO container 管道规范化。这是独立的前端 container 支持问题，不阻塞底层
+   CODA-style vreg 原型。
+2. **实验性用例**：相关 Tile dialect 调查已移至
+   `test/vpto/experimental/gemm-residual-tile-c2v-split-m/`，不参与自动验证门禁。
 
 ## 下一步
 
 - Phase 3：双缓冲（ping-pong）隐藏 C2V→Vector 同步延迟
-- Phase 4：与未融合基线（GEMM→GM→RMSNorm→GM）的 msprof 对比
-- ExpandTileOp 修复后迁移到 PTODSL tile 操作实现 RMSNorm
+- Phase 4：完成 `gemm-residual-rmsnorm-no-c2v` 未融合基线的实测对比
+- 完成融合版 vs 未融合基线的 msprof 性能对比
+- VPTOSplitCVModule 扩展支持 `pto.entry` container 结构后，
+  评估 PTODSL tile 操作实现 RMSNorm 的可行性
 
 ## 编译器修改
 

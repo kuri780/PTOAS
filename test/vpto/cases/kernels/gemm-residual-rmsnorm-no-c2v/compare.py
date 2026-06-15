@@ -66,7 +66,7 @@ def compare_bin(golden_path: str, output_path: str, label: str = "",
 
 def main() -> None:
     strict = os.getenv("COMPARE_STRICT", "1") != "0"
-    ok = compare_bin("golden_v5.bin", "v5.bin", label="RMSNorm: ")
+    ok = compare_bin("golden_v5.bin", "v5.bin", label="RMSNorm(no-c2v): ")
     if not ok:
         if strict:
             print("[ERROR] compare failed")
