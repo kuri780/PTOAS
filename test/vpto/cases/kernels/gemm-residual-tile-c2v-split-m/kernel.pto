@@ -1,0 +1,152 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// -----------------------------------------------------------------------------
+// case: kernels/gemm-residual-tile-c2v-split-m
+// family: gemm-residual
+// target_ops: tmatmul, tpush_to_aiv, tpop_from_aic, tcvt, tadd,
+//   tfree_from_aic, tstore, tload, tmov, alloc_tile, partition_view
+// scenarios: bf16-gemm-tile-c2v-split-m, bf16-residual-convert-add, fp32-output
+//
+// Data flow (Tile dialect, NO intermediate GM write for GEMM result):
+//   [Cube]  BF16 A/B GM -> tload mat tiles -> tmov left/right
+//   [Cube]  tmatmul (BF16*BF16->FP32 acc)
+//   [Cube]  tpush_to_aiv split=1 -> C2V FIXPIPE
+//   [Vector] BF16 Residual GM -> tload vec tile -> tcvt BF16->FP32
+//   [Vector] tpop_from_aic split=1 -> FP32 GEMM tile
+//   [Vector] tadd (GEMM + Residual) -> FP32 Output vec tile
+//   [Vector] tfree_from_aic split=1
+//   [Vector] tstore -> Output GM
+//
+// CONSTRAINT: No GM write for GEMM result before Residual Add.
+// -----------------------------------------------------------------------------
+
+module attributes {pto.target_arch = "a5"} {
+  // ── Entry ─────────────────────────────────────────────────────────────────
+  func.func @gemm_residual_tile_c2v_split_m_kernel(
+      %a_gm: !pto.ptr<bf16>,
+      %b_gm: !pto.ptr<bf16>,
+      %residual_gm: !pto.ptr<bf16>,
+      %out_gm: !pto.ptr<f32>)
+    attributes {pto.entry} {
+    func.call @gemm_residual_tile_c2v_split_m_cube(%a_gm, %b_gm, %residual_gm, %out_gm)
+      : (!pto.ptr<bf16>, !pto.ptr<bf16>, !pto.ptr<bf16>, !pto.ptr<f32>) -> ()
+    func.call @gemm_residual_tile_c2v_split_m_vector(%a_gm, %b_gm, %residual_gm, %out_gm)
+      : (!pto.ptr<bf16>, !pto.ptr<bf16>, !pto.ptr<bf16>, !pto.ptr<f32>) -> ()
+    return
+  }
+
+  // ── Cube ──────────────────────────────────────────────────────────────────
+  func.func private @gemm_residual_tile_c2v_split_m_cube(
+      %a_gm: !pto.ptr<bf16>,
+      %b_gm: !pto.ptr<bf16>,
+      %residual_gm: !pto.ptr<bf16>,
+      %out_gm: !pto.ptr<f32>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    // constants
+    %c0_i64 = arith.constant 0 : i64
+    %c16384_i64 = arith.constant 16384 : i64
+    %c0_i32 = arith.constant 0 : i32
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+    %c64 = arith.constant 64 : index
+    %c256 = arith.constant 256 : index
+
+    // tensor views
+    %a_view = pto.make_tensor_view %a_gm, shape = [%c16, %c64], strides = [%c64, %c1] {layout = #pto.layout<nd>} : !pto.tensor_view<?x?xbf16>
+    %b_view = pto.make_tensor_view %b_gm, shape = [%c64, %c256], strides = [%c256, %c1] {layout = #pto.layout<nd>} : !pto.tensor_view<?x?xbf16>
+
+    // pipe setup
+    %c2v_import = pto.import_reserved_buffer {name = "gemm_residual_tile_c2v_split_m_slot_buffer", peer_func = @gemm_residual_tile_c2v_split_m_vector} -> i32
+    pto.aic_initialize_pipe {dir_mask = 1, slot_size = 16384} (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+
+    // load B: bf16[64,256]
+    %b_mat = pto.alloc_tile addr = %c0_i64 : !pto.tile_buf<loc=mat, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %b_pview = pto.partition_view %b_view, offsets = [%c0, %c0], sizes = [%c64, %c256] : !pto.tensor_view<?x?xbf16> -> !pto.partition_tensor_view<64x256xbf16>
+    pto.tload ins(%b_pview : !pto.partition_tensor_view<64x256xbf16>) outs(%b_mat : !pto.tile_buf<loc=mat, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+
+    // load A: bf16[16,64]
+    %a_mat = pto.alloc_tile addr = %c16384_i64 : !pto.tile_buf<loc=mat, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %a_pview = pto.partition_view %a_view, offsets = [%c0, %c0], sizes = [%c16, %c64] : !pto.tensor_view<?x?xbf16> -> !pto.partition_tensor_view<16x64xbf16>
+    pto.tload ins(%a_pview : !pto.partition_tensor_view<16x64xbf16>) outs(%a_mat : !pto.tile_buf<loc=mat, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+
+    // tmov A: mat -> left [16,64]
+    %left = pto.alloc_tile addr = %c0_i64 : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tmov ins(%a_mat : !pto.tile_buf<loc=mat, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>) outs(%left : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+
+    // tmov B: mat -> right [64,256]
+    %right = pto.alloc_tile addr = %c0_i64 : !pto.tile_buf<loc=right, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    pto.tmov ins(%b_mat : !pto.tile_buf<loc=mat, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=col_major, slayout=row_major, fractal=512, pad=0>) outs(%right : !pto.tile_buf<loc=right, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+
+    // tmatmul: left[16,64] x right[64,256] -> acc[16,256] f32
+    %acc = pto.alloc_tile addr = %c0_i64 : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tmatmul ins(%left, %right : !pto.tile_buf<loc=left, dtype=bf16, rows=16, cols=64, v_row=16, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=bf16, rows=64, cols=256, v_row=64, v_col=256, blayout=row_major, slayout=col_major, fractal=512, pad=0>) outs(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+
+    // push to vector via C2V, split along M -> 2 x [8,256]
+    pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {split = 1}
+    return
+  }
+
+  // ── Vector ────────────────────────────────────────────────────────────────
+  func.func private @gemm_residual_tile_c2v_split_m_vector(
+      %a_gm: !pto.ptr<bf16>,
+      %b_gm: !pto.ptr<bf16>,
+      %residual_gm: !pto.ptr<bf16>,
+      %out_gm: !pto.ptr<f32>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    // constants
+    %c0_i64 = arith.constant 0 : i64
+    %c131072_i64 = arith.constant 131072 : i64
+    %c135168_i64 = arith.constant 135168 : i64
+    %c8_i64 = arith.constant 8 : i64
+    %c0_i32 = arith.constant 0 : i32
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %c16 = arith.constant 16 : index
+    %c256 = arith.constant 256 : index
+
+    // tensor views
+    %residual_view = pto.make_tensor_view %residual_gm, shape = [%c16, %c256], strides = [%c256, %c1] {layout = #pto.layout<nd>} : !pto.tensor_view<?x?xbf16>
+    %out_view = pto.make_tensor_view %out_gm, shape = [%c16, %c256], strides = [%c256, %c1] {layout = #pto.layout<nd>} : !pto.tensor_view<?x?xf32>
+
+    // subblock index (i64 -> index for partition_view)
+    %subblock_i64 = pto.get_subblock_idx
+    %subblock = arith.index_cast %subblock_i64 : i64 to index
+    %subblock_row = arith.muli %subblock, %c8 : index
+
+    // pipe setup
+    %c2v_local = pto.reserve_buffer {name = "gemm_residual_tile_c2v_split_m_slot_buffer", size = 131072, location = #pto.address_space<vec>, auto = false, base = 0} -> i32
+    pto.aiv_initialize_pipe {dir_mask = 1, slot_size = 16384} (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+
+    // load residual [subblock*8 : subblock*8+8, 0:256] bf16
+    %residual_bf16 = pto.alloc_tile addr = %c131072_i64 : !pto.tile_buf<loc=vec, dtype=bf16, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %residual_pview = pto.partition_view %residual_view, offsets = [%subblock_row, %c0], sizes = [%c8, %c256] : !pto.tensor_view<?x?xbf16> -> !pto.partition_tensor_view<8x256xbf16>
+    pto.tload ins(%residual_pview : !pto.partition_tensor_view<8x256xbf16>) outs(%residual_bf16 : !pto.tile_buf<loc=vec, dtype=bf16, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // convert residual bf16 -> f32
+    %residual_f32 = pto.alloc_tile addr = %c135168_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tcvt ins(%residual_bf16 {rmode = #pto<round_mode ROUND>} : !pto.tile_buf<loc=vec, dtype=bf16, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%residual_f32 : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // pop GEMM result from cube via C2V, split=1 -> [8,256] f32 per subblock
+    %gemm_tile = pto.tpop_from_aic {split = 1} -> !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    // add: GEMM + residual -> result
+    %result = pto.alloc_tile addr = %c135168_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%gemm_tile, %residual_f32 : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%result : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // free C2V slot
+    pto.tfree_from_aic {split = 1}
+
+    // store result to output GM [subblock*8 : subblock*8+8, 0:256] f32
+    %out_pview = pto.partition_view %out_view, offsets = [%subblock_row, %c0], sizes = [%c8, %c256] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x256xf32>
+    pto.tstore ins(%result : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=256, v_row=8, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%out_pview : !pto.partition_tensor_view<8x256xf32>)
+    return
+  }
+}
