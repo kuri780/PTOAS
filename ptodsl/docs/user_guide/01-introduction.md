@@ -223,7 +223,7 @@ Chapter 11 walks through this example in full detail.
 | New to PTODSL | Chapter 2 (Quick Start), then Chapter 3 (Kernel Entries) |
 
 | Writing your first kernel | Chapter 2 → Chapter 4 (Type System) → Chapter 5 (Control Flow) |
-| Looking up a specific operation | Chapters 6–10 (organized by topic) |
+| Looking up a specific operation | Chapters 6–10 and Chapter 13 (organized by topic) |
 | Understanding the flash attention reference | Chapter 11 |
 
 **Chapter overview:**
@@ -242,5 +242,5 @@ Chapter 11 walks through this example in full detail.
 | 10 | Synchronization: barriers, flags, memory fences |
 | 11 | Flash attention walkthrough |
 | 12 | Additional examples |
-| 13 | Migration from the old `@pto.vkernel`/`@pto.ckernel` API |
+| 13 | SIMT micro-ops |
 | 14 | Common errors and compatibility notes |

@@ -1978,29 +1978,51 @@ FRAGMENT_FIXTURES = {
     ),
     "pipe_communication.c2v_local_import": _fixture(
         f"""
-        @pto.simt
-        def vector_kernel():
-            c2v_buf = pto.reserve_buffer("c2v_fifo", size=8192, location="vec")
+        from mlir.dialects import func
+        from mlir.ir import InsertionPoint
+        from ptodsl._tracing import current_session
+
+
+        def declare_vector_kernel_peer():
+            session = current_session()
+            fn_ty = func.FunctionType.get([], [])
+            with InsertionPoint(session._function_symbol_table):
+                peer = func.FuncOp("vector_kernel", fn_ty)
+            entry = peer.add_entry_block()
+            with session.enter_function(peer), InsertionPoint(entry):
+                pto.reserve_buffer("c2v_fifo", size=8192, location="vec")
+                func.ReturnOp([])
 
 
         @pto.jit(target="a5")
         def pipe_communication_c2v_local_import_probe():
-            vector_kernel()
+            declare_vector_kernel_peer()
             {SNIPPET_PLACEHOLDER}
         """
     ),
     "pipe_communication.c2v_local_producer": _fixture(
         f"""
-        @pto.simt
-        def vector_kernel():
-            c2v_buf = pto.reserve_buffer("c2v_fifo", size=8192, location="vec")
+        from mlir.dialects import func
+        from mlir.ir import InsertionPoint
+        from ptodsl._tracing import current_session
+
+
+        def declare_vector_kernel_peer():
+            session = current_session()
+            fn_ty = func.FunctionType.get([], [])
+            with InsertionPoint(session._function_symbol_table):
+                peer = func.FuncOp("vector_kernel", fn_ty)
+            entry = peer.add_entry_block()
+            with session.enter_function(peer), InsertionPoint(entry):
+                pto.reserve_buffer("c2v_fifo", size=8192, location="vec")
+                func.ReturnOp([])
 
 
         @pto.jit(target="a5")
         def pipe_communication_c2v_local_producer_probe(
             src: pto.gm_ptr(pto.f32),
         ):
-            vector_kernel()
+            declare_vector_kernel_peer()
             c2v_buf = pto.import_reserved_buffer("c2v_fifo", peer_func="vector_kernel")
             c2v_peer = pto.pipe.c2v(
                 slot_size=1024,
