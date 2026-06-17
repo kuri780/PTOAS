@@ -314,6 +314,17 @@ def _describe_kernel_source(text: str):
                 "call_text": func["text"],
             }
 
+    if len(functions) == 1:
+        func = functions[0]
+        return {
+            "kind": "global",
+            "kernel_name": func["name"],
+            "raw_params": func["raw_params"],
+            "analysis_texts": [func["text"]],
+            "writer_texts": [func["text"]],
+            "call_text": func["text"],
+        }
+
     mixed_groups = {}
     for func in functions:
         name = func["name"]
