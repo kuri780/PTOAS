@@ -143,6 +143,9 @@ from ._control_flow import (    # noqa: F401
     LoopHandle, BranchHandle,
 )
 
+# ── All-reduce ─────────────────────────────────────────────────────────────────
+from ._allreduce import all_reduce  # noqa: F401
+
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401
 from ._subkernels import cube, simd, simt     # noqa: F401

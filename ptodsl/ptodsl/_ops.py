@@ -5040,6 +5040,55 @@ def wait_intra_flag(pipe, event_id):
     _pto.sync_wait(_pipe_attr(pipe), event_operand)
 
 
+# ── SIMT low-level intrinsics ──────────────────────────────────────────────────
+# These wrap the PTO dialect SIMT ops defined in VPTOOps.td.
+
+def get_laneid():
+    """``pto.get_laneid`` → i32 lane ID within the current SIMT launch."""
+    return wrap_surface_value(_pto.GetLaneIdOp().result)
+
+
+def redux_add(x):
+    """``pto.redux_add`` → hardware warp reduce-add across 32 lanes."""
+    return wrap_surface_value(_pto.ReduxAddOp(unwrap_surface_value(x)).result)
+
+
+def redux_max(x, *, signedness=None):
+    """``pto.redux_max`` → hardware warp reduce-max across 32 lanes."""
+    return wrap_surface_value(_pto.ReduxMaxOp(unwrap_surface_value(x)).result)
+
+
+def redux_min(x, *, signedness=None):
+    """``pto.redux_min`` → hardware warp reduce-min across 32 lanes."""
+    return wrap_surface_value(_pto.ReduxMinOp(unwrap_surface_value(x)).result)
+
+
+def syncthreads():
+    """``pto.syncthreads`` – synchronize all workitems in the SIMT VF entry."""
+    _pto.SyncthreadsOp()
+
+
+def shuffle_bfly(x, mask, *, width=None):
+    """``pto.shuffle_bfly`` – butterfly shuffle across workitems."""
+    return wrap_surface_value(
+        _pto.ShuffleBflyOp(unwrap_surface_value(x), unwrap_surface_value(mask)).result
+    )
+
+
+def shuffle_up(x, offset, *, width=None):
+    """``pto.shuffle_up`` – upward shuffle across workitems."""
+    return wrap_surface_value(
+        _pto.ShuffleUpOp(unwrap_surface_value(x), unwrap_surface_value(offset)).result
+    )
+
+
+def shuffle_down(x, offset, *, width=None):
+    """``pto.shuffle_down`` – downward shuffle across workitems."""
+    return wrap_surface_value(
+        _pto.ShuffleDownOp(unwrap_surface_value(x), unwrap_surface_value(offset)).result
+    )
+
+
 def set_flag(src: str, dst: str, *, event_id: int = 0):
     """``pto.set_flag[src, dst, event_id]``.
 
