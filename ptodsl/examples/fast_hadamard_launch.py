@@ -7,13 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
-Fast Hadamard transform launch demo.
+Fast Hadamard transform launch demo using tile gather.
 
-This ports the old DSL in-place fp16 Hadamard idea to the current PTODSL launch
-surface.  The old example used gather mask patterns for arbitrary butterfly
-halves.  This launchable version demonstrates the aligned vector route for
-2-point Hadamard rows: DINTLV/INTLV B16 performs the aligned butterfly without
-using the old gather mask-pattern helper.
+This keeps the current PTODSL launch surface but follows the old DSL kernel
+shape closely: each row is loaded into a tile, every butterfly stage gathers
+even and odd lanes with P0101/P1010, computes add/sub halves, stores those
+halves back to the corresponding row regions, and reloads the row for the next
+stage.
 
 Run under the CPU simulator:
 
@@ -45,14 +45,13 @@ from ptodsl import pto
 _DEVICE = "npu:0"
 MAX_BATCH = 8
 PHYSICAL_N = 256
+HALF_PHYSICAL_N = PHYSICAL_N // 2
 
 
 @pto.jit(
     name="fast_hadamard_f16",
     kernel_kind="vector",
     target="a5",
-    mode="explicit",
-    insert_sync=False,
 )
 def fast_hadamard_f16(
     x_ptr: pto.ptr(pto.f16, "gm"),
@@ -60,60 +59,76 @@ def fast_hadamard_f16(
     n_i32: pto.i32,
     log2_n_i32: pto.i32,
 ):
+    c0 = pto.const(0, dtype=pto.i32)
+    c1 = pto.const(1, dtype=pto.i32)
+    c2 = pto.const(2, dtype=pto.i32)
+
     total_elems = batch_i32 * n_i32
     x_view = pto.make_tensor_view(
         x_ptr,
         shape=[1, 1, 1, batch_i32, n_i32],
         strides=[total_elems, total_elems, total_elems, n_i32, 1],
     )
+
+    active_pairs = n_i32 // c2
     row_tile = pto.alloc_tile(
-        shape=[MAX_BATCH, PHYSICAL_N],
+        shape=[1, PHYSICAL_N],
         dtype=pto.f16,
-        addr=0,
-        valid_shape=[batch_i32, n_i32],
+        valid_shape=[1, n_i32],
         blayout="RowMajor",
     )
-    x_part = pto.partition_view(
-        x_view,
-        offsets=[0, 0, 0, 0, 0],
-        sizes=[1, 1, 1, batch_i32, n_i32],
+    even_tile = pto.alloc_tile(
+        shape=[1, HALF_PHYSICAL_N],
+        dtype=pto.f16,
+        valid_shape=[1, active_pairs],
+        blayout="RowMajor",
+    )
+    odd_tile = pto.alloc_tile(
+        shape=[1, HALF_PHYSICAL_N],
+        dtype=pto.f16,
+        valid_shape=[1, active_pairs],
+        blayout="RowMajor",
+    )
+    plus_tile = pto.alloc_tile(
+        shape=[1, HALF_PHYSICAL_N],
+        dtype=pto.f16,
+        valid_shape=[1, active_pairs],
+        blayout="RowMajor",
+    )
+    minus_tile = pto.alloc_tile(
+        shape=[1, HALF_PHYSICAL_N],
+        dtype=pto.f16,
+        valid_shape=[1, active_pairs],
+        blayout="RowMajor",
     )
 
-    pto.tile.load(x_part, row_tile)
-    pto.set_flag("MTE2", "V", event_id=0)
-    pto.wait_flag("MTE2", "V", event_id=0)
+    for row in range(0, batch_i32, 1):
+        row_part = pto.partition_view(
+            x_view,
+            offsets=[0, 0, 0, row, 0],
+            sizes=[1, 1, 1, 1, n_i32],
+        )
+        plus_part = pto.partition_view(
+            x_view,
+            offsets=[0, 0, 0, row, 0],
+            sizes=[1, 1, 1, 1, active_pairs],
+        )
+        minus_part = pto.partition_view(
+            x_view,
+            offsets=[0, 0, 0, row, active_pairs],
+            sizes=[1, 1, 1, 1, active_pairs],
+        )
 
-    row_ptr = row_tile.as_ptr()
-    active_pairs = n_i32 // pto.const(2, dtype=pto.i32)
+        pto.tile.load(row_part, row_tile)
 
-    with pto.simd():
-        with pto.if_(pto.const(0, dtype=pto.i32) < log2_n_i32) as br0:
-            with br0.then_:
-                active_mask, _ = pto.make_mask(pto.f16, active_pairs)
-                with pto.for_(0, batch_i32, step=1) as row:
-                    row_offset = row * PHYSICAL_N
-                    even, odd = pto.vldsx2(
-                        row_ptr,
-                        row_offset,
-                        pto.DeinterleaveDist.DINTLV_B16,
-                    )
-                    plus = pto.vadd(even, odd, active_mask)
-                    minus = pto.vsub(even, odd, active_mask)
-                    pto.vstsx2(
-                        plus,
-                        minus,
-                        row_ptr,
-                        row_offset,
-                        pto.InterleaveDist.INTLV_B16,
-                        active_mask,
-                    )
-                pto.pipe_barrier(pto.Pipe.ALL)
-
-    pto.set_flag("V", "MTE3", event_id=0)
-    pto.wait_flag("V", "MTE3", event_id=0)
-    pto.tile.store(row_tile, x_part)
-
-    pto.pipe_barrier(pto.Pipe.ALL)
+        for _ in range(0, log2_n_i32, 1):
+            pto.tile.gather(row_tile, even_tile, mask_pattern="P0101")
+            pto.tile.gather(row_tile, odd_tile, mask_pattern="P1010")
+            pto.tile.add(even_tile, odd_tile, plus_tile)
+            pto.tile.sub(even_tile, odd_tile, minus_tile)
+            pto.tile.store(plus_tile, plus_part)
+            pto.tile.store(minus_tile, minus_part)
+            pto.tile.load(row_part, row_tile)
 
 
 CASES = [
@@ -127,15 +142,16 @@ def emit_mlir():
     return fast_hadamard_f16.mlir_module()
 
 
-def reference_hadamard(x: np.ndarray) -> np.ndarray:
+def reference_hadamard(x: np.ndarray, log2_n: int) -> np.ndarray:
     y = x.astype(np.float32).copy()
-    for base in range(0, y.shape[1] - 1, 2):
-        lhs = y[:, base].copy()
-        rhs = y[:, base + 1].copy()
-        y[:, base] = lhs + rhs
-        y[:, base + 1] = lhs - rhs
-    if y.shape[1] % 2:
-        y[:, -1] = 0.0
+    for _ in range(log2_n):
+        active_pairs = y.shape[1] // 2
+        if active_pairs == 0:
+            break
+        even = y[:, 0 : active_pairs * 2 : 2].copy()
+        odd = y[:, 1 : active_pairs * 2 : 2].copy()
+        y[:, :active_pairs] = even + odd
+        y[:, active_pairs : active_pairs * 2] = even - odd
     return y.astype(np.float16)
 
 
@@ -162,7 +178,8 @@ def make_case_inputs(case: dict[str, object]) -> np.ndarray:
 
 def run_case(case: dict[str, object], compiled, torch) -> None:
     x = make_case_inputs(case)
-    ref = reference_hadamard(x)
+    log2_n = int(math.log2(int(case["n"])))
+    ref = reference_hadamard(x, log2_n)
     x_dev = torch.from_numpy(x).to(_DEVICE)
     stream = npu_stream(torch)
 
@@ -171,7 +188,7 @@ def run_case(case: dict[str, object], compiled, torch) -> None:
         x_dev.data_ptr(),
         case["batch"],
         case["n"],
-        int(math.log2(int(case["n"]))),
+        log2_n,
     )
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0
