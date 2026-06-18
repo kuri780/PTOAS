@@ -1737,6 +1737,16 @@ static std::optional<pto::Layout> getLogicalViewLayout(Value value) {
   if (auto part = value.getDefiningOp<pto::PartitionViewOp>())
     return getLogicalViewLayout(part.getSource());
   if (auto make = value.getDefiningOp<pto::MakeTensorViewOp>()) {
+    // Prefer the explicit layout attribute when available.  After rank-2 →
+    // rank-5 canonicalization, the padded leading strides satisfy the ND
+    // (row-major) recurrence even for DN (col-major) data, so inferLayout
+    // alone would misclassify DN as ND (the col-major recurrence breaks at
+    // the boundary between padded unit-extent dims and real dims).  The
+    // layout attribute carries the *intended* memory layout and is the
+    // authoritative source — inferLayout is only a fallback for views that
+    // lack an explicit layout.
+    if (auto layoutAttr = make.getLayoutAttr())
+      return layoutAttr.getLayout();
     auto tvTy = dyn_cast<pto::TensorViewType>(make.getResult().getType());
     if (!tvTy)
       return std::nullopt;

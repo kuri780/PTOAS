@@ -1737,6 +1737,14 @@ int mlir::pto::compilePTOASModule(
   if (failed(applyPassManagerCLOptions(pm)))
     return 1;
 
+  // Rank-2 → rank-5 view canonicalization is currently gated on the VPTO
+  // backend to limit blast radius.  A3/A5 EmitC codegen already pads strides
+  // to rank-5 via InferPTOLayout and buildGlobalTensorShapeAndStride, so it
+  // does not need the canonicalization pass at the IR level.  When VPTO
+  // validation is complete and the pass is proven stable, the gate can be
+  // lifted to make it unconditional for all backends.
+  if (effectiveBackend == PTOBackend::VPTO)
+    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOCanonicalizeIRPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOAssignDefaultFrontendPipeIdPass());
   pm.addNestedPass<mlir::func::FuncOp>(

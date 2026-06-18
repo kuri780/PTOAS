@@ -480,6 +480,30 @@ def FoldTileBufIntrinsics : Pass<"pto-fold-tile-buf-intrinsics", "mlir::func::Fu
   ];
 }
 
+def PTOCanonicalizeIR : Pass<"pto-canonicalize-ir", "func::FuncOp"> {
+  let summary = "Canonicalize rank-2 view descriptors into rank-5 form (VPTO-only)";
+  let description = [{
+    Rewrites rank-2 tensor_view / partition_tensor_view descriptors into the
+    canonical right-aligned rank-5 form [1, 1, 1, R, C], matching the 5D
+    descriptor layout expected by VPTO lowering. Stride expansion uses the
+    same cumulative-product rule as rightAlignTo5D and
+    buildGlobalTensorShapeAndStride: stride[i] = shape[i+1] * stride[i+1].
+
+    Currently gated on --pto-backend=vpto to limit blast radius. A3/A5
+    EmitC codegen already pads strides to rank-5 via InferPTOLayout and
+    buildGlobalTensorShapeAndStride, so it does not need this pass at the
+    IR level. The gate can be lifted once the pass is proven stable.
+
+    A post-canonicalization verification detects any surviving rank-2 view
+    types to prevent silent failures when new view-consuming ops are added.
+  }];
+  let constructor = "mlir::pto::createPTOCanonicalizeIRPass()";
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
 def PTOInlineLibCall : Pass<"pto-inline-libcall", "ModuleOp"> {
   let summary = "Materialize OP-Lib instance bodies and inline OP-Lib calls";
   let description = [{

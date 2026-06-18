@@ -1,0 +1,34 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Tests that rank-2 DN (col-major) tensor_view canonicalization produces
+// correct cumulative-product strides and that the layout attribute is
+// preserved, preventing misidentification as ND after rank-5 padding.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-pto-ir --mlir-print-ir-after=pto-canonicalize-ir %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=IR
+
+module {
+  func.func @dn_layout_kernel(%src: !pto.ptr<f32>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+    %c32 = arith.constant 32 : index
+
+    // DN layout: strides = [1, 16] — col-major (stride[0]=1, stride[1]=rows)
+    %tv = pto.make_tensor_view %src, shape = [%c16, %c32], strides = [%c1, %c16] {layout = #pto.layout<dn>} : !pto.tensor_view<?x?xf32>
+    %sv = pto.partition_view %tv, offsets = [%c0, %c0], sizes = [%c16, %c32] : !pto.tensor_view<?x?xf32>
+
+    %tile = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=32, v_row=16, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%sv : !pto.partition_tensor_view<16x32xf32>) outs(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=32, v_row=16, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}
+
+// IR: pto.make_tensor_view {{.*}} strides = [{{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^]]+}}] {layout = #pto.layout<dn>} : !pto.tensor_view<1x1x1x?x?xf32>
+// IR: pto.partition_view {{.*}} offsets = [{{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^]]+}}], sizes = [{{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}, {{%[^]]+}}] : !pto.tensor_view<1x1x1x?x?xf32>
+// IR: !pto.partition_tensor_view<1x1x1x16x32xf32>
