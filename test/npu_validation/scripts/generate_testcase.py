@@ -895,7 +895,13 @@ def _parse_kernel_name(text: str) -> str:
 def _np_dtype_for_cpp(cpp_type: str) -> str:
     mapping = {
         "float": "np.float32",
+        "float4_e1m2x2_t": "np.uint8",
+        "float4_e2m1x2_t": "np.uint8",
+        "float8_e4m3_t": "np.uint8",
+        "float8_e5m2_t": "np.uint8",
+        "float8_e8m0_t": "np.uint8",
         "half": "np.float16",
+        "hifloat8_t": "np.uint8",
         "aclFloat16": "np.float16",
         "__bf16": "np.uint16",
         "bfloat16_t": "np.uint16",

@@ -1,0 +1,50 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// Licensed under the CANN Open Software License Agreement Version 2.0.
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cube>} {
+  func.func @matmulmx_highlevel(%arg0: !pto.ptr<f8E4M3FN, gm>, %arg1: !pto.ptr<f8E5M2, gm>, %arg2: !pto.ptr<!pto.f8E8M0, gm>, %arg3: !pto.ptr<!pto.f8E8M0, gm>, %arg4: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c63 = arith.constant 63 : index
+    %c64 = arith.constant 64 : index
+    %c110 = arith.constant 110 : index
+    %c128 = arith.constant 128 : index
+    %c4 = arith.constant 4 : index
+    %c1 = arith.constant 1 : index
+    %0 = pto.make_tensor_view %arg0, shape = [%c128, %c110], strides = [%c110, %c1] : !pto.tensor_view<?x?xf8E4M3FN>
+    %c1_0 = arith.constant 1 : index
+    %1 = pto.make_tensor_view %arg1, shape = [%c110, %c63], strides = [%c63, %c1_0] : !pto.tensor_view<?x?xf8E5M2>
+    %c1_1 = arith.constant 1 : index
+    %2 = pto.make_tensor_view %arg2, shape = [%c128, %c4], strides = [%c4, %c1_1] : !pto.tensor_view<?x?x!pto.f8E8M0>
+    %c1_2 = arith.constant 1 : index
+    %3 = pto.make_tensor_view %arg3, shape = [%c4, %c63], strides = [%c63, %c1_2] : !pto.tensor_view<?x?x!pto.f8E8M0>
+    %c1_3 = arith.constant 1 : index
+    %4 = pto.make_tensor_view %arg4, shape = [%c128, %c63], strides = [%c63, %c1_3] : !pto.tensor_view<?x?xf32>
+    %5 = pto.partition_view %0, offsets = [%c0, %c0], sizes = [%c128, %c110] : !pto.tensor_view<?x?xf8E4M3FN>
+    %6 = pto.partition_view %1, offsets = [%c0, %c0], sizes = [%c110, %c63] : !pto.tensor_view<?x?xf8E5M2>
+    %7 = pto.partition_view %2, offsets = [%c0, %c0], sizes = [%c128, %c4] : !pto.tensor_view<?x?x!pto.f8E8M0>
+    %8 = pto.partition_view %3, offsets = [%c0, %c0], sizes = [%c4, %c63] : !pto.tensor_view<?x?x!pto.f8E8M0>
+    %9 = pto.alloc_tile : !pto.tile_buf<mat, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>
+    %10 = pto.alloc_tile : !pto.tile_buf<mat, 128x64xf8E5M2, valid=110x63, blayout=col_major, slayout=row_major>
+    %11 = pto.alloc_tile : !pto.tile_buf<mat, 128x4x!pto.f8E8M0, blayout=row_major, slayout=row_major, fractal=32>
+    %12 = pto.alloc_tile : !pto.tile_buf<mat, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>
+    %13 = pto.alloc_tile : !pto.tile_buf<left, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>
+    %14 = pto.alloc_tile : !pto.tile_buf<right, 128x64xf8E5M2, valid=110x63, slayout=col_major>
+    %15 = pto.alloc_tile : !pto.tile_buf<scaling, 128x4x!pto.f8E8M0, slayout=row_major, fractal=32>
+    %16 = pto.alloc_tile : !pto.tile_buf<scaling, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>
+    %17 = pto.alloc_tile : !pto.tile_buf<acc, 128x64xf32, valid=128x63, blayout=col_major, slayout=row_major, fractal=1024>
+    pto.tload ins(%5 : !pto.partition_tensor_view<128x110xf8E4M3FN>) outs(%9 : !pto.tile_buf<mat, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>)
+    pto.tload ins(%6 : !pto.partition_tensor_view<110x63xf8E5M2>) outs(%10 : !pto.tile_buf<mat, 128x64xf8E5M2, valid=110x63, blayout=col_major, slayout=row_major>)
+    pto.tload ins(%7 : !pto.partition_tensor_view<128x4x!pto.f8E8M0>) outs(%11 : !pto.tile_buf<mat, 128x4x!pto.f8E8M0, blayout=row_major, slayout=row_major, fractal=32>)
+    pto.tload ins(%8 : !pto.partition_tensor_view<4x63x!pto.f8E8M0>) outs(%12 : !pto.tile_buf<mat, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>)
+    pto.tmov ins(%9 : !pto.tile_buf<mat, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>) outs(%13 : !pto.tile_buf<left, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>)
+    pto.tmov ins(%10 : !pto.tile_buf<mat, 128x64xf8E5M2, valid=110x63, blayout=col_major, slayout=row_major>) outs(%14 : !pto.tile_buf<right, 128x64xf8E5M2, valid=110x63, slayout=col_major>)
+    pto.tmov ins(%11 : !pto.tile_buf<mat, 128x4x!pto.f8E8M0, blayout=row_major, slayout=row_major, fractal=32>) outs(%15 : !pto.tile_buf<scaling, 128x4x!pto.f8E8M0, slayout=row_major, fractal=32>)
+    pto.tmov ins(%12 : !pto.tile_buf<mat, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>) outs(%16 : !pto.tile_buf<scaling, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>)
+    pto.tget_scale_addr ins(%13 : !pto.tile_buf<left, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>) outs(%15 : !pto.tile_buf<scaling, 128x4x!pto.f8E8M0, slayout=row_major, fractal=32>)
+    pto.tget_scale_addr ins(%14 : !pto.tile_buf<right, 128x64xf8E5M2, valid=110x63, slayout=col_major>) outs(%16 : !pto.tile_buf<scaling, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>)
+    pto.tmatmul.mx ins(%13, %15, %14, %16 : !pto.tile_buf<left, 128x128xf8E4M3FN, valid=128x110, blayout=col_major, slayout=row_major>, !pto.tile_buf<scaling, 128x4x!pto.f8E8M0, slayout=row_major, fractal=32>, !pto.tile_buf<right, 128x64xf8E5M2, valid=110x63, slayout=col_major>, !pto.tile_buf<scaling, 4x64x!pto.f8E8M0, valid=4x63, blayout=col_major, slayout=col_major, fractal=32>) outs(%17 : !pto.tile_buf<acc, 128x64xf32, valid=128x63, blayout=col_major, slayout=row_major, fractal=1024>)
+    %18 = pto.partition_view %4, offsets = [%c0, %c0], sizes = [%c128, %c63] : !pto.tensor_view<?x?xf32>
+    pto.tstore ins(%17 : !pto.tile_buf<acc, 128x64xf32, valid=128x63, blayout=col_major, slayout=row_major, fractal=1024>) outs(%18 : !pto.partition_tensor_view<128x63xf32>)
+    return
+  }
+}
