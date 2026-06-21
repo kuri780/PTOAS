@@ -21,7 +21,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
     %8 = pto.partition_view %3, offsets = [%c0, %c0], sizes = [%c4, %c16] : !pto.tensor_view<?x?x!pto.f8E8M0>
 
     %9 = pto.alloc_tile : !pto.tile_buf<mat, 1x512xf8E4M3FN, valid=1x128>
-    %10 = pto.alloc_tile : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major>
+    %10 = pto.alloc_tile : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major, pad=1>
     %11 = pto.alloc_tile : !pto.tile_buf<mat, 1x4x!pto.f8E8M0, slayout=row_major, fractal=32>
     %12 = pto.alloc_tile : !pto.tile_buf<mat, 4x32x!pto.f8E8M0, valid=4x16, blayout=col_major, slayout=col_major, fractal=32>
 
@@ -32,12 +32,14 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<cu
     %17 = pto.alloc_tile : !pto.tile_buf<acc, 1x32xf32, valid=1x16, blayout=col_major, slayout=row_major, fractal=1024>
 
     pto.tload ins(%5 : !pto.partition_tensor_view<1x128xf8E4M3FN>) outs(%9 : !pto.tile_buf<mat, 1x512xf8E4M3FN, valid=1x128>)
-    pto.tload ins(%6 : !pto.partition_tensor_view<128x16xf8E5M2>) outs(%10 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major>)
+    pto.tload ins(%6 : !pto.partition_tensor_view<128x16xf8E5M2>) outs(%10 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major, pad=1>)
+    pto.tfillpad ins(%10 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major, pad=1>)
+                 outs(%10 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major, pad=1>)
     pto.tload ins(%7 : !pto.partition_tensor_view<1x4x!pto.f8E8M0>) outs(%11 : !pto.tile_buf<mat, 1x4x!pto.f8E8M0, slayout=row_major, fractal=32>)
     pto.tload ins(%8 : !pto.partition_tensor_view<4x16x!pto.f8E8M0>) outs(%12 : !pto.tile_buf<mat, 4x32x!pto.f8E8M0, valid=4x16, blayout=col_major, slayout=col_major, fractal=32>)
 
     pto.textract ins(%9, %c0, %c0 : !pto.tile_buf<mat, 1x512xf8E4M3FN, valid=1x128>, index, index) outs(%13 : !pto.tile_buf<left, 1x512xf8E4M3FN, valid=1x128, blayout=col_major, slayout=row_major>)
-    pto.textract ins(%10, %c0, %c0 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major>, index, index) outs(%14 : !pto.tile_buf<right, 128x32xf8E5M2, valid=128x16, slayout=col_major>)
+    pto.textract ins(%10, %c0, %c0 : !pto.tile_buf<mat, 128x32xf8E5M2, valid=128x16, blayout=col_major, slayout=row_major, pad=1>, index, index) outs(%14 : !pto.tile_buf<right, 128x32xf8E5M2, valid=128x16, slayout=col_major>)
     pto.tmov ins(%11 : !pto.tile_buf<mat, 1x4x!pto.f8E8M0, slayout=row_major, fractal=32>) outs(%15 : !pto.tile_buf<scaling, 1x4x!pto.f8E8M0, slayout=row_major, fractal=32>)
     pto.tmov ins(%12 : !pto.tile_buf<mat, 4x32x!pto.f8E8M0, valid=4x16, blayout=col_major, slayout=col_major, fractal=32>) outs(%16 : !pto.tile_buf<scaling, 4x32x!pto.f8E8M0, valid=4x16, blayout=col_major, slayout=col_major, fractal=32>)
 

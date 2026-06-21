@@ -4479,7 +4479,33 @@ def TFillPadOp : PTO_TOp<"tfillpad", [
   }];
 
   let extraClassDeclaration = [{
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::pto::PIPE getPipe() {
+      auto getASFromType = [](Type ty)
+          -> std::optional<::mlir::pto::AddressSpace> {
+        if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+          if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  tb.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
+        if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+          if (auto ms = mr.getMemorySpace()) {
+            if (auto as = ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+              return as.getAddressSpace();
+          }
+          return std::nullopt;
+        }
+        return std::nullopt;
+      };
+
+      auto sOpt = getASFromType(getSrc().getType());
+      auto dOpt = getASFromType(getDst().getType());
+      if (sOpt.has_value() && dOpt.has_value() &&
+          sOpt.value() == ::mlir::pto::AddressSpace::MAT &&
+          dOpt.value() == ::mlir::pto::AddressSpace::MAT)
+        return ::mlir::pto::PIPE::PIPE_MTE1;
+      return ::mlir::pto::PIPE::PIPE_V;
+    }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }

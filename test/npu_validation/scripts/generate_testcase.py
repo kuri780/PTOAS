@@ -1995,7 +1995,7 @@ def generate_testcase(
         .replace("@RUNTIME_RT_INCLUDE@", runtime_rt_include)
         .replace(
             "@LAUNCH_DECL@",
-            f"void {launch_name}({', '.join(launch_decl_params + ['void *stream'])});",
+            f'extern "C" void {launch_name}({", ".join(launch_decl_params + ["void *stream"])});',
         )
         .replace("@PARAM_DECLS@", param_decls)
         .replace("@ALLOC_HOST@", "\n".join(alloc_host))
@@ -2254,7 +2254,7 @@ def generate_testcase(
         "#else\n"
         f"extern \"C\" __global__ AICORE void {kernel_name}({', '.join(raw_params_host)});\n"
         "#endif\n\n"
-        f"void {launch_name}({launch_fn_params}) {{\n"
+        f"extern \"C\" void {launch_name}({launch_fn_params}) {{\n"
         "#if defined(__CCE_AICORE__)\n"
         f"    {kernel_name}<<<{launch_block_count}, nullptr, stream>>>({kernel_call_args_device});\n"
         "#else\n"

@@ -1,0 +1,34 @@
+// RUN: ptoas --pto-arch a5 --enable-insert-sync %s | FileCheck %s
+
+module attributes {"pto.target_arch" = "a5"} {
+  // A5: mat->mat TFILLPAD follows the cube data-movement path and must not be
+  // treated as PIPE_V, otherwise sync insertion emits invalid V pipe events.
+  func.func @tfillpad_mat_sync(%in: memref<32x16xf16, #pto.address_space<gm>>) {
+    %src = pto.alloc_tile
+      : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=1>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=right, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                      blayout=row_major, slayout=col_major, fractal=512, pad=0>
+
+    pto.tload ins(%in : memref<32x16xf16, #pto.address_space<gm>>)
+              outs(%src : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                                        blayout=col_major, slayout=row_major, fractal=512, pad=1>)
+    pto.tfillpad ins(%src : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                                          blayout=col_major, slayout=row_major, fractal=512, pad=1>)
+                 outs(%src : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                                           blayout=col_major, slayout=row_major, fractal=512, pad=1>)
+    pto.tmov ins(%src : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                                      blayout=col_major, slayout=row_major, fractal=512, pad=1>)
+             outs(%dst : !pto.tile_buf<loc=right, dtype=f16, rows=32, cols=32, v_row=32, v_col=16,
+                                       blayout=row_major, slayout=col_major, fractal=512, pad=0>)
+    return
+  }
+}
+
+// CHECK-LABEL: AICORE void tfillpad_mat_sync(
+// CHECK: set_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID{{[0-9]+}});
+// CHECK: wait_flag(PIPE_MTE2, PIPE_MTE1, EVENT_ID{{[0-9]+}});
+// CHECK: TFILLPAD(
+// CHECK-NOT: set_flag(PIPE_MTE2, PIPE_V, EVENT_ID{{[0-9]+}});
+// CHECK-NOT: wait_flag(PIPE_V, PIPE_MTE1, EVENT_ID{{[0-9]+}});
