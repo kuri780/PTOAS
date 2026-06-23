@@ -64,6 +64,12 @@ def _run_ptoas(
     )
 
 
+def _effective_insert_sync(*, mode: str, insert_sync: bool | None) -> bool:
+    if insert_sync is not None:
+        return insert_sync
+    return mode != "explicit"
+
+
 def _host_compile_flags() -> list[str]:
     return common_include_flags() + [
         "-std=gnu++17",
@@ -189,7 +195,10 @@ def build_native_library(
         artifacts.mlir_path,
         artifacts.kernel_object,
         target_arch=module_spec.target_arch,
-        insert_sync=module_spec.insert_sync,
+        insert_sync=_effective_insert_sync(
+            mode=module_spec.mode,
+            insert_sync=module_spec.insert_sync,
+        ),
     )
 
     launch_object = artifacts.cache_dir / "launch.o"

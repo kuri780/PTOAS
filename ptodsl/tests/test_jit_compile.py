@@ -3249,9 +3249,14 @@ def main() -> None:
             observation["target_arch"] == compiled._module_spec.target_arch,
             f"{label} native build should still pass the target arch to ptoas",
         )
+        expected_insert_sync = (
+            compiled._module_spec.insert_sync
+            if compiled._module_spec.insert_sync is not None
+            else compiled._module_spec.mode != "explicit"
+        )
         expect(
-            observation["insert_sync"] == compiled._module_spec.insert_sync,
-            f"{label} native build should forward the authored insert_sync policy to ptoas",
+            observation["insert_sync"] == expected_insert_sync,
+            f"{label} native build should forward the effective insert_sync policy to ptoas",
         )
         expect(
             observation["mlir_text"] == compiled.mlir_text(),
@@ -3296,7 +3301,7 @@ def main() -> None:
         )
         expect(
             "--enable-insert-sync" not in ptoas_cmd,
-            "native build should keep the default insert-sync policy unset at the ptoas command line",
+            "native build should keep the default insert-sync policy unset when _run_ptoas is called directly",
         )
         expect(
             "--enable-tile-op-expand" in ptoas_cmd and str(mlir_path) in ptoas_cmd and str(kernel_object) in ptoas_cmd,
@@ -3602,6 +3607,10 @@ def main() -> None:
         )
         == 1,
         "@pto.simt helper should materialize exactly one reusable pto.simt_entry function",
+    )
+    expect(
+        "pto.ptodsl.subkernel_helper = \"simt\"" not in simt_text,
+        "@pto.simt helpers should no longer be modeled as PTODSL subkernel helpers",
     )
     expect("pto.get_tid_x" in simt_text, "SIMT helper body should contain pto.get_tid_x")
     expect("pto.get_tid_y" in simt_text, "SIMT helper body should contain pto.get_tid_y")

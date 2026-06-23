@@ -225,9 +225,6 @@ getPTODSLSubkernelHelperPipe(func::FuncOp callee) {
              roleAttr.getValue())
       .Case("cube", pto::PipelineType::PIPE_M)
       .Case("simd", pto::PipelineType::PIPE_V)
-      // PTODSL simt subkernels still participate in the vector-side auto-sync
-      // protocol at the caller boundary.
-      .Case("simt", pto::PipelineType::PIPE_V)
       .Default(std::nullopt);
 }
 

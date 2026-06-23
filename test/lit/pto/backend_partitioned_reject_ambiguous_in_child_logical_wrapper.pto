@@ -1,0 +1,38 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: not ptoas --pto-arch=a5 %s -o %t.o 2>&1 | FileCheck %s
+// Guards in-child logical wrapper creation: one mixed-backend child cannot yet
+// export multiple ABI-specialized public funcs that share one PTODSL logical
+// name, because wrapper synthesis would otherwise mis-type the forwarded call.
+
+module attributes {pto.target_arch = "a5"} {
+  module attributes {pto.backend = "emitc"} {
+    func.func @entry(%gm: !pto.ptr<f32, gm>) attributes {pto.entry} {
+      func.call @helper__ptodsl_a(%gm) : (!pto.ptr<f32, gm>) -> ()
+      func.call @helper__ptodsl_b(%gm, %gm) : (!pto.ptr<f32, gm>, !pto.ptr<f32, gm>) -> ()
+      return
+    }
+
+    func.func public @helper__ptodsl_a(%gm: !pto.ptr<f32, gm>) attributes {pto.ptodsl.logical_name = "helper"} {
+      return
+    }
+
+    func.func public @helper__ptodsl_b(%gm0: !pto.ptr<f32, gm>, %gm1: !pto.ptr<f32, gm>) attributes {pto.ptodsl.logical_name = "helper"} {
+      return
+    }
+  }
+
+  module attributes {pto.backend = "vpto"} {
+    func.func public @sidecar() {
+      return
+    }
+  }
+}
+
+// CHECK: error: mixed-backend child assembly does not yet support ambiguous in-child logical reference '@helper'; found multiple ABI-specialized public func.func definitions

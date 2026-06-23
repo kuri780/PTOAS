@@ -458,6 +458,33 @@ static void rewriteExportedFunctionToLogicalWrapper(func::FuncOp exportedFunc,
   builder.create<func::ReturnOp>(exportedFunc.getLoc(), call.getResults());
 }
 
+static LogicalResult
+verifyInChildLogicalWrapperAmbiguity(ModuleOp targetChild,
+                                     ArrayRef<func::FuncOp> exportedFuncs) {
+  llvm::SmallDenseMap<StringRef, SmallVector<func::FuncOp, 2>> grouped;
+  for (func::FuncOp exportedFunc : exportedFuncs) {
+    auto kernelKindAttr =
+        exportedFunc->getAttrOfType<mlir::pto::FunctionKernelKindAttr>(
+            mlir::pto::FunctionKernelKindAttr::name);
+    if (kernelKindAttr)
+      continue;
+    StringRef logicalName =
+        mlir::pto::getPTODSLLogicalNameOrSymbolName(exportedFunc);
+    grouped[logicalName].push_back(exportedFunc);
+  }
+
+  for (const auto &entry : grouped) {
+    if (entry.second.size() <= 1)
+      continue;
+    targetChild.emitError(
+        "mixed-backend child assembly does not yet support ambiguous in-child logical reference '@")
+        << entry.first
+        << "'; found multiple ABI-specialized public func.func definitions";
+    return failure();
+  }
+  return success();
+}
+
 static FailureOr<OwningOpRef<ModuleOp>>
 buildBackendChildCompileUnit(ModuleOp outer, ModuleOp targetChild) {
   ModuleOp jobModule = ModuleOp::create(outer.getLoc());
@@ -500,6 +527,8 @@ buildBackendChildCompileUnit(ModuleOp outer, ModuleOp targetChild) {
       continue;
     exportedFuncs.push_back(funcOp);
   }
+  if (failed(verifyInChildLogicalWrapperAmbiguity(targetChild, exportedFuncs)))
+    return failure();
   for (func::FuncOp exportedFunc : exportedFuncs) {
     StringRef logicalName =
         mlir::pto::getPTODSLLogicalNameOrSymbolName(exportedFunc);

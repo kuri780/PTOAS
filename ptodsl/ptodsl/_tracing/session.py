@@ -246,9 +246,9 @@ class TraceSession:
         return wrapper_op, body_block
 
     def _subkernel_helper_attributes(self, role: str) -> tuple[tuple[str, object], ...]:
-        attrs: list[tuple[str, object]] = [
-            ("pto.ptodsl.subkernel_helper", StringAttr.get(role)),
-        ]
+        attrs: list[tuple[str, object]] = []
+        if role in {"simd", "cube"}:
+            attrs.append(("pto.ptodsl.subkernel_helper", StringAttr.get(role)))
         if role == "simt":
             attrs.append(("pto.simt_entry", UnitAttr.get()))
         return tuple(attrs)
