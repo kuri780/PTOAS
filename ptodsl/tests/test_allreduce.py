@@ -21,29 +21,29 @@ def expect(condition: bool, message: str) -> None:
 
 
 def main():
-    from ptodsl._allreduce import _helper_name, all_reduce
+    from ptodsl._allreduce import _helper_name, simt_allreduce_sum
 
     # ══════════════════════════════════════════════════════════════════════════
     # helper name format
     # ══════════════════════════════════════════════════════════════════════════
     expect(
-        _helper_name("sum", "f32", 128, 1, 0) == "__tl_allreduce_sum_f32_t128_s1_o0",
+        _helper_name("f32", 128, 1, 0) == "__tl_allreduce_sum_f32_t128_s1_o0",
         "helper name format (sum/f32/t128/s1/o0)",
     )
     expect(
-        _helper_name("max", "f16", 32, 2, 4) == "__tl_allreduce_max_f16_t32_s2_o4",
-        "helper name format (max/f16/t32/s2/o4)",
+        _helper_name("f16", 32, 2, 4) == "__tl_allreduce_sum_f16_t32_s2_o4",
+        "helper name format (f16/t32/s2/o4)",
     )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Path 0: identity (threads <= scale)
     # ══════════════════════════════════════════════════════════════════════════
     expect(
-        all_reduce(1.0, op="sum", threads=1, scale=1) == 1.0,
+        simt_allreduce_sum(1.0, threads=1, scale=1) == 1.0,
         "identity: threads == scale",
     )
     expect(
-        all_reduce(1.0, op="sum", threads=2, scale=2) == 1.0,
+        simt_allreduce_sum(1.0, threads=2, scale=2) == 1.0,
         "identity: threads == scale (alt)",
     )
 
@@ -53,28 +53,22 @@ def main():
 
     # threads % scale != 0  (validation now runs before identity shortcut)
     try:
-        all_reduce(1.0, op="sum", threads=3, scale=2)
+        simt_allreduce_sum(1.0, threads=3, scale=2)
         raise AssertionError("expected ValueError for threads % scale != 0")
     except ValueError:
         pass
 
-    # unsupported op
-    try:
-        all_reduce(1.0, op="xor", threads=32, scale=1)
-        raise AssertionError("expected NotImplementedError for unsupported op")
-    except NotImplementedError:
-        pass
 
     # threads < 1
     try:
-        all_reduce(1.0, op="sum", threads=0, scale=1)
+        simt_allreduce_sum(1.0, threads=0, scale=1)
         raise AssertionError("expected ValueError for threads < 1")
     except ValueError:
         pass
 
     # validation runs before identity: bad params not bypassed by threads<=scale
     try:
-        all_reduce(1.0, op="sum", threads=1, scale=2)
+        simt_allreduce_sum(1.0, threads=1, scale=2)
         raise AssertionError("expected ValueError for threads%scale!=0 (before identity)")
     except ValueError:
         pass
@@ -84,7 +78,7 @@ def main():
     def kernel_i32(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1, dtype=pto.i32)
-            _result = pto.all_reduce(x, op="sum", threads=32, scale=1)
+            _result = pto.simt_allreduce_sum(x, threads=32, scale=1)
 
     try:
         kernel_i32.compile()
@@ -102,7 +96,7 @@ def main():
         _ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, op="sum", threads=32, scale=1)
+            _result = pto.simt_allreduce_sum(x, threads=32, scale=1)
 
     compiled_warp = kernel_warp.compile()
     mlir_warp = compiled_warp.mlir_text()
@@ -126,7 +120,7 @@ def main():
         _ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, op="sum", threads=16, scale=1)
+            _result = pto.simt_allreduce_sum(x, threads=16, scale=1)
 
     compiled_warp_t16 = kernel_warp_t16.compile()
     mlir_warp_t16 = compiled_warp_t16.mlir_text()
@@ -150,15 +144,15 @@ def main():
         _ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, op="max", threads=8, scale=1)
+            _result = pto.simt_allreduce_sum(x, threads=8, scale=1)
 
     compiled_warp_t8 = kernel_warp_t8.compile()
     mlir_warp_t8 = compiled_warp_t8.mlir_text()
-    expect("func.func @__tl_allreduce_max_f32_t8_s1_o0" in mlir_warp_t8,
-           "IR: warp_reduce t=8 butterfly helper name")
+    expect("func.func @__tl_allreduce_sum_f32_t8_s1_o0" in mlir_warp_t8,
+           "IR: warp_reduce t=8 butterfly helper name (sum)")
     expect("pto.shuffle_bfly" in mlir_warp_t8,
            "IR: shuffle_bfly for butterfly path")
-    expect("pto.redux_max" not in mlir_warp_t8,
+    expect("pto.redux_add" not in mlir_warp_t8,
            "IR: butterfly has no hardware redux")
     expect("pto.syncthreads" not in mlir_warp_t8,
            "IR: butterfly has no syncthreads")
@@ -174,15 +168,15 @@ def main():
         _ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, op="min", threads=32, scale=2)
+            _result = pto.simt_allreduce_sum(x, threads=32, scale=2)
 
     compiled_warp_s2 = kernel_warp_s2.compile()
     mlir_warp_s2 = compiled_warp_s2.mlir_text()
-    expect("func.func @__tl_allreduce_min_f32_t32_s2_o0" in mlir_warp_s2,
-           "IR: warp_reduce s=2 butterfly helper name")
+    expect("func.func @__tl_allreduce_sum_f32_t32_s2_o0" in mlir_warp_s2,
+           "IR: warp_reduce s=2 butterfly helper name (sum)")
     expect("pto.shuffle_bfly" in mlir_warp_s2,
            "IR: shuffle_bfly for butterfly (scale>1)")
-    expect("pto.redux_min" not in mlir_warp_s2,
+    expect("pto.redux_add" not in mlir_warp_s2,
            "IR: butterfly (scale>1) has no hardware redux")
     compiled_warp_s2.verify()
 
@@ -193,7 +187,7 @@ def main():
         _ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, op="sum", threads=16, scale=1, thread_offset=4)
+            _result = pto.simt_allreduce_sum(x, threads=16, scale=1, thread_offset=4)
 
     compiled_warp_o4 = kernel_warp_o4.compile()
     mlir_warp_o4 = compiled_warp_o4.mlir_text()
@@ -217,7 +211,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=6, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=1)
 
     compiled_ub6 = kernel_ub6.compile()
     mlir_ub6 = compiled_ub6.mlir_text()
@@ -241,7 +235,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=6, scale=2)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=2)
 
     compiled_ub6s2 = kernel_ub6s2.compile()
     mlir_ub6s2 = compiled_ub6s2.mlir_text()
@@ -271,7 +265,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=6, scale=1,
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=6, scale=1,
                                      thread_offset=4)
 
     compiled_ub_o4 = kernel_ub_o4.compile()
@@ -292,7 +286,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=1)
 
     compiled = kernel_128.compile()
     mlir = compiled.mlir_text()
@@ -323,7 +317,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=64, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=64, scale=1)
 
     compiled_64 = kernel_64.compile()
     mlir_64 = compiled_64.mlir_text()
@@ -338,30 +332,13 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=256, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=256, scale=1)
 
     compiled_256 = kernel_256.compile()
     mlir_256 = compiled_256.mlir_text()
     expect("func.func @__tl_allreduce_sum_f32_t256_s1_o0" in mlir_256,
            "IR: helper for t=256")
     compiled_256.verify()
-
-    # ── cross_warp: max, f32, t=128 ─────────────────────────────────────────
-    @pto.jit(target="a5")
-    def kernel_max(scratch_gm: pto.ptr(pto.f32, "gm")):
-        zero_u64 = pto.const(0, dtype=pto.ui64)
-        ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
-        with pto.simt():
-            x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="max", threads=128, scale=1)
-
-    compiled_max = kernel_max.compile()
-    mlir_max = compiled_max.mlir_text()
-    expect("func.func @__tl_allreduce_max_f32_t128_s1_o0" in mlir_max,
-           "IR: max helper name")
-    expect("pto.redux_max" in mlir_max,
-           "IR: redux_max in max helper")
-    compiled_max.verify()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Path 3b: cross_warp_reduce — scale > 1, scale*num_warps ≤ 32
@@ -374,7 +351,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=128, scale=2)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=2)
 
     compiled_cw_s2 = kernel_cw_s2.compile()
     mlir_cw_s2 = compiled_cw_s2.mlir_text()
@@ -388,7 +365,7 @@ def main():
     compiled_cw_s2.verify()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Path 3c: cross_warp_reduce — scale > 1, scale*num_warps > 32 (manual)
+    # Path 3c: cross_warp_reduce — scale > 1, scale*num_warps > 32 (manual, sum)
     #           (threads=128, scale=16, num_warps=4, total=64 > 32)
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -398,11 +375,11 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="max", threads=128, scale=16)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=16)
 
     compiled_cw_s16 = kernel_cw_s16.compile()
     mlir_cw_s16 = compiled_cw_s16.mlir_text()
-    expect("func.func @__tl_allreduce_max_f32_t128_s16_o0" in mlir_cw_s16,
+    expect("func.func @__tl_allreduce_sum_f32_t128_s16_o0" in mlir_cw_s16,
            "IR: cross_warp s=16 manual helper name")
     expect("pto.syncthreads" in mlir_cw_s16,
            "IR: cross_warp s=16 has syncthreads")
@@ -415,7 +392,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=128, scale=1,
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=1,
                                      thread_offset=4)
 
     compiled_cw_o4 = kernel_cw_o4.compile()
@@ -439,7 +416,7 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="sum", threads=48, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=48, scale=1)
 
     compiled_ub48 = kernel_ub48.compile()
     mlir_ub48 = compiled_ub48.mlir_text()
@@ -463,9 +440,9 @@ def main():
         ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
         with pto.simt():
             x1 = pto.const(1.0, dtype=pto.f32)
-            _r1 = pto.all_reduce(x1, ub_scratch, op="sum", threads=128, scale=1)
+            _r1 = pto.simt_allreduce_sum(x1, scratch=ub_scratch, threads=128, scale=1)
             x2 = pto.const(2.0, dtype=pto.f32)
-            _r2 = pto.all_reduce(x2, ub_scratch, op="sum", threads=128, scale=1)
+            _r2 = pto.simt_allreduce_sum(x2, scratch=ub_scratch, threads=128, scale=1)
 
     compiled2 = kernel_reuse.compile()
     mlir2 = compiled2.mlir_text()
@@ -477,25 +454,6 @@ def main():
     expect(calls == 2, f"IR: expected 2 call sites, got {calls}")
     compiled2.verify()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # cross_warp: min, f32, t=128 (identity = +inf)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    @pto.jit(target="a5")
-    def kernel_min(scratch_gm: pto.ptr(pto.f32, "gm")):
-        zero_u64 = pto.const(0, dtype=pto.ui64)
-        ub_scratch = pto.castptr(zero_u64, pto.ptr(pto.f32, "ub"))
-        with pto.simt():
-            x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_scratch, op="min", threads=128, scale=1)
-
-    compiled_min = kernel_min.compile()
-    mlir_min = compiled_min.mlir_text()
-    expect("func.func @__tl_allreduce_min_f32_t128_s1_o0" in mlir_min,
-           "IR: min helper name")
-    expect("pto.redux_min" in mlir_min,
-           "IR: redux_min in min helper")
-    compiled_min.verify()
 
     # ══════════════════════════════════════════════════════════════════════════
     # scratch required for ub_reduce and cross_warp paths
@@ -507,7 +465,7 @@ def main():
     def kernel_no_scratch_cw(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, None, op="sum", threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=None, threads=128, scale=1)
 
     try:
         kernel_no_scratch_cw.compile()
@@ -521,7 +479,7 @@ def main():
     def kernel_no_scratch_ub(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, None, op="sum", threads=6, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=None, threads=6, scale=1)
 
     try:
         kernel_no_scratch_ub.compile()
@@ -532,7 +490,7 @@ def main():
 
     # scratch must be a pto.ptr type
     try:
-        all_reduce(1.0, "not_a_ptr", op="sum", threads=6, scale=1)
+        simt_allreduce_sum(1.0, scratch="not_a_ptr", threads=6, scale=1)
         raise AssertionError("expected TypeError for non-ptr scratch")
     except (TypeError, AttributeError):
         pass
@@ -542,7 +500,7 @@ def main():
     def kernel_gm_scratch(scratch_gm: pto.ptr(pto.f32, "gm")):
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, scratch_gm, op="sum", threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=scratch_gm, threads=128, scale=1)
 
     try:
         kernel_gm_scratch.compile()
@@ -558,7 +516,7 @@ def main():
         ub_i32 = pto.castptr(zero_u64, pto.ptr(pto.i32, "ub"))
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
-            _result = pto.all_reduce(x, ub_i32, op="sum", threads=128, scale=1)
+            _result = pto.simt_allreduce_sum(x, scratch=ub_i32, threads=128, scale=1)
 
     try:
         kernel_dtype_mismatch.compile()

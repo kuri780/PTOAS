@@ -144,7 +144,7 @@ from ._control_flow import (    # noqa: F401
 )
 
 # ── All-reduce ─────────────────────────────────────────────────────────────────
-from ._allreduce import all_reduce  # noqa: F401
+from ._allreduce import simt_allreduce_sum  # noqa: F401
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401
