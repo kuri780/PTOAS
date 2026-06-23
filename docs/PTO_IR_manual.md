@@ -7488,6 +7488,49 @@ pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
            {gatherOob = #pto<gather_oob zero>}
 ```
 
+**GM → L1 (cube `loc=mat`) destination:**
+
+The destination may also be an **L1 / cube `loc=mat` tile in NZ layout**, so a
+gathered table can be fed straight into a matmul without a UB round-trip. This
+mirrors the pto-isa `MGATHER` GM → L1 overloads and is selected automatically
+when `dst` is a `loc=mat` tile.
+
+- **`dst`** — `loc=mat`, `blayout=col_major`, `slayout=row_major`, `fractal=512`
+  (NZ). Padded `cols` must be a multiple of `C0 = 32 / sizeof(elem)` and padded
+  `rows` a multiple of `16` (`FRACTAL_NZ_ROW`).
+- **`idx`** — supplied as a **GM tensor** (`memref` / `partition_tensor_view`)
+  of `i32`, **not** a UB tile: on A5 the cube core that issues the L1 transfer
+  cannot read AIV's UB.
+- **`coalesce`** — must be **explicit** (`row` or `elem`); there is no UB index
+  tile to infer the mode from.
+- **`scratch`** — `coalesce=elem` requires a contiguous **GM `scratch`** operand
+  (`>= dst.rows * dst.cols` elements, element type matching `dst`) used to stage
+  the discrete elements into NZ layout before the bulk GM → L1 copy. `coalesce=row`
+  takes no scratch.
+- Executes on the GM → L1 DMA pipeline (`PIPE_MTE2`) on every arch, like `pto.tload`.
+- Lowering: `row` → `MGATHER<pto::Coalesce::Row[, GatherOOB]>(dst, table, idx)`;
+  `elem` → `MGATHER<pto::Coalesce::Elem[, GatherOOB]>(dst, table, idx, scratch)`.
+
+```mlir
+// Row: no scratch, idx is a GM [1, R] tensor.
+pto.mgather ins(%mem, %idx : memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+                             memref<1x1x1x1x32xi32, #pto.address_space<gm>>)
+           outs(%dst : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32,
+                                     v_col=32, blayout=col_major, slayout=row_major,
+                                     fractal=512, pad=0>)
+           {coalesce = #pto<coalesce row>}
+
+// Elem: GM scratch workspace staged in NZ layout before the bulk copy.
+pto.mgather ins(%mem, %idx, %scratch
+                : memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+                  memref<1x1x1x32x32xi32, #pto.address_space<gm>>,
+                  memref<1x1x1x32x32xf16, #pto.address_space<gm>>)
+           outs(%dst : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32,
+                                     v_col=32, blayout=col_major, slayout=row_major,
+                                     fractal=512, pad=0>)
+           {coalesce = #pto<coalesce elem>}
+```
+
 ---
 
 ##### `pto.mscatter` - Scatter-Store to Global Memory

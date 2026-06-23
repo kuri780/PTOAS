@@ -1,0 +1,56 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// GM -> L1 (cube Mat) gather lowering. dst is an L1 (loc=mat) NZ tile, the index
+// is supplied as a GM tensor, and Coalesce::Elem carries a GM scratch operand.
+// Row lowers to the 3-argument MGATHER overload (no scratch); Elem to the
+// 4-argument overload (dst, table, idx, scratch).
+
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+
+module {
+  // Row: dst[r, :] = table[idx[r], :]; idx is a GM [1, R] tensor, no scratch.
+  func.func @mgather_gm2l1_row(
+      %mem: memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+      %idx: memref<1x1x1x1x32xi32, #pto.address_space<gm>>) {
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.mgather ins(%mem, %idx
+        : memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+          memref<1x1x1x1x32xi32, #pto.address_space<gm>>)
+      outs(%dst
+        : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                        blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+      {coalesce = #pto<coalesce row>}
+    return
+  }
+
+  // Elem: dst[i, j] = table[idx[i, j]]; idx is a GM [R, C] tensor and a GM
+  // scratch workspace stages the gathered elements into NZ layout.
+  func.func @mgather_gm2l1_elem(
+      %mem: memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+      %idx: memref<1x1x1x32x32xi32, #pto.address_space<gm>>,
+      %scratch: memref<1x1x1x32x32xf16, #pto.address_space<gm>>) {
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.mgather ins(%mem, %idx, %scratch
+        : memref<1x1x1x64x32xf16, #pto.address_space<gm>>,
+          memref<1x1x1x32x32xi32, #pto.address_space<gm>>,
+          memref<1x1x1x32x32xf16, #pto.address_space<gm>>)
+      outs(%dst
+        : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                        blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+      {coalesce = #pto<coalesce elem>}
+    return
+  }
+}
+
+// A3: MGATHER<pto::Coalesce::Row>({{.*}}, {{.*}}, {{.*}})
+// A3: MGATHER<pto::Coalesce::Elem>({{.*}}, {{.*}}, {{.*}}, {{.*}})

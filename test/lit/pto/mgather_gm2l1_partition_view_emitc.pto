@@ -1,0 +1,80 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// GM -> L1 mgather in the high-level (partition-view) form. Unlike the memref
+// form, no operand is a memref, so MGatherOp::verify() is NOT bypassed by
+// shouldBypassDecodedMemrefVerifier: this is positive coverage for the full
+// verifyMGatherGm2L1 path (NZ mat destination, GM non-tile index, and the
+// coalesce<->scratch coupling) in addition to lowering.
+
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+
+module {
+  // Row: GM index [1, R], no scratch.
+  func.func @mgather_gm2l1_row_pv(%memp: !pto.ptr<f16>, %idxp: !pto.ptr<i32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %tvm = pto.make_tensor_view %memp, shape = [%c64, %c32], strides = [%c32, %c1]
+      : !pto.tensor_view<64x32xf16>
+    %mem = pto.partition_view %tvm, offsets = [%c0, %c0], sizes = [%c64, %c32]
+      : !pto.tensor_view<64x32xf16> -> !pto.partition_tensor_view<64x32xf16>
+    %tvi = pto.make_tensor_view %idxp, shape = [%c1, %c32], strides = [%c32, %c1]
+      : !pto.tensor_view<1x32xi32>
+    %idx = pto.partition_view %tvi, offsets = [%c0, %c0], sizes = [%c1, %c32]
+      : !pto.tensor_view<1x32xi32> -> !pto.partition_tensor_view<1x32xi32>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.mgather ins(%mem, %idx
+        : !pto.partition_tensor_view<64x32xf16>,
+          !pto.partition_tensor_view<1x32xi32>)
+      outs(%dst
+        : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                        blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+      {coalesce = #pto<coalesce row>}
+    return
+  }
+
+  // Elem: GM index [R, C] and a GM scratch workspace.
+  func.func @mgather_gm2l1_elem_pv(%memp: !pto.ptr<f16>, %idxp: !pto.ptr<i32>,
+                                   %scrp: !pto.ptr<f16>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %tvm = pto.make_tensor_view %memp, shape = [%c64, %c32], strides = [%c32, %c1]
+      : !pto.tensor_view<64x32xf16>
+    %mem = pto.partition_view %tvm, offsets = [%c0, %c0], sizes = [%c64, %c32]
+      : !pto.tensor_view<64x32xf16> -> !pto.partition_tensor_view<64x32xf16>
+    %tvi = pto.make_tensor_view %idxp, shape = [%c32, %c32], strides = [%c32, %c1]
+      : !pto.tensor_view<32x32xi32>
+    %idx = pto.partition_view %tvi, offsets = [%c0, %c0], sizes = [%c32, %c32]
+      : !pto.tensor_view<32x32xi32> -> !pto.partition_tensor_view<32x32xi32>
+    %tvs = pto.make_tensor_view %scrp, shape = [%c32, %c32], strides = [%c32, %c1]
+      : !pto.tensor_view<32x32xf16>
+    %scr = pto.partition_view %tvs, offsets = [%c0, %c0], sizes = [%c32, %c32]
+      : !pto.tensor_view<32x32xf16> -> !pto.partition_tensor_view<32x32xf16>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.mgather ins(%mem, %idx, %scr
+        : !pto.partition_tensor_view<64x32xf16>,
+          !pto.partition_tensor_view<32x32xi32>,
+          !pto.partition_tensor_view<32x32xf16>)
+      outs(%dst
+        : !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32,
+                        blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+      {coalesce = #pto<coalesce elem>}
+    return
+  }
+}
+
+// A3: MGATHER<pto::Coalesce::Row>({{.*}}, {{.*}}, {{.*}})
+// A3: MGATHER<pto::Coalesce::Elem>({{.*}}, {{.*}}, {{.*}}, {{.*}})

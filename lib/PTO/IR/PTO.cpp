@@ -8069,6 +8069,109 @@ LogicalResult MScatterOp::verify() {
 }
 
 // ---- MGatherOp ----
+// GM -> L1 (cube Mat) gather verifier. The destination is an L1 (loc=mat) tile
+// in NZ layout; the index is a GM tensor (the cube core cannot read UB on A5),
+// and Coalesce::Elem carries a contiguous GM scratch workspace. Mirrors the
+// pto-isa MGATHER GM -> L1 overloads / MGatherCheckGm2L1.
+static LogicalResult verifyMGatherGm2L1(Operation *op, Value mem, Value idx,
+                                        Value dst, Value scratch,
+                                        std::optional<pto::Coalesce> coalesce) {
+  Type dstTy = dst.getType();
+  auto dstTb = dyn_cast<pto::TileBufType>(dstTy);
+  if (!dstTb)
+    return op->emitOpError("expects GM->L1 mgather dst to be a tile_buf");
+
+  // dst must be an L1 / cube Mat tile in NZ layout (col_major + row_major sub +
+  // fractal 512), matching the matmul A/NZ operand a TLOAD would produce.
+  if (!isColMajorRowMajorNZTileBuf(dstTb))
+    return op->emitOpError("expects GM->L1 mgather dst (loc=mat) to use "
+                           "blayout=col_major and slayout=row_major (NZ)");
+  if (dstTb.getSFractalSizeI32() != 512)
+    return op->emitOpError("expects GM->L1 mgather dst fractal size to be 512");
+
+  Type dstElem = getElemTy(dstTy);
+  if (!dstElem)
+    return op->emitOpError("failed to resolve GM->L1 mgather dst element type");
+  if (!isSupportedMGatherMScatterPayloadElemType(op, dstElem))
+    return op->emitOpError(
+        "expects GM->L1 mgather dst element type to be "
+        "i8/ui8/i16/ui16/i32/ui32/f16/bf16/f32 (and on A5 targets also "
+        "float8_e4m3/float8_e5m2 family types)");
+
+  // NZ tile shape: padded Cols a multiple of C0 (= 32 / sizeof(elem)) and padded
+  // Rows a multiple of FRACTAL_NZ_ROW (= 16).
+  unsigned elemBytes =
+      std::max<unsigned>(1u, dstElem.getIntOrFloatBitWidth() / 8u);
+  int64_t kC0 = 32 / static_cast<int64_t>(elemBytes);
+  auto dstShape = getShapeVec(dstTy);
+  if (dstShape.size() == 2) {
+    if (kC0 > 0 && dstShape[1] != ShapedType::kDynamic &&
+        dstShape[1] % kC0 != 0)
+      return op->emitOpError()
+             << "expects GM->L1 mgather dst padded cols to be a multiple of "
+             << kC0 << " (C0 = 32 / sizeof(elem))";
+    if (dstShape[0] != ShapedType::kDynamic && dstShape[0] % 16 != 0)
+      return op->emitOpError("expects GM->L1 mgather dst padded rows to be a "
+                             "multiple of 16 (FRACTAL_NZ_ROW)");
+  }
+
+  // mem table: GM, element type matches dst.
+  if (failed(verifyMGatherMScatterMemOperand(op, mem, dstElem, "dst")))
+    return failure();
+
+  // idx: GM tensor (memref / partition_tensor_view) of i32 -- NOT a UB tile.
+  Type idxTy = idx.getType();
+  if (isa<pto::TileBufType>(idxTy))
+    return op->emitOpError("expects GM->L1 mgather idx to be a GM tensor "
+                           "(memref / partition_tensor_view), not a tile_buf");
+  if (auto idxMr = dyn_cast<MemRefType>(idxTy)) {
+    auto as = getPTOMemorySpaceEnum(idxMr);
+    if (!as || (*as != pto::AddressSpace::GM && *as != pto::AddressSpace::Zero))
+      return op->emitOpError(
+          "expects GM->L1 mgather idx memref to use GM or zero address space");
+  } else if (!isa<pto::PartitionTensorViewType>(idxTy)) {
+    return op->emitOpError("expects GM->L1 mgather idx to be a GM memref or "
+                           "partition_tensor_view");
+  }
+  Type idxElem = getElemTy(idxTy);
+  if (!idxElem || !isSupportedMGatherMScatterIndexElemType(idxElem))
+    return op->emitOpError("expects GM->L1 mgather idx element type to be i32");
+
+  // Coalesce must be explicit: the GM index has no UB tile shape to infer from.
+  if (!coalesce)
+    return op->emitOpError("expects GM->L1 mgather to specify an explicit "
+                           "coalesce attribute (row or elem)");
+
+  if (*coalesce == pto::Coalesce::Elem) {
+    // Elem mode stages discrete elements into NZ layout through a GM scratch
+    // workspace before the bulk GM -> L1 copy.
+    if (!scratch)
+      return op->emitOpError("expects GM->L1 mgather with coalesce=elem to "
+                             "provide a GM scratch operand");
+    Type scTy = scratch.getType();
+    if (auto scMr = dyn_cast<MemRefType>(scTy)) {
+      auto as = getPTOMemorySpaceEnum(scMr);
+      if (!as ||
+          (*as != pto::AddressSpace::GM && *as != pto::AddressSpace::Zero))
+        return op->emitOpError("expects GM->L1 mgather scratch memref to use "
+                               "GM or zero address space");
+    } else if (!isa<pto::PartitionTensorViewType>(scTy)) {
+      return op->emitOpError("expects GM->L1 mgather scratch to be a GM memref "
+                             "or partition_tensor_view");
+    }
+    Type scElem = getElemTy(scTy);
+    if (!scElem || scElem != dstElem)
+      return op->emitOpError("expects GM->L1 mgather scratch element type to "
+                             "match dst element type");
+  } else { // Row
+    if (scratch)
+      return op->emitOpError("expects GM->L1 mgather with coalesce=row to omit "
+                             "the scratch operand");
+  }
+
+  return success();
+}
+
 LogicalResult MGatherOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
@@ -8080,6 +8183,25 @@ LogicalResult MGatherOp::verify() {
   if (getPTOTypeRank(memTy) == -1 || getPTOTypeRank(idxTy) == -1 ||
       getPTOTypeRank(dstTy) == -1)
     return emitOpError("expects mem, idx, and dst to use supported PTO shapes");
+
+  // GM -> L1 (cube Mat) gather: dst is an L1 (loc=mat) tile; idx comes from GM
+  // and Coalesce::Elem carries a GM scratch operand.
+  if (isa<pto::TileBufType>(dstTy)) {
+    if (auto as = getPTOMemorySpaceEnum(dstTy);
+        as && *as == pto::AddressSpace::MAT) {
+      std::optional<pto::Coalesce> coalesce;
+      if (auto coalesceAttr = getCoalesceAttr())
+        coalesce = coalesceAttr.getValue();
+      return verifyMGatherGm2L1(getOperation(), getMem(), getIdx(), getDst(),
+                                getScratch(), coalesce);
+    }
+  }
+
+  // GM -> UB (VEC) gather: the default path. A GM scratch operand is only valid
+  // for the GM -> L1 path above.
+  if (getScratch())
+    return emitOpError("expects scratch operand only on GM->L1 (loc=mat) "
+                       "mgather");
 
   if (failed(verifyNDStyleVecTile(*this, dstTy, "dst")) ||
       failed(verifyMGatherMScatterIdxTile(getOperation(), idxTy, "idx")))
@@ -12421,6 +12543,11 @@ void MGatherOp::getEffects(
   PTO_ADD_READ(getMemMutable());
   PTO_ADD_READ(getIdxMutable());
   PTO_ADD_WRITE(getDstMutable());
+  // GM -> L1 Elem mode stages the gathered elements into the GM scratch buffer
+  // before the bulk copy: the op clobbers scratch, so model it as a write.
+  auto scratchRange = getScratchMutable();
+  if (!scratchRange.empty())
+    addEffect(effects, &*scratchRange.begin(), MemoryEffects::Write::get());
 }
 
 // MSCATTER: Read(src, idx) -> Write(mem)

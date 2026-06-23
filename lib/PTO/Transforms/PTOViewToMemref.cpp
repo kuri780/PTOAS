@@ -3734,6 +3734,7 @@ struct PTOViewToMemrefPass
             mem,
             idx,
             dst,
+            /*scratch=*/op.getScratch(),
             op.getCoalesceAttr(),
             op.getGatherOobAttr());
       }

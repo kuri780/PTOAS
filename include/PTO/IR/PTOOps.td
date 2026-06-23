@@ -2836,11 +2836,25 @@ def MGatherOp : PTO_TOp<"mgather", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
   let summary = "Gather-load elements from memory into a tile using per-element indices (tile world, ins/outs).";
+  let description = [{
+    Two destination forms are supported:
+
+    - **GM -> UB (VEC)**: `mem` is a GM table, `idx` is a UB index tile, and
+      `dst` is a UB (`loc=vec`) tile. This is the default path.
+    - **GM -> L1 (MAT)**: `dst` is an L1 / cube (`loc=mat`) tile in NZ layout,
+      `idx` is supplied as a **GM** tensor (the cube core cannot read UB on
+      A5), and `Coalesce::Elem` additionally requires a contiguous **GM
+      `scratch`** workspace used to stage the gathered elements into NZ layout
+      before the bulk GM -> L1 copy. `Coalesce::Row` needs no scratch. The path
+      is selected by `dst` being a `loc=mat` tile and mirrors the pto-isa
+      `MGATHER` GM -> L1 overloads.
+  }];
 
   let arguments = (ins
     PTODpsType:$mem,
     PTODpsType:$idx,
     PTODpsType:$dst,
+    Optional<PTODpsType>:$scratch,
     OptionalAttr<PTO_CoalesceAttr>:$coalesce,
     DefaultValuedAttr<PTO_GatherOOBAttr, "::mlir::pto::GatherOOB::Undefined">:$gatherOob);
 
@@ -2849,7 +2863,8 @@ def MGatherOp : PTO_TOp<"mgather", [
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    `ins` `(` $mem `,` $idx `:` type($mem) `,` type($idx) `)`
+    `ins` `(` $mem `,` $idx (`,` $scratch^)? `:`
+        type($mem) `,` type($idx) (`,` type($scratch)^)? `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
     attr-dict
   }];
@@ -2857,6 +2872,37 @@ def MGatherOp : PTO_TOp<"mgather", [
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "MGATHER"; }
     ::mlir::pto::PIPE getPipe() {
+      // GM -> L1 gather: the destination is an L1 / cube (loc=mat) tile and the
+      // gather is issued as a GM -> L1 DMA load (copy_gm_to_cbuf / nd2nz) on the
+      // MTE2 pipe on every arch, mirroring pto.tload. The GM -> UB (VEC) path
+      // below keeps its A5 SIMT (PIPE_V) / A2A3 MTE2 selection.
+      //
+      // Resolve the dst address space from BOTH the tile_buf and the lowered
+      // memref form: PTOViewToMemref rewrites dst into a memref<...,mat> before
+      // InsertSync / GraphSyncSolver run, and both consume getPipe() through the
+      // OpPipeInterface. A tile-only check would fall through to PIPE_V on A5.
+      auto getAddressSpace =
+          [](::mlir::Type ty) -> std::optional<::mlir::pto::AddressSpace> {
+        if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+          if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  tb.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
+        if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+          if (auto ms = mr.getMemorySpace()) {
+            if (auto as =
+                    ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+              return as.getAddressSpace();
+          }
+          return std::nullopt;
+        }
+        return std::nullopt;
+      };
+      if (auto as = getAddressSpace(getDst().getType());
+          as && *as == ::mlir::pto::AddressSpace::MAT)
+        return ::mlir::pto::PIPE::PIPE_MTE2;
+
       auto isA5Target = [&]() -> bool {
         auto moduleOp = getOperation()->getParentOfType<::mlir::ModuleOp>();
         if (!moduleOp)

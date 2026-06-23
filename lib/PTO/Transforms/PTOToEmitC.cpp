@@ -366,11 +366,12 @@ static void annotateTNotifyMteDrain(ModuleOp module) {
 
 static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                          Location loc, Value basePtr,
-                                         MemRefType mrTy, Operation *anchor);
+                                         MemRefType mrTy, Operation *anchor,
+                                         StringRef tag = {});
 
 static Value maybeWrapGlobalMemrefAsGlobalTensor(
     ConversionPatternRewriter &rewriter, Location loc, Value loweredValue,
-    Type originalType, Operation *anchor);
+    Type originalType, Operation *anchor, StringRef tag = {});
 
 static bool hasCompatibleKnownExtentForMGather(int64_t lhs, int64_t rhs) {
   return lhs == ShapedType::kDynamic || rhs == ShapedType::kDynamic ||
@@ -3079,6 +3080,13 @@ struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
     Value memArg = maybeWrapGlobalMemrefAsGlobalTensor(
         rewriter, op.getLoc(), mem, op.getMem().getType(), op.getOperation());
 
+    // GM -> L1 (loc=mat dst) gather supplies the index as a GM tensor; wrap it
+    // as a GlobalTensor just like mem. For the GM -> UB path idx is a UB tile
+    // and this is a no-op.
+    Value idxArg = maybeWrapGlobalMemrefAsGlobalTensor(
+        rewriter, op.getLoc(), idx, op.getIdx().getType(), op.getOperation(),
+        /*tag=*/"idx");
+
     auto gatherOobTok = [&](pto::GatherOOB mode) -> StringRef {
       switch (mode) {
       case pto::GatherOOB::Undefined:
@@ -3120,10 +3128,20 @@ struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
     ArrayAttr templateArgs =
         templateArgVec.empty() ? ArrayAttr{} : rewriter.getArrayAttr(templateArgVec);
 
+    // GM -> L1 Coalesce::Elem stages elements through a GM scratch buffer, passed
+    // as the 4th MGATHER argument; Row and the GM -> UB path have no scratch.
+    SmallVector<Value, 4> callArgs{dst, memArg, idxArg};
+    if (Value scratch = adaptor.getScratch()) {
+      Value scratchArg = maybeWrapGlobalMemrefAsGlobalTensor(
+          rewriter, op.getLoc(), peelUnrealized(scratch),
+          op.getScratch().getType(), op.getOperation(), /*tag=*/"scratch");
+      callArgs.push_back(scratchArg);
+    }
+
     rewriter.create<emitc::CallOpaqueOp>(
         op.getLoc(), TypeRange{}, "MGATHER",
         ArrayAttr{}, templateArgs,
-        ValueRange{dst, memArg, idx});
+        ValueRange(callArgs));
 
     if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
@@ -4009,8 +4027,15 @@ struct GlobalTensorTypeNames {
   std::string layoutConstName;
 };
 
-static GlobalTensorTypeNames getGlobalTensorTypeNames(Operation *anchor) {
+static GlobalTensorTypeNames getGlobalTensorTypeNames(Operation *anchor,
+                                                      StringRef tag = {}) {
+  // The type-alias names are keyed on the anchor op pointer. When a single op
+  // wraps more than one GM memref as a GlobalTensor (e.g. GM->L1 mgather wraps
+  // mem + idx + scratch), an extra `tag` keeps the emitted `using` aliases
+  // distinct so the generated C++ does not redefine a type with a new value.
   std::string suffix = "_" + std::to_string(reinterpret_cast<uintptr_t>(anchor));
+  if (!tag.empty())
+    suffix += "_" + tag.str();
   return {
       "GTShape" + suffix,
       "GTStride" + suffix,
@@ -4021,7 +4046,7 @@ static GlobalTensorTypeNames getGlobalTensorTypeNames(Operation *anchor) {
 static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                          Location loc, Value basePtr,
                                          MemRefType mrTy,
-                                         Operation *anchor) {
+                                         Operation *anchor, StringRef tag) {
   auto *ctx = rewriter.getContext();
 
   ArrayRef<int64_t> shape = mrTy.getShape();
@@ -4034,7 +4059,7 @@ static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
     return Value();
 
   Value ptr = applyStaticMemrefOffset(rewriter, loc, basePtr, offset);
-  GlobalTensorTypeNames names = getGlobalTensorTypeNames(anchor);
+  GlobalTensorTypeNames names = getGlobalTensorTypeNames(anchor, tag);
   std::string elemTypeStr = getElemTypeStringForGT(mrTy.getElementType());
   SmallVector<int64_t, 5> shape5D;
   SmallVector<int64_t, 5> stride5D;
@@ -4091,7 +4116,7 @@ static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
 
 static Value maybeWrapGlobalMemrefAsGlobalTensor(
     ConversionPatternRewriter &rewriter, Location loc, Value loweredValue,
-    Type originalType, Operation *anchor) {
+    Type originalType, Operation *anchor, StringRef tag) {
   auto mrTy = dyn_cast<MemRefType>(originalType);
   if (!mrTy)
     return loweredValue;
@@ -4105,8 +4130,8 @@ static Value maybeWrapGlobalMemrefAsGlobalTensor(
   if (!isGlobal)
     return loweredValue;
 
-  if (Value gt =
-          buildGlobalTensorFromMemref(rewriter, loc, loweredValue, mrTy, anchor))
+  if (Value gt = buildGlobalTensorFromMemref(rewriter, loc, loweredValue, mrTy,
+                                             anchor, tag))
     return gt;
   return loweredValue;
 }
