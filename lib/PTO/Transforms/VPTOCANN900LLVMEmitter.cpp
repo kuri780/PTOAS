@@ -10074,6 +10074,72 @@ emitDeviceLLVMModule(ModuleOp deviceModule, StringRef kernelKind,
   return EmittedLLVMModule{std::move(llvmContext), std::move(llvmModule)};
 }
 
+// Normalize SIMT loop latch: when scf.for contains scf.if, the SCF-to-CF
+// lowering merges the if-merge block and the loop-latch block.  This pass
+// splits them so the latch has a single predecessor, giving bisheng's
+// DivergenceAnalysis clean reconvergence points.
+struct NormalizeSIMTLoopLatchPass
+    : public PassWrapper<NormalizeSIMTLoopLatchPass,
+                         OperationPass<func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NormalizeSIMTLoopLatchPass)
+
+  StringRef getArgument() const final { return "normalize-simt-loop-latch"; }
+  StringRef getDescription() const final {
+    return "Split merged if-merge+loop-latch blocks in SIMT entry functions";
+  }
+
+  void runOnOperation() override {
+    func::FuncOp func = getOperation();
+    // Only process SIMT entry functions.
+    if (!func->hasAttr("pto.simt_entry"))
+      return;
+
+    SmallVector<Block *, 4> blocksToSplit;
+    for (Block &block : func.getBlocks()) {
+      // Skip blocks that already have phi-like arguments (condition blocks).
+      if (block.getNumArguments() > 0)
+        continue;
+      // A merged merge+latch block has multiple predecessors.
+      if (block.hasNoPredecessors() ||
+          block.getSinglePredecessor() != nullptr)
+        continue;
+      // And its terminator branches to a loop header (block with arguments).
+      auto brOp = dyn_cast<cf::BranchOp>(block.getTerminator());
+      if (!brOp || brOp.getDest()->getNumArguments() == 0)
+        continue;
+
+      blocksToSplit.push_back(&block);
+    }
+
+    if (blocksToSplit.empty())
+      return;
+
+    OpBuilder builder(func.getContext());
+    for (Block *mergeBlock : blocksToSplit) {
+      // Save the back-edge target before modifying.
+      auto *oldTerminator = mergeBlock->getTerminator();
+      Location loc = oldTerminator->getLoc();
+
+      // Create a new latch block after the merge block.
+      Block *latchBlock = builder.createBlock(mergeBlock->getNextNode());
+
+      // Move all operations EXCEPT the terminator from merge → latch.
+      latchBlock->getOperations().splice(latchBlock->begin(),
+                                         mergeBlock->getOperations(),
+                                         mergeBlock->begin(),
+                                         Block::iterator(oldTerminator));
+      // Move the back-edge terminator to latch.
+      latchBlock->getOperations().splice(latchBlock->end(),
+                                         mergeBlock->getOperations(),
+                                         mergeBlock->begin());
+
+      // Now mergeBlock is empty. Add a branch from merge → latch.
+      builder.setInsertionPointToEnd(mergeBlock);
+      builder.create<cf::BranchOp>(loc, latchBlock);
+    }
+  }
+};
+
 template <typename EmitFn>
 static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
                                  EmitFn &&emit) {
@@ -10096,6 +10162,15 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
       std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
   kernelModulePM.addPass(arith::createArithExpandOpsPass());
   kernelModulePM.addPass(createConvertSCFToCFPass());
+  // Normalize SIMT loop structure: split merged if-merge+latch blocks
+  // into separate merge and latch blocks.  This ensures the loop latch is
+  // a dedicated block with a single predecessor, which allows bisheng's
+  // DivergenceAnalysis to place reconvergence points correctly.
+  // Without this, when scf.for contains scf.if, the SCF-to-CF lowering
+  // produces a single block that serves as both the if-merge and the
+  // loop-latch, which can lead to mis-predicated END instructions.
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      std::make_unique<NormalizeSIMTLoopLatchPass>());
   kernelModulePM.addPass(createArithToLLVMConversionPass());
   kernelModulePM.addPass(createConvertIndexToLLVMPass());
   kernelModulePM.addPass(createFinalizeMemRefToLLVMConversionPass());
