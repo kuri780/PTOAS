@@ -423,11 +423,12 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
   return expandOpts;
 }
 
-static llvm::cl::opt<bool> enableOpFusion(
+static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
-    llvm::cl::desc("Enable A5 tile fusion on level2/level3. EmitC uses "
-                   "last-use annotation; VPTO uses fusion-region lifecycle."),
-    llvm::cl::init(false));
+    llvm::cl::desc("Control A5 tile fusion on level2/level3. Defaults to "
+                   "enabled on A5, disabled on A3. EmitC uses last-use "
+                   "annotation; VPTO uses fusion-region lifecycle."),
+    llvm::cl::init(llvm::cl::BOU_UNSET));
 
 static llvm::cl::opt<bool> enableShapeInference(
     "enable-shape-inference",
@@ -1900,18 +1901,25 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
 
-  if (enableOpFusion) {
-    if (arch != "a5") {
-      llvm::errs() << "Warning: --enable-op-fusion is ignored because "
-                      "--pto-arch=a5 is required.\n";
-    } else if (effectiveLevel == PTOBuildLevel::Level1) {
-      llvm::errs() << "Warning: --enable-op-fusion is ignored because "
-                      "--pto-level=level2 or level3 is required.\n";
-    }
+  const bool requestedEnableOpFusion = enableOpFusion == llvm::cl::BOU_TRUE;
+  const bool explicitDisableOpFusion = enableOpFusion == llvm::cl::BOU_FALSE;
+  const bool defaultEnableOpFusion =
+      enableOpFusion == llvm::cl::BOU_UNSET && arch == "a5";
+  const bool opFusionEnabled =
+      (requestedEnableOpFusion || defaultEnableOpFusion) &&
+      !explicitDisableOpFusion;
+
+  if (requestedEnableOpFusion && arch != "a5") {
+    llvm::errs() << "Error: --enable-op-fusion=true requires --pto-arch=a5.\n";
+    return 1;
+  }
+  if (requestedEnableOpFusion && effectiveLevel == PTOBuildLevel::Level1) {
+    llvm::errs() << "Warning: --enable-op-fusion=true is ignored because "
+                    "--pto-level=level2 or level3 is required.\n";
   }
 
   const bool enableA5FusionPath =
-      enableOpFusion && arch == "a5" &&
+      opFusionEnabled && arch == "a5" &&
       effectiveLevel != PTOBuildLevel::Level1;
   const bool enableA5EmitCFusionPath =
       enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
