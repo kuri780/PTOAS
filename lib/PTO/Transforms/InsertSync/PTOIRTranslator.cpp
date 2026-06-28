@@ -153,7 +153,8 @@ getMemrefSubViewBaseAddresses(memref::SubViewOp op, MemRefType sourceType,
 
   SmallVector<int64_t> strides;
   int64_t baseOffset = ShapedType::kDynamic;
-  if (failed(sourceType.getStridesAndOffset(strides, baseOffset)) ||
+  if (failed(mlir::pto::getPTOMemRefStridesAndOffset(sourceType, strides,
+                                                     baseOffset)) ||
       strides.size() != 2 ||
       llvm::is_contained(strides, ShapedType::kDynamic))
     return std::nullopt;
@@ -257,7 +258,8 @@ static std::pair<int64_t, int64_t> getStaticOffsetAndSize(Operation *op, Value s
   if (auto subView = dyn_cast<memref::SubViewOp>(op)) {
     int64_t baseOffset;
     StrideVector strides;
-    if (failed(srcType.getStridesAndOffset(strides, baseOffset))) {
+    if (failed(mlir::pto::getPTOMemRefStridesAndOffset(srcType, strides,
+                                                       baseOffset))) {
         return {-1, -1};
     }
 
@@ -944,7 +946,8 @@ void PTOIRTranslator::UpdateMemrefSubViewAliasBufferInfo(memref::SubViewOp op) {
 
   SmallVector<int64_t> strides;
   int64_t baseOffset = ShapedType::kDynamic;
-  if (failed(sourceType.getStridesAndOffset(strides, baseOffset)) ||
+  if (failed(mlir::pto::getPTOMemRefStridesAndOffset(sourceType, strides,
+                                                     baseOffset)) ||
       strides.size() != 2) {
     UpdateConservativeAliasBufferInfo(result, source);
     return;

@@ -3655,7 +3655,7 @@ static LogicalResult verifyAsyncFlatContiguous1DGMMemRef(Operation *op,
 
   SmallVector<int64_t> strides;
   int64_t offset = 0;
-  if (failed(memTy.getStridesAndOffset(strides, offset)))
+  if (failed(getPTOMemRefStridesAndOffset(memTy, strides, offset)))
     return op->emitOpError() << "expects " << name
                              << " to be a strided memref with a known layout";
 
@@ -12769,7 +12769,7 @@ mlir::LogicalResult mlir::pto::SimdTileToMemrefOp::verify() {
 
     SmallVector<int64_t, 4> memStrides;
     int64_t memOffset = ShapedType::kDynamic;
-    if (failed(memTy.getStridesAndOffset(memStrides, memOffset)))
+    if (failed(getPTOMemRefStridesAndOffset(memTy, memStrides, memOffset)))
       return emitOpError("expects memref to use strided layout");
     if (memOffset != 0)
       return emitOpError("expects memref offset to be 0");

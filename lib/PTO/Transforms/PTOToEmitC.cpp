@@ -437,7 +437,8 @@ getGatherScatterShapeLayoutInfo(Type ty) {
 
   SmallVector<int64_t, 4> strides;
   int64_t offset = ShapedType::kDynamic;
-  if (failed(memRefTy.getStridesAndOffset(strides, offset)) ||
+  if (failed(mlir::pto::getPTOMemRefStridesAndOffset(memRefTy, strides,
+                                                     offset)) ||
       strides.size() != 2)
     return std::nullopt;
 
@@ -3592,7 +3593,8 @@ struct SubviewToEmitCPattern : public OpConversionPattern<memref::SubViewOp> {
         SmallVector<int64_t> strideInts;
         int64_t offset = ShapedType::kDynamic;
         bool useTypeStrides =
-            succeeded(srcType.getStridesAndOffset(strideInts, offset));
+            succeeded(mlir::pto::getPTOMemRefStridesAndOffset(
+                srcType, strideInts, offset));
         (void)offset;
         if (useTypeStrides) {
           for (int64_t s : strideInts) {
@@ -3963,7 +3965,8 @@ static bool hasStaticShape(MemRefType mrTy) {
 
 static bool getStaticMemrefLayout(MemRefType mrTy, SmallVectorImpl<int64_t> &strides,
                                   int64_t &offset) {
-  if (failed(mrTy.getStridesAndOffset(strides, offset))) {
+  if (failed(
+          mlir::pto::getPTOMemRefStridesAndOffset(mrTy, strides, offset))) {
     strides.clear();
     int64_t stride = 1;
     ArrayRef<int64_t> shape = mrTy.getShape();
@@ -12122,8 +12125,8 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
           if (!pto::isPTOFloat4PackedType(elemTy) &&
               subRows != ShapedType::kDynamic &&
               subCols != ShapedType::kDynamic &&
-              succeeded(subMrTy.getStridesAndOffset(inheritedStrides,
-                                                    inheritedOffset)) &&
+              succeeded(mlir::pto::getPTOMemRefStridesAndOffset(
+                  subMrTy, inheritedStrides, inheritedOffset)) &&
               inheritedStrides.size() >= 2) {
             int64_t childRowStride = 0;
             int64_t childColStride = 0;

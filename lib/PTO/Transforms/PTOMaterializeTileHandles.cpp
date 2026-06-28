@@ -366,8 +366,8 @@ getMaterializedTileShape(MemRefType memTy, const TileHandleMetadata &meta) {
 
   SmallVector<int64_t> inheritedStrides;
   int64_t inheritedOffset = ShapedType::kDynamic;
-  if (failed(sourceMrTy.getStridesAndOffset(inheritedStrides,
-                                            inheritedOffset)) ||
+  if (failed(mlir::pto::getPTOMemRefStridesAndOffset(
+          sourceMrTy, inheritedStrides, inheritedOffset)) ||
       inheritedStrides.size() < 2)
     return shape;
 
@@ -481,7 +481,8 @@ static Value computeSubviewAddress(memref::SubViewOp subview,
 
   SmallVector<int64_t> sourceStrides;
   int64_t sourceOffset = ShapedType::kDynamic;
-  if (failed(sourceTy.getStridesAndOffset(sourceStrides, sourceOffset)))
+  if (failed(mlir::pto::getPTOMemRefStridesAndOffset(
+          sourceTy, sourceStrides, sourceOffset)))
     return Value();
 
   auto mixedOffsets = subview.getMixedOffsets();
