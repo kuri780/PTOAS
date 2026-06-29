@@ -52,6 +52,15 @@ find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "LLVM CMake Dir: ${LLVM_CMAKE_DIR}")
 message(STATUS "LLVM Include Dir: ${LLVM_INCLUDE_DIRS}")
+if(NOT DEFINED LLVM_VERSION_MAJOR)
+  string(REGEX MATCH "^[0-9]+" LLVM_VERSION_MAJOR "${LLVM_PACKAGE_VERSION}")
+endif()
+if(NOT LLVM_VERSION_MAJOR STREQUAL "21")
+  message(FATAL_ERROR
+    "PTOAS requires LLVM 21 after the LLVM21 upgrade, but found "
+    "LLVM ${LLVM_PACKAGE_VERSION}. Please point LLVM_DIR/MLIR_DIR to an "
+    "LLVM 21 build, for example vpto-dev/llvm-project:feature-vpto-llvm21.")
+endif()
 get_filename_component(PTO_LLVM_BUILD_LIBRARY_DIR
   "${LLVM_BUILD_LIBRARY_DIR}" REALPATH)
 
