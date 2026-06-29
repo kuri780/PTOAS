@@ -669,19 +669,18 @@ def PTOMaterializeTileHandles : Pass<"pto-materialize-tile-handles", "ModuleOp">
 
 def PTOUnrollSIMTFor : Pass<"pto-unroll-simt-for", "func::FuncOp"> {
   let summary =
-      "Unroll small constant-trip-count scf.for loops in pto.simt_entry functions";
+      "Unroll explicitly annotated scf.for loops in pto.simt_entry functions";
   let description = [{
     Walks functions with `pto.simt_entry` attribute and fully unrolls `scf.for`
-    loops that meet one of these criteria:
+    loops that carry the `{pto.unroll = "full"}` attribute.
 
-    1. The loop carries the `{pto.unroll = "full"}` attribute.
-    2. The loop has constant lower bound, upper bound, and step, and the trip
-       count does not exceed the configurable `max-trip-count` threshold (default 64).
+    Only loops with constant lower bound, upper bound, and positive step are
+    unrolled.  The annotation is opt-in: loops without the attribute are
+    left unchanged regardless of trip count.
 
     Full unrolling enables subsequent canonicalize/sccp/cse to constant-fold
     induction-variable-dependent conditionals (e.g. `scf.if i < 10`), eliminating
-    divergent branches that can cause the AICore backend to emit predicated END
-    instructions inside SIMTVF kernels.
+    divergent branches inside SIMTVF kernels.
 
     This pass must run before `createConvertSCFToCFPass` (i.e. before LLVM
     lowering) so that the unrolled structured control flow can be canonicalized.
@@ -692,11 +691,6 @@ def PTOUnrollSIMTFor : Pass<"pto-unroll-simt-for", "func::FuncOp"> {
     "mlir::scf::SCFDialect",
     "mlir::pto::PTODialect",
     "mlir::arith::ArithDialect"
-  ];
-  let options = [
-    Option<"maxTripCount", "max-trip-count", "int64_t", "64",
-           "Maximum constant trip count to auto-unroll (default: 64). "
-           "Loops exceeding this are left unchanged.">
   ];
 }
 

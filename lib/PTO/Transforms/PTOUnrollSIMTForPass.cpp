@@ -8,17 +8,12 @@
 
 //===- PTOUnrollSIMTForPass.cpp -------------------------------------------===//
 //
-// Unroll small constant-trip-count scf.for loops inside pto.simt_entry
+// Unroll explicitly annotated scf.for loops inside pto.simt_entry
 // functions to eliminate divergent control flow before LLVM lowering.
 //
-// Workaround for: https://github.com/mouliangyu/PTOAS/issues/485
-//
-// When a SIMTVF kernel contains scf.for + scf.if with a constant-condition
-// branch (e.g. for i in 0..16: if i < 10: store), the AICore backend may
-// emit a predicated END instruction.  By fully unrolling the loop and
-// letting canonicalize/sccp constant-fold the induction-variable-dependent
-// conditions, we obtain straight-line code without branches, which avoids
-// the bug.
+// Only loops carrying the `{pto.unroll = "full"}` attribute are unrolled.
+// The pass is gated to pto.simt_entry functions so it does not affect
+// general-purpose loops.
 //
 //===----------------------------------------------------------------------===//
 
@@ -61,19 +56,6 @@ using namespace mlir;
 static constexpr llvm::StringLiteral kUnrollAttrName = "pto.unroll";
 static constexpr llvm::StringLiteral kUnrollFullValue = "full";
 
-/// Try to compute a constant trip count for an scf::ForOp.
-/// Returns std::nullopt if any bound or step is non-constant.
-static std::optional<int64_t> computeConstantTripCount(scf::ForOp forOp) {
-  std::optional<int64_t> lb = getConstantIntValue(forOp.getLowerBound());
-  std::optional<int64_t> ub = getConstantIntValue(forOp.getUpperBound());
-  std::optional<int64_t> step = getConstantIntValue(forOp.getStep());
-  if (!lb || !ub || !step || *step <= 0)
-    return std::nullopt;
-  if (*ub <= *lb)
-    return 0;
-  return (*ub - *lb + *step - 1) / *step; // ceil division
-}
-
 /// Check whether the loop has the explicit "full unroll" annotation.
 static bool hasUnrollFullAttr(scf::ForOp forOp) {
   if (auto attr = forOp->getAttrOfType<StringAttr>(kUnrollAttrName))
@@ -93,8 +75,7 @@ static bool isSIMTEntry(func::FuncOp func) {
 namespace {
 
 struct UnrollSIMTForPattern : public OpRewritePattern<scf::ForOp> {
-  UnrollSIMTForPattern(MLIRContext *ctx, int64_t maxTripCount)
-      : OpRewritePattern(ctx), maxTripCount(maxTripCount) {}
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(scf::ForOp forOp,
                                 PatternRewriter &rewriter) const override {
@@ -103,41 +84,32 @@ struct UnrollSIMTForPattern : public OpRewritePattern<scf::ForOp> {
     if (!func || !isSIMTEntry(func))
       return failure();
 
-    // Check explicit annotation first.
-    if (hasUnrollFullAttr(forOp)) {
-      return unrollFull(forOp, rewriter, /*isAnnotated=*/true);
-    }
-
-    // Auto-detect: constant bounds and small trip count.
-    auto tripCount = computeConstantTripCount(forOp);
-    if (!tripCount || *tripCount > maxTripCount)
+    // Only unroll loops with explicit {pto.unroll = "full"} annotation.
+    if (!hasUnrollFullAttr(forOp))
       return failure();
 
-    return unrollFull(forOp, rewriter, /*isAnnotated=*/false);
-  }
+    std::optional<int64_t> lb = getConstantIntValue(forOp.getLowerBound());
+    std::optional<int64_t> ub = getConstantIntValue(forOp.getUpperBound());
+    std::optional<int64_t> step = getConstantIntValue(forOp.getStep());
+    if (!lb || !ub || !step || *step <= 0 || *ub <= *lb)
+      return failure();
 
-private:
-  LogicalResult unrollFull(scf::ForOp forOp, PatternRewriter &rewriter,
-                           bool isAnnotated) const {
-    auto tripCount = computeConstantTripCount(forOp);
-    if (!tripCount || *tripCount <= 0)
+    int64_t tripCount = (*ub - *lb + *step - 1) / *step;
+    if (tripCount <= 0)
       return failure();
 
     LLVM_DEBUG(llvm::dbgs()
-               << "PTOUnrollSIMTFor: unrolling scf.for "
-               << (isAnnotated ? "(annotated)" : "(auto)") << " tripCount="
-               << *tripCount << " at " << forOp.getLoc() << "\n");
+               << "PTOUnrollSIMTFor: unrolling annotated scf.for tripCount="
+               << tripCount << " at " << forOp.getLoc() << "\n");
 
     // loopUnrollByFactor returns failure if the loop carries iteration
     // arguments that have uses outside the loop (live-out values).  In that
     // case we cannot unroll.
-    if (failed(loopUnrollByFactor(forOp, static_cast<uint64_t>(*tripCount))))
+    if (failed(loopUnrollByFactor(forOp, static_cast<uint64_t>(tripCount))))
       return failure();
 
     return success();
   }
-
-  int64_t maxTripCount;
 };
 
 } // namespace
@@ -159,7 +131,7 @@ struct PTOUnrollSIMTFor : public pto::impl::PTOUnrollSIMTForBase<PTOUnrollSIMTFo
 
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    patterns.add<UnrollSIMTForPattern>(ctx, maxTripCount);
+    patterns.add<UnrollSIMTForPattern>(ctx);
 
     GreedyRewriteConfig config;
     config.maxIterations = 10; // loops may nest
