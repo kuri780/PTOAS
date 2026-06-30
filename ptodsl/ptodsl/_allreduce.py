@@ -24,44 +24,51 @@ Dispatch tree (mirrors the C++ compile-time dispatch in ``reduce.h``)::
 from __future__ import annotations
 
 from . import scalar
-from ._control_flow import if_
+from ._control_flow import if_, for_
 from ._ops import const as _const, get_laneid, get_tid_x, redux_add, redux_max, redux_min, shuffle_bfly, syncthreads
 from ._surface_values import unwrap_surface_value, wrap_surface_value
 from ._tracing.active import current_session
-from ._types import float16 as _f16_dtype, float32 as _f32_dtype, index as _idx_dtype, int32 as _i32_dtype, _resolve
+from ._types import (
+    _resolve,
+    _restore_integer_signedness,
+    _strip_integer_signedness,
+    float16 as _f16_dtype,
+    float32 as _f32_dtype,
+)
 
-from mlir.dialects import arith, pto as _pto, scf  # arith for unsigned ops; scf for ForOp in ub_reduce
-from mlir.ir import F16Type, F32Type, InsertionPoint, UnitAttr
+from mlir.dialects import pto as _pto
+from mlir.ir import F16Type, F32Type, IntegerType, UnitAttr
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _as_ui32(sv):
+    """Re-tag an i32 RuntimeValue as ui32 (zero-cost for non-negative values)."""
+    raw = unwrap_surface_value(sv)
+    return wrap_surface_value(_restore_integer_signedness(raw, IntegerType.get_unsigned(32)))
+
+
+def _f32_const(value: float):
+    """Emit an f32 constant, returning a RuntimeValue."""
+    return _const(value, dtype=_resolve(_f32_dtype))
+
+
+def _f16_const(value: float):
+    """Emit an f16 constant, returning a RuntimeValue."""
+    return _const(value, dtype=_resolve(_f16_dtype))
+
+
+def _index_cast(value):
+    """``scalar.index_cast`` that tolerates signed/unsigned integer types."""
+    raw = unwrap_surface_value(value)
+    raw = _strip_integer_signedness(raw)
+    return scalar.index_cast(wrap_surface_value(raw))
 
 
 def _is_pow2(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
-
-
-def _const_i32(value: int):
-    """Emit an i32 constant via PTODSL ``pto.const``, return raw SSA value."""
-    return _const(value, dtype=_resolve(_i32_dtype)).value
-
-
-def _const_idx(value: int):
-    """Emit an index constant via PTODSL ``pto.const``, return raw SSA value."""
-    return _const(value, dtype=_resolve(_idx_dtype)).value
-
-
-def _const_f32(value: float):
-    """Emit an f32 constant via PTODSL ``pto.const``, return raw SSA value."""
-    return _const(value, dtype=_resolve(_f32_dtype)).value
-
-
-def _const_f16(value: float):
-    """Emit an f16 constant via PTODSL ``pto.const``, return raw SSA value."""
-    return _const(value, dtype=_resolve(_f16_dtype)).value
-
-
-def _ult(a, b):
-    """Unsigned less-than comparison. Keeps raw arith because PTODSL __lt__
-    on signless i32 emits signed comparison (slt/cmpi)."""
-    return arith.CmpIOp(arith.CmpIPredicate.ult, a, b).result
 
 
 def _dtype_to_str(mlir_type) -> str:
@@ -85,50 +92,21 @@ _REDUCER_IDENTITY = {
 """Identity element per reducer and dtype."""
 
 
-def _apply_sum(a, b):
-    """Emit ``a + b`` (float addition) via PTODSL operator."""
-    return (wrap_surface_value(a) + wrap_surface_value(b)).value
-
-
-def _apply_max(a, b):
-    """Emit ``max(a, b)`` via PTODSL ``scalar.max``."""
-    return scalar.max(a, b).value
-
-
-def _apply_min(a, b):
-    """Emit ``min(a, b)`` via PTODSL ``scalar.min``."""
-    return scalar.min(a, b).value
-
-
 _REDUCER_COMBINE = {
-    "sum": _apply_sum,
-    "max": _apply_max,
-    "min": _apply_min,
+    "sum": lambda a, b: a + b,
+    "max": scalar.max,
+    "min": scalar.min,
 }
 """Element-wise combine function per reducer."""
 
 
-def _redux_sum(x):
-    """Hardware lane-sum reduction, returns raw SSA value."""
-    return redux_add(x).value
-
-
-def _redux_max(x):
-    """Hardware lane-max reduction, returns raw SSA value."""
-    return redux_max(x).value
-
-
-def _redux_min(x):
-    """Hardware lane-min reduction, returns raw SSA value."""
-    return redux_min(x).value
-
-
 _REDUCER_REDUX = {
-    "sum": _redux_sum,
-    "max": _redux_max,
-    "min": _redux_min,
+    "sum": redux_add,
+    "max": redux_max,
+    "min": redux_min,
 }
 """Hardware redux op per reducer."""
+
 
 # ── scratch validation ────────────────────────────────────────────────────
 
@@ -157,44 +135,34 @@ def _validate_scratch(scratch, expected_mlir_type, *, context: str):
 
 # ── shared inline-emission utility ──────────────────────────────────────────
 
-def _emit_inline(emit_fn, *surface_args):
-    """Unwrap *surface_args* and call *emit_fn* at the current insertion point.
-
-    The emitter receives raw MLIR values and returns a raw SSA result,
-    which this wrapper re-wraps as a surface value.
+def _emit_inline(emit_fn, *args):
+    """Call *emit_fn* at the current insertion point and return its result.
 
     Inline SIMT allreduce emits ``pto.syncthreads``, which requires the
     containing function to carry ``pto.simt_entry``.  We attach the attribute
     here (idempotently) so that callers inside ``with pto.simt():`` do not
     need to manage the attribute themselves.
     """
-    raw_args = [unwrap_surface_value(a) for a in surface_args]
-    result = emit_fn(*raw_args)
+    result = emit_fn(*args)
 
-    # Ensure the enclosing function is marked as a SIMT entry so the
-    # syncthreads verifier passes.
     session = current_session()
     if session is not None:
         parent_func = session.current_function
         parent_func.attributes["pto.simt_entry"] = UnitAttr.get()
 
-    return wrap_surface_value(result)
+    return result
 
 
 # ── reduction operator application ─────────────────────────────────────────
 
 def _emit_store(buffer, offset, value):
-    """Emit ``pto.store`` via PTODSL ``scalar.store``."""
+    """Emit ``scalar.store`` via PTODSL."""
     scalar.store(value, buffer, offset)
 
 
-def _emit_load(result_type, buffer, offset):
-    """Emit ``pto.load`` via PTODSL ``scalar.load``.
-
-    *result_type* is accepted for backward compatibility but ignored;
-    ``scalar.load`` infers the element type from the buffer.
-    """
-    return unwrap_surface_value(scalar.load(buffer, offset))
+def _emit_load(buffer, offset):
+    """Emit ``scalar.load`` via PTODSL."""
+    return scalar.load(buffer, offset)
 
 
 def _emit_butterfly(v, *, threads: int, scale: int, reducer: str):
@@ -204,8 +172,8 @@ def _emit_butterfly(v, *, threads: int, scale: int, reducer: str):
 
         cur = threads
         while cur > scale:
-            x = op(x, shfl_xor(x, cur/2))
-            cur /= 2
+            x = combine(x, shfl_bfly(x, mask=cur/2))
+            cur //= 2
 
     All loops are unrolled at emission time.  Caller must have set the
     insertion point.
@@ -214,9 +182,8 @@ def _emit_butterfly(v, *, threads: int, scale: int, reducer: str):
     cur = threads
     while cur > scale:
         offset = cur // 2
-        mask = _const_i32(offset)
-        shfl = shuffle_bfly(v, mask).value
-        v = combine(v, shfl)
+        mask = offset
+        v = combine(v, shuffle_bfly(v, mask))
         cur //= 2
     return v
 
@@ -237,15 +204,13 @@ def _emit_warp_hw_reduce(x, *, threads: int,
     if groups == 1:
         return redux_fn(x)
 
-    c_threads = _const_i32(threads)
-    my_group = arith.DivUIOp(lane_in_warp, c_threads).result  # unsigned div — no PTODSL equivalent
+    my_group = lane_in_warp // threads  # unsigned div on ui32
 
     for g in range(groups):
-        c_g = _const_i32(g)
-        in_group = (wrap_surface_value(my_group) == wrap_surface_value(c_g)).value
-        masked = scalar.select(in_group, x, c_identity).value
+        in_group = my_group == g
+        masked = scalar.select(in_group, x, c_identity)
         reduced = redux_fn(masked)
-        x = scalar.select(in_group, reduced, x).value
+        x = scalar.select(in_group, reduced, x)
     return x
 
 
@@ -257,8 +222,7 @@ def simt_allreduce_sum(value, *,
                threads: int,
                scale: int = 1,
                thread_offset: int = 0,
-               scratch=None,
-               scratch_offset: int = 0):
+               scratch=None):
     """Cross-workitem all-reduce for SIMT VF context.
 
     Dispatch logic mirrors the compile-time tree in
@@ -271,13 +235,12 @@ def simt_allreduce_sum(value, *,
         thread_offset: Thread offset.  Defaults to 0.
         scratch: UB scratch buffer (``!pto.ptr<dtype, ub>``).  Required for
             ``cross_warp_reduce`` and ``ub_reduce`` paths.  Defaults to None.
-        scratch_offset: Element offset into *scratch*.  Defaults to 0.
 
     Returns:
         Lane-uniform scalar (same type as *value*) — the reduced sum.
     """
     return _dispatch_allreduce_helper(
-        value, scratch=scratch, scratch_offset=scratch_offset,
+        value, scratch=scratch,
         threads=threads, scale=scale, thread_offset=thread_offset,
         reducer="sum",
     )
@@ -287,8 +250,7 @@ def simt_allreduce_max(value, *,
                threads: int,
                scale: int = 1,
                thread_offset: int = 0,
-               scratch=None,
-               scratch_offset: int = 0):
+               scratch=None):
     """Cross-workitem all-reduce **max** for SIMT VF context.
 
     Dispatch logic mirrors the compile-time tree in
@@ -301,13 +263,12 @@ def simt_allreduce_max(value, *,
         thread_offset: Thread offset.  Defaults to 0.
         scratch: UB scratch buffer (``!pto.ptr<dtype, ub>``).  Required for
             ``cross_warp_reduce`` and ``ub_reduce`` paths.  Defaults to None.
-        scratch_offset: Element offset into *scratch*.  Defaults to 0.
 
     Returns:
         Lane-uniform scalar (same type as *value*) — the element-wise maximum.
     """
     return _dispatch_allreduce_helper(
-        value, scratch=scratch, scratch_offset=scratch_offset,
+        value, scratch=scratch,
         threads=threads, scale=scale, thread_offset=thread_offset,
         reducer="max",
     )
@@ -317,8 +278,7 @@ def simt_allreduce_min(value, *,
                threads: int,
                scale: int = 1,
                thread_offset: int = 0,
-               scratch=None,
-               scratch_offset: int = 0):
+               scratch=None):
     """Cross-workitem all-reduce **min** for SIMT VF context.
 
     Dispatch logic mirrors the compile-time tree in
@@ -331,19 +291,18 @@ def simt_allreduce_min(value, *,
         thread_offset: Thread offset.  Defaults to 0.
         scratch: UB scratch buffer (``!pto.ptr<dtype, ub>``).  Required for
             ``cross_warp_reduce`` and ``ub_reduce`` paths.  Defaults to None.
-        scratch_offset: Element offset into *scratch*.  Defaults to 0.
 
     Returns:
         Lane-uniform scalar (same type as *value*) — the element-wise minimum.
     """
     return _dispatch_allreduce_helper(
-        value, scratch=scratch, scratch_offset=scratch_offset,
+        value, scratch=scratch,
         threads=threads, scale=scale, thread_offset=thread_offset,
         reducer="min",
     )
 
 
-def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
+def _dispatch_allreduce_helper(value, *, scratch,
                                 threads, scale, thread_offset, reducer):
     # ── parameter validation (before identity shortcut) ───────────────────
     for name, val in (("threads", threads), ("scale", scale),
@@ -380,8 +339,7 @@ def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
         )
 
     args = dict(dtype=dtype, threads=threads, scale=scale,
-                thread_offset=thread_offset, scratch_offset=scratch_offset,
-                reducer=reducer)
+                thread_offset=thread_offset, reducer=reducer)
 
     # ── Path 1: warp_reduce ───────────────────────────────────────────────
     if threads <= 32 and _is_pow2(threads) and _is_pow2(scale):
@@ -427,8 +385,7 @@ def _dispatch_allreduce_helper(value, *, scratch, scratch_offset,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_warp_reduce(x, *,
-                      dtype, threads, scale, thread_offset,
-                      scratch_offset, reducer):
+                      dtype, threads, scale, thread_offset, reducer):
     """Emit inline single-warp all-reduce at the current insertion point.
 
     Dispatches to:
@@ -439,18 +396,16 @@ def _emit_warp_reduce(x, *,
     """
     extent = threads // scale
     identity_val = _REDUCER_IDENTITY[reducer][dtype]
-    const_f = _const_f32 if dtype == "f32" else _const_f16
+    const_f = _f32_const if dtype == "f32" else _f16_const
 
-    c_offset = _const_i32(thread_offset)
     c_identity = const_f(identity_val)
 
     if thread_offset:
         # lane_in_warp = (tid_x - offset) & 31
-        tid_x = get_tid_x().value
-        tx = (wrap_surface_value(tid_x) - wrap_surface_value(c_offset)).value
-        lane_in_warp = (wrap_surface_value(tx) & _const_i32(31)).value
+        tx = _as_ui32(get_tid_x()) - thread_offset
+        lane_in_warp = tx & 31
     else:
-        lane_in_warp = get_laneid().value
+        lane_in_warp = _as_ui32(get_laneid())
 
     if extent >= 16 and scale == 1:
         return _emit_warp_hw_reduce(
@@ -468,8 +423,7 @@ def _emit_warp_reduce(x, *,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_cross_warp_reduce(x, scratch, *,
-                            dtype, threads, scale, thread_offset,
-                            scratch_offset, reducer):
+                            dtype, threads, scale, thread_offset, reducer):
     """Emit inline cross-warp all-reduce at the current insertion point.
 
     Algorithm overview:
@@ -487,30 +441,22 @@ def _emit_cross_warp_reduce(x, scratch, *,
     """
     num_warps = threads // 32
     identity_val = _REDUCER_IDENTITY[reducer][dtype]
-    const_f = _const_f32 if dtype == "f32" else _const_f16
+    const_f = _f32_const if dtype == "f32" else _f16_const
     combine = _REDUCER_COMBINE[reducer]
     redux_fn = _REDUCER_REDUX[reducer]
 
-    # ── constants ────────────────────────────────────────────────────
-    c5_i32 = _const_i32(5)
-    c31_i32 = _const_i32(31)
-    c32_i32 = _const_i32(32)
-    c_scale = _const_i32(scale)
-    c_num_warps = _const_i32(num_warps)
-    c_offset = _const_i32(thread_offset)
-    c_scratch_off = _const_idx(scratch_offset)
     c_identity = const_f(identity_val)
 
     # ── thread indexing ──────────────────────────────────────────────
-    tid_x = get_tid_x().value
+    tid_x = get_tid_x()
     if thread_offset:
-        tx = (wrap_surface_value(tid_x) - wrap_surface_value(c_offset)).value
-        wid = arith.ShRUIOp(tx, c5_i32).result  # unsigned shift — no PTODSL equivalent
-        lid = (wrap_surface_value(tx) & c31_i32).value
+        tx = _as_ui32(tid_x) - thread_offset
+        wid = tx // 32    # unsigned div on ui32
+        lid = tx & 31
     else:
-        tx = tid_x
-        wid = arith.ShRUIOp(tx, c5_i32).result
-        lid = get_laneid().value
+        tx = _as_ui32(tid_x)
+        wid = tx // 32
+        lid = _as_ui32(get_laneid())
 
     # ── Stage 1: per-warp reduce ─────────────────────────────────────
     if scale == 1:
@@ -521,29 +467,27 @@ def _emit_cross_warp_reduce(x, scratch, *,
         )
 
     # ── Stage 2: warp leaders write partial results ──────────────────
-    is_writer = _ult(lid, c_scale)
+    is_writer = lid < scale  # unsigned cmp on ui32
     with if_(is_writer) as br:
         with br.then_:
-            slot = (wrap_surface_value(wid) * wrap_surface_value(c_scale) + wrap_surface_value(lid)).value
-            slot_idx = scalar.index_cast(slot).value
-            if scratch_offset:
-                slot_idx = (wrap_surface_value(slot_idx) + wrap_surface_value(c_scratch_off)).value
+            slot = wid * scale + lid
+            slot_idx = _index_cast(slot)
             _emit_store(scratch, slot_idx, warp_val)
 
     # ── Stage 3: sync before reading partial results ─────────────────
     syncthreads()
 
     # ── Stage 4: leader warp reduces partial sums ────────────────────
-    is_leader_warp = _ult(tx, c32_i32)
+    is_leader_warp = tx < 32
     with if_(is_leader_warp) as br:
         with br.then_:
             if scale == 1:
                 # ── scale == 1: hw_reduce across leader warp ────────
-                need_load = _ult(lid, c_num_warps)
+                need_load = lid < num_warps
                 with if_(need_load) as inner_br:
                     with inner_br.then_:
-                        lid_idx = scalar.index_cast(lid).value
-                        tmp = _emit_load(None, scratch, lid_idx)
+                        lid_idx = _index_cast(lid)
+                        tmp = _emit_load(scratch, lid_idx)
                         inner_br.assign(loaded=tmp)
                     with inner_br.else_:
                         inner_br.assign(loaded=c_identity)
@@ -552,14 +496,11 @@ def _emit_cross_warp_reduce(x, scratch, *,
             elif scale * num_warps <= 32:
                 # ── scale > 1, fits in one warp: butterfly ──────────
                 total = scale * num_warps
-                c_total = _const_i32(total)
-                need_load = _ult(lid, c_total)
+                need_load = lid < total
                 with if_(need_load) as inner_br:
                     with inner_br.then_:
-                        lid_idx = scalar.index_cast(lid).value
-                        if scratch_offset:
-                            lid_idx = (wrap_surface_value(lid_idx) + wrap_surface_value(c_scratch_off)).value
-                        tmp = _emit_load(None, scratch, lid_idx)
+                        lid_idx = _index_cast(lid)
+                        tmp = _emit_load(scratch, lid_idx)
                         inner_br.assign(loaded=tmp)
                     with inner_br.else_:
                         inner_br.assign(loaded=c_identity)
@@ -570,42 +511,34 @@ def _emit_cross_warp_reduce(x, scratch, *,
                 )
             else:
                 # ── manual loop: lid < scale lanes each reduce num_warps
-                is_reducer = _ult(lid, c_scale)
+                is_reducer = lid < scale
                 reduced = c_identity
-                my_slot = arith.RemUIOp(lid, c_scale).result  # unsigned rem
+                my_slot = lid % scale  # unsigned rem on ui32
                 for w in range(num_warps):
-                    c_w = _const_i32(w)
-                    idx_val = (wrap_surface_value(c_w) * wrap_surface_value(c_scale) + wrap_surface_value(my_slot)).value
-                    slot_idx = scalar.index_cast(idx_val).value
-                    if scratch_offset:
-                        slot_idx = (wrap_surface_value(slot_idx) + wrap_surface_value(c_scratch_off)).value
-                    loaded_v = _emit_load(None, scratch, slot_idx)
+                    idx_val = w * scale + my_slot
+                    slot_idx = _index_cast(idx_val)
+                    loaded_v = _emit_load(scratch, slot_idx)
                     reduced = combine(reduced, loaded_v)
-                stage4_result = scalar.select(
-                    is_reducer, reduced, c_identity).value
+                stage4_result = scalar.select(is_reducer, reduced, c_identity)
 
             br.assign(stage4_result=stage4_result)
         with br.else_:
             br.assign(stage4_result=c_identity)
 
-    partial_reduced = unwrap_surface_value(br.stage4_result)
+    partial_reduced = br.stage4_result
 
     # ── Stage 5: global leader writes result to scratch ──────────────
-    is_global_leader = _ult(tx, c_scale)
+    is_global_leader = tx < scale
     with if_(is_global_leader) as br5:
         with br5.then_:
-            tx_idx = scalar.index_cast(tx).value
-            if scratch_offset:
-                tx_idx = (wrap_surface_value(tx_idx) + wrap_surface_value(c_scratch_off)).value
+            tx_idx = _index_cast(tx)
             _emit_store(scratch, tx_idx, partial_reduced)
 
     # ── Stage 6: sync + broadcast load scratch[tx % scale] ───────────
     syncthreads()
-    my_slot = arith.RemUIOp(tx, c_scale).result  # unsigned rem
-    load_idx = scalar.index_cast(my_slot).value
-    if scratch_offset:
-        load_idx = (wrap_surface_value(load_idx) + wrap_surface_value(c_scratch_off)).value
-    result = _emit_load(None, scratch, load_idx)
+    my_slot = tx % scale  # unsigned rem on ui32
+    load_idx = _index_cast(my_slot)
+    result = _emit_load(scratch, load_idx)
 
     # ── Stage 7: extra sync to fence scratch reuse ───────────────────
     syncthreads()
@@ -618,96 +551,83 @@ def _emit_cross_warp_reduce(x, scratch, *,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _emit_ub_reduce(x, scratch, *,
-                    dtype, threads, scale, thread_offset,
-                    scratch_offset, reducer):
+                    dtype, threads, scale, thread_offset, reducer):
     """Emit inline UB-scratch all-reduce at the current insertion point.
 
     Algorithm:
 
     1. Each lane writes x → scratch[tx].
     2. ``pto.syncthreads``.
-    3. Lanes with ``lane % scale == 0`` sequentially reduce scratch slots.
+    3. Lanes with ``lane < scale`` sequentially reduce scratch slots.
     4. ``pto.syncthreads``.
-    5. Global leader (lane % scale == 0, lane / scale == 0) writes back.
+    5. Per-class leader writes back.
     6. ``pto.syncthreads`` + broadcast: each lane reads scratch[tx % scale].
     7. ``pto.syncthreads`` to fence scratch reuse.
     """
     combine = _REDUCER_COMBINE[reducer]
 
-    # ── constants ────────────────────────────────────────────────────
-    c_threads = _const_i32(threads)
-    c_scale = _const_i32(scale)
-    c_offset = _const_i32(thread_offset)
-    c_scratch_off = _const_idx(scratch_offset)
-
     # ── thread indexing ──────────────────────────────────────────────
-    tid_x = get_tid_x().value
-    tx = (wrap_surface_value(tid_x) - wrap_surface_value(c_offset)).value if thread_offset else tid_x
-    group = arith.DivUIOp(tx, c_threads).result  # unsigned div
-    lane = arith.RemUIOp(tx, c_threads).result    # unsigned rem
+    tid_x = get_tid_x()
+    if thread_offset:
+        tx = _as_ui32(tid_x) - thread_offset
+    else:
+        tx = _as_ui32(tid_x)
+    group = tx // threads    # unsigned div on ui32
+    lane = tx % threads       # unsigned rem on ui32
 
-    # ── Stage 1: each lane writes x → scratch[scratch_offset + tx] ──
-    tx_idx = scalar.index_cast(tx).value
-    if scratch_offset:
-        tx_idx = (wrap_surface_value(tx_idx) + wrap_surface_value(c_scratch_off)).value
+    # ── Stage 1: each lane writes x → scratch[tx] ──
+    tx_idx = _index_cast(tx)
     _emit_store(scratch, tx_idx, x)
 
     # ── Stage 2: sync ────────────────────────────────────────────────
     syncthreads()
 
     # ── Stage 3: reducers sequentially combine ───────────────────────
-    is_reducer = _ult(lane, c_scale)
+    is_reducer = lane < scale
     with if_(is_reducer) as br:
         with br.then_:
-            # initial: load scratch[scratch_offset + group * threads + lane]
-            group_offset = (wrap_surface_value(group) * wrap_surface_value(c_threads)).value
-            first_elem = (wrap_surface_value(group_offset) + wrap_surface_value(lane)).value
-            first_idx = scalar.index_cast(first_elem).value
-            if scratch_offset:
-                first_idx = (wrap_surface_value(first_idx) + wrap_surface_value(c_scratch_off)).value
-            acc = _emit_load(None, scratch, first_idx)
+            # initial: load scratch[group * threads + lane]
+            group_offset = group * threads
+            first_elem = group_offset + lane
+            first_idx = _index_cast(first_elem)
+            acc = _emit_load(scratch, first_idx)
 
-            # scf.for i = scale to threads step scale
-            lb = _const_idx(scale)
-            ub = _const_idx(threads)
-            step = _const_idx(scale)
-            for_op = scf.ForOp(lb, ub, step, [acc])
-            with InsertionPoint(for_op.body):
-                i = for_op.induction_variable
-                prev = for_op.inner_iter_args[0]
-                elem = (wrap_surface_value(first_idx) + wrap_surface_value(i)).value
-                loaded = _emit_load(None, scratch, elem)
+            # pto.for_ i = scale to threads step scale  (for_ coerce_index handles ui32)
+            lb = scale
+            ub = threads
+            step = scale
+            carry_loop = for_(lb, ub, step=step).carry(acc=acc)
+            with carry_loop:
+                prev = carry_loop.acc
+                i = carry_loop.iv
+                elem = first_idx + i
+                loaded = _emit_load(scratch, elem)
                 new_acc = combine(prev, loaded)
-                scf.YieldOp([new_acc])
-            acc = for_op.results[0]
+                carry_loop.update(acc=new_acc)
+            acc = carry_loop.final("acc")
 
             br.assign(flag=acc)
         with br.else_:
             br.assign(flag=x)
 
-    flag = unwrap_surface_value(br.flag)
+    flag = br.flag
 
     # ── Stage 4: sync ────────────────────────────────────────────────
     syncthreads()
 
     # ── Stage 5: per-class leader writes reduced value ───────────────
-    is_leader = _ult(lane, c_scale)
+    is_leader = lane < scale
     with if_(is_leader) as br5:
         with br5.then_:
-            dst_offset = (wrap_surface_value(group) * wrap_surface_value(c_threads) + wrap_surface_value(lane)).value
-            dst_idx = scalar.index_cast(dst_offset).value
-            if scratch_offset:
-                dst_idx = (wrap_surface_value(dst_idx) + wrap_surface_value(c_scratch_off)).value
+            dst_offset = group * threads + lane
+            dst_idx = _index_cast(dst_offset)
             _emit_store(scratch, dst_idx, flag)
 
-    # ── Stage 6: sync + broadcast scratch[scratch_offset + group*threads + tx%scale] ──
+    # ── Stage 6: sync + broadcast scratch[group*threads + tx%scale] ──
     syncthreads()
-    my_slot = ((wrap_surface_value(group) * wrap_surface_value(c_threads)) +
-               wrap_surface_value(arith.RemUIOp(tx, c_scale).result)).value
-    load_idx = scalar.index_cast(my_slot).value
-    if scratch_offset:
-        load_idx = (wrap_surface_value(load_idx) + wrap_surface_value(c_scratch_off)).value
-    result = _emit_load(None, scratch, load_idx)
+    my_slot = group * threads + (tx % scale)
+    load_idx = _index_cast(my_slot)
+    result = _emit_load(scratch, load_idx)
 
     # ── Stage 7: extra sync to fence scratch reuse ───────────────────
     syncthreads()
