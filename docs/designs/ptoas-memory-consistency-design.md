@@ -135,6 +135,10 @@ VPTO backend 都会先经过这一步。
 - 对缺失或顺序错误的场景报编译错误。
 - 对不需要 `dcci` 和 `dsb` 的纯 pipe drain 场景，仍允许保留自动标注。
 
+遍历策略是 region-scoped 的保守分析：单 block region 按顺序递归分析；复杂 CFG
+region 暂不做 path-sensitive 数据流，但只在当前 region 内收集 pending state，不把同一个
+parent op 的其他 sibling region 状态混入。外部函数声明没有函数体，pass 会直接跳过。
+
 这个 pass 不负责分配 event id，也不属于 InsertSync 自动同步流水线。
 
 ## 6. 场景规则

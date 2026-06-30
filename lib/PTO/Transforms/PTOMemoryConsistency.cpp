@@ -223,6 +223,14 @@ static TNotifyReleaseState collectTNotifyReleaseState(Operation *op) {
   return state;
 }
 
+static TNotifyReleaseState collectTNotifyReleaseState(Region &region) {
+  TNotifyReleaseState state;
+  for (Block &block : region)
+    for (Operation &nested : block)
+      state.merge(collectTNotifyReleaseState(&nested));
+  return state;
+}
+
 static bool isLoopLikeOp(Operation *op) {
   return isa<scf::ForOp, scf::WhileOp, scf::ParallelOp, scf::ForallOp>(op);
 }
@@ -294,6 +302,15 @@ static void markNestedTNotifyWithState(Operation *op,
   });
 }
 
+static void markNestedTNotifyWithState(Region &region,
+                                       const TNotifyReleaseState &state,
+                                       bool &hasFailure) {
+  for (Block &block : region) {
+    for (Operation &nested : block)
+      markNestedTNotifyWithState(&nested, state, hasFailure);
+  }
+}
+
 static TNotifyReleaseState
 annotateTNotifyReleaseForBlock(Block &block,
                                TNotifyReleaseState entryPendingState,
@@ -323,11 +340,11 @@ annotateTNotifyReleaseForBlock(Block &block,
             region.front(), regionEntryState, nestedLoopCarriedState,
             hasFailure));
       } else {
-        TNotifyReleaseState regionState = collectTNotifyReleaseState(&op);
+        TNotifyReleaseState regionState = collectTNotifyReleaseState(region);
         TNotifyReleaseState nestedNotifyState = regionEntryState;
         nestedNotifyState.merge(nestedLoopCarriedState);
         nestedNotifyState.merge(regionState);
-        markNestedTNotifyWithState(&op, nestedNotifyState, hasFailure);
+        markNestedTNotifyWithState(region, nestedNotifyState, hasFailure);
 
         TNotifyReleaseState regionExitState = regionEntryState;
         regionExitState.merge(regionState);
@@ -351,6 +368,9 @@ annotateTNotifyReleaseForBlock(Block &block,
 static bool annotateTNotifyRelease(ModuleOp module) {
   bool hasFailure = false;
   for (auto func : module.getOps<func::FuncOp>()) {
+    if (func.isExternal())
+      continue;
+
     if (func.getBody().hasOneBlock()) {
       (void)annotateTNotifyReleaseForBlock(func.getBody().front(),
                                            TNotifyReleaseState{},
@@ -362,9 +382,8 @@ static bool annotateTNotifyRelease(ModuleOp module) {
     // Be conservative for pre-existing CFG: without a path-sensitive CFG data
     // flow here, every TNotify may observe any release-relevant work in the
     // function.
-    TNotifyReleaseState funcState =
-        collectTNotifyReleaseState(func.getOperation());
-    markNestedTNotifyWithState(func.getOperation(), funcState, hasFailure);
+    TNotifyReleaseState funcState = collectTNotifyReleaseState(func.getBody());
+    markNestedTNotifyWithState(func.getBody(), funcState, hasFailure);
   }
   return hasFailure;
 }
@@ -434,6 +453,14 @@ static SignalAcquireState collectSignalAcquireState(Operation *op) {
   return state;
 }
 
+static SignalAcquireState collectSignalAcquireState(Region &region) {
+  SignalAcquireState state;
+  for (Block &block : region)
+    for (Operation &nested : block)
+      state.merge(collectSignalAcquireState(&nested));
+  return state;
+}
+
 static void markNestedAcquireLoadsWithState(Operation *op,
                                             SignalAcquireState state,
                                             bool &hasFailure) {
@@ -442,6 +469,15 @@ static void markNestedAcquireLoadsWithState(Operation *op,
     diagnoseAcquireLoad(load, state, hasFailure);
     consumeAcquireAfterDiagnostic(state);
   });
+}
+
+static void markNestedAcquireLoadsWithState(Region &region,
+                                            SignalAcquireState state,
+                                            bool &hasFailure) {
+  for (Block &block : region) {
+    for (Operation &nested : block)
+      markNestedAcquireLoadsWithState(&nested, state, hasFailure);
+  }
 }
 
 static SignalAcquireState
@@ -478,8 +514,8 @@ annotateSignalAcquireForBlock(Block &block, SignalAcquireState entryState,
         combinedRegionExitState.merge(
             annotateSignalAcquireForBlock(region.front(), state, hasFailure));
       } else {
-        markNestedAcquireLoadsWithState(&op, state, hasFailure);
-        SignalAcquireState regionState = collectSignalAcquireState(&op);
+        markNestedAcquireLoadsWithState(region, state, hasFailure);
+        SignalAcquireState regionState = collectSignalAcquireState(region);
         SignalAcquireState regionExitState = state;
         regionExitState.merge(regionState);
         combinedRegionExitState.merge(regionExitState);
@@ -496,15 +532,17 @@ annotateSignalAcquireForBlock(Block &block, SignalAcquireState entryState,
 static bool annotateSignalAcquire(ModuleOp module) {
   bool hasFailure = false;
   for (auto func : module.getOps<func::FuncOp>()) {
+    if (func.isExternal())
+      continue;
+
     if (func.getBody().hasOneBlock()) {
       (void)annotateSignalAcquireForBlock(func.getBody().front(),
                                           SignalAcquireState{}, hasFailure);
       continue;
     }
 
-    SignalAcquireState funcState =
-        collectSignalAcquireState(func.getOperation());
-    markNestedAcquireLoadsWithState(func.getOperation(), funcState, hasFailure);
+    SignalAcquireState funcState = collectSignalAcquireState(func.getBody());
+    markNestedAcquireLoadsWithState(func.getBody(), funcState, hasFailure);
   }
   return hasFailure;
 }
