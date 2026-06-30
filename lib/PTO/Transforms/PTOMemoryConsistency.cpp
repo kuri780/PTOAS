@@ -34,12 +34,14 @@ static bool isGmAddressSpace(pto::AddressSpace space) {
 struct TNotifyReleaseState {
   bool drainMte2 = false;
   bool drainMte3 = false;
+  bool drainFix = false;
   bool cleanGmCache = false;
   bool needsDsbDdr = false;
 
   void merge(const TNotifyReleaseState &other) {
     drainMte2 |= other.drainMte2;
     drainMte3 |= other.drainMte3;
+    drainFix |= other.drainFix;
     cleanGmCache |= other.cleanGmCache;
     needsDsbDdr |= other.needsDsbDdr;
   }
@@ -47,6 +49,7 @@ struct TNotifyReleaseState {
   void clear() {
     drainMte2 = false;
     drainMte3 = false;
+    drainFix = false;
     cleanGmCache = false;
     needsDsbDdr = false;
   }
@@ -59,9 +62,13 @@ struct TNotifyReleaseState {
     case pto::PIPE::PIPE_MTE3:
       drainMte3 = false;
       break;
+    case pto::PIPE::PIPE_FIX:
+      drainFix = false;
+      break;
     case pto::PIPE::PIPE_ALL:
       drainMte2 = false;
       drainMte3 = false;
+      drainFix = false;
       break;
     default:
       break;
@@ -76,7 +83,7 @@ struct TNotifyReleaseState {
   void applyFenceRelease(pto::FenceScope scope) {
     if (scope != pto::FenceScope::DDR)
       return;
-    if (drainMte3 || cleanGmCache)
+    if (drainMte3 || drainFix || cleanGmCache)
       return;
     needsDsbDdr = false;
   }
@@ -154,6 +161,13 @@ static TNotifyReleaseState getReleaseStateForPipe(pto::PIPE pipe) {
   return state;
 }
 
+static TNotifyReleaseState getFixGmWriteReleaseState() {
+  TNotifyReleaseState state;
+  state.drainFix = true;
+  state.needsDsbDdr = true;
+  return state;
+}
+
 static TNotifyReleaseState getReleaseStateForMacroModel(Operation *op) {
   TNotifyReleaseState state;
   auto model = getSyncMacroModel(op);
@@ -185,8 +199,16 @@ static TNotifyReleaseState getDirectTNotifyReleaseState(Operation *op) {
     }
   }
 
+  if (auto tstore = dyn_cast<pto::TStoreOp>(op);
+      tstore && tstore.getPipe() == pto::PIPE::PIPE_FIX)
+    return getFixGmWriteReleaseState();
+
+  if (isa<pto::TStoreFPOp>(op))
+    return getFixGmWriteReleaseState();
+
   TNotifyReleaseState macroState = getReleaseStateForMacroModel(op);
-  if (macroState.drainMte3 || macroState.cleanGmCache ||
+  if (macroState.drainMte3 || macroState.drainFix ||
+      macroState.cleanGmCache ||
       macroState.needsDsbDdr)
     return macroState;
 
@@ -241,21 +263,29 @@ static void diagnoseTNotifyRelease(pto::TNotifyOp op,
     op.emitOpError()
         << "requires explicit `pto.fence.release #pto.fence_scope<ddr>` "
            "before publishing a signal after GM writes or cache clean; "
-           "PTOAS inserts the required MTE3 pipe drain before the release "
-           "fence when needed";
+           "PTOAS inserts the required MTE3/FIX pipe drain before the "
+           "release fence when needed";
     hasFailure = true;
   }
 }
 
-static void insertMte3DrainBeforeReleaseFence(pto::FenceReleaseOp fence,
-                                              TNotifyReleaseState &state) {
-  if (fence.getScope().getScope() != pto::FenceScope::DDR || !state.drainMte3)
+static void insertDrainsBeforeReleaseFence(pto::FenceReleaseOp fence,
+                                           TNotifyReleaseState &state) {
+  if (fence.getScope().getScope() != pto::FenceScope::DDR)
     return;
   OpBuilder builder(fence);
-  builder.create<pto::BarrierOp>(
-      fence.getLoc(), pto::PipeAttr::get(fence.getContext(),
-                                         pto::PIPE::PIPE_MTE3));
-  state.drainMte3 = false;
+  auto insertBarrier = [&](pto::PIPE pipe) {
+    builder.create<pto::BarrierOp>(
+        fence.getLoc(), pto::PipeAttr::get(fence.getContext(), pipe));
+  };
+  if (state.drainMte3) {
+    insertBarrier(pto::PIPE::PIPE_MTE3);
+    state.drainMte3 = false;
+  }
+  if (state.drainFix) {
+    insertBarrier(pto::PIPE::PIPE_FIX);
+    state.drainFix = false;
+  }
 }
 
 static void markNestedTNotifyWithState(Operation *op,
@@ -314,7 +344,7 @@ annotateTNotifyReleaseForBlock(Block &block,
     if (auto cmo = dyn_cast<pto::CmoCleanOp>(op))
       pendingState.applyCmoClean(cmo.getSpace().getAddressSpace());
     if (auto fence = dyn_cast<pto::FenceReleaseOp>(op)) {
-      insertMte3DrainBeforeReleaseFence(fence, pendingState);
+      insertDrainsBeforeReleaseFence(fence, pendingState);
       pendingState.applyFenceRelease(fence.getScope().getScope());
     }
   }
