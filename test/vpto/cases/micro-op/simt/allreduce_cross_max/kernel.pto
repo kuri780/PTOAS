@@ -1,0 +1,65 @@
+module attributes {pto.kernel_kind = #pto.kernel_kind<vector>, pto.mode = "auto", pto.target_arch = "a5"} {
+  func.func @_kernel(%arg0: !pto.ptr<f32, gm>) attributes {pto.aicore} {
+    %c0_i64 = arith.constant 0 : i64
+    %0 = builtin.unrealized_conversion_cast %c0_i64 : i64 to ui64
+    %1 = pto.castptr %0 : ui64 -> !pto.ptr<f32, ub>
+    %c128_i32 = arith.constant 128 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c1_i32_0 = arith.constant 1 : i32
+    pto.simt_launch @_body__simt_0<<<%c128_i32, %c1_i32, %c1_i32_0>>>(%1, %arg0) : (!pto.ptr<f32, ub>, !pto.ptr<f32, gm>) -> ()
+    pto.barrier <PIPE_ALL>
+    return
+  }
+  func.func @_body__simt_0(%arg0: !pto.ptr<f32, ub>, %arg1: !pto.ptr<f32, gm>) attributes {pto.simt_entry} {
+    %0 = pto.get_tid_x : i32
+    %cst = arith.constant 1.000000e+00 : f32
+    %c5_i32 = arith.constant 5 : i32
+    %c31_i32 = arith.constant 31 : i32
+    %c32_i32 = arith.constant 32 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c4_i32 = arith.constant 4 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c0 = arith.constant 0 : index
+    %cst_0 = arith.constant 0xFF800000 : f32
+    %1 = pto.get_tid_x : i32
+    %2 = arith.shrui %1, %c5_i32 : i32
+    %3 = pto.get_laneid : i32
+    %4 = pto.redux_max %cst : f32 -> f32
+    %5 = arith.cmpi ult, %3, %c1_i32 : i32
+    scf.if %5 {
+      %13 = arith.muli %2, %c1_i32 : i32
+      %14 = arith.addi %13, %3 : i32
+      %15 = arith.index_cast %14 : i32 to index
+      pto.store %4, %arg0[%15] : !pto.ptr<f32, ub>, f32
+    }
+    pto.syncthreads
+    %6 = arith.cmpi ult, %1, %c32_i32 : i32
+    %7 = scf.if %6 -> (f32) {
+      %13 = arith.cmpi ult, %3, %c4_i32 : i32
+      %14 = scf.if %13 -> (f32) {
+        %16 = arith.index_cast %3 : i32 to index
+        %17 = pto.load %arg0[%16] : !pto.ptr<f32, ub> -> f32
+        scf.yield %17 : f32
+      } else {
+        scf.yield %cst_0 : f32
+      }
+      %15 = pto.redux_max %14 : f32 -> f32
+      scf.yield %15 : f32
+    } else {
+      scf.yield %cst_0 : f32
+    }
+    %8 = arith.cmpi ult, %1, %c1_i32 : i32
+    scf.if %8 {
+      %13 = arith.index_cast %1 : i32 to index
+      pto.store %7, %arg0[%13] : !pto.ptr<f32, ub>, f32
+    }
+    pto.syncthreads
+    %9 = arith.remui %1, %c1_i32 : i32
+    %10 = arith.index_cast %9 : i32 to index
+    %11 = pto.load %arg0[%10] : !pto.ptr<f32, ub> -> f32
+    pto.syncthreads
+    %12 = arith.index_cast %0 : i32 to index
+    pto.store %11, %arg1[%12] : !pto.ptr<f32, gm>, f32
+    return
+  }
+}

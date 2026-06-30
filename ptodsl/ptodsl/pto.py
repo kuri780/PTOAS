@@ -35,6 +35,8 @@ from ._types import (           # noqa: F401
 )
 from ._surface_types import (   # noqa: F401
     const_expr,
+    tensor_spec,
+    TensorSpec,
     BarrierType,
     Pipe,
     MemorySpace,
@@ -59,7 +61,6 @@ from ._surface_types import (   # noqa: F401
     VcvtSatMode,
     VcvtPartMode,
     AlignType,
-    RoundMode,
     DivPrecision,
     ExpPrecision,
     LogPrecision,
@@ -104,7 +105,6 @@ from ._ops import (             # noqa: F401
     vsel,
     make_tensor_view, partition_view,
     alloc_tile,
-    tsort32, tmrgsort, tgather,
     mte_load, mte_store, mte_gm_ub, mte_ub_gm, mte_ub_ub, mte_ub_l1,
     mte_gm_l1, mte_l1_ub, mte_gm_l1_frac, mte_l1_bt, mte_l1_fb, mem_bar,
     mte_l1_l0a, mte_l1_l0b, mte_l1_l0a_mx, mte_l1_l0b_mx,
@@ -143,6 +143,9 @@ from ._control_flow import (    # noqa: F401
     LoopHandle, BranchHandle,
 )
 
+# ── All-reduce ─────────────────────────────────────────────────────────────────
+from ._allreduce import simt_allreduce_sum, simt_allreduce_max, simt_allreduce_min  # noqa: F401
+
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401
 from ._subkernels import cube, simd, simt     # noqa: F401
@@ -166,6 +169,6 @@ mask_b32 = mask_type("b32")
 
 
 def __getattr__(name):
-    if name in {"ukernel", "tile_buf_type", "vecscope", "as_ptr", "vbrc_load", "vsts_1pt", "constexpr", "tensor_spec", "TensorSpec"}:
+    if name in {"ukernel", "tile_buf_type", "vecscope", "as_ptr", "vbrc_load", "vsts_1pt", "constexpr"}:
         raise unsupported_public_surface_error(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
