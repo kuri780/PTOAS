@@ -6,10 +6,10 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 """
-SIMT cross-workitem all-reduce helpers.
+SIMT cross-workitem all-reduce.
 
 All-reduce ops are emitted **inline** at the current insertion point
-(no helper-function outline or ``func.call``).  Three reducer variants
+(no ``func.func`` outline or ``func.call``).  Three reducer variants
 are exposed: ``simt_allreduce_sum``, ``simt_allreduce_max``, ``simt_allreduce_min``.
 
 Dispatch tree (mirrors the C++ compile-time dispatch in ``reduce.h``)::
