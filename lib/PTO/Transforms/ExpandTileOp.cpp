@@ -18,10 +18,11 @@
 //
 // Workflow per tile op:
 //   1. Extract SpecKey from ALL operands' tile_buf types.
-//   2. Invoke Python DSL helper to generate a specialized MLIR function
-//      (with tile_buf parameters).
-//   3. Parse the generated MLIR and clone the function into the module.
-//   4. Replace the original tile op with func.call, passing tile_buf
+//   2. For PTODSL, query legal-candidate metadata and require one candidate.
+//   3. Invoke the selected TileLib helper to generate a specialized MLIR
+//      function (with tile_buf parameters).
+//   4. Parse the generated MLIR and clone the function into the module.
+//   5. Replace the original tile op with func.call, passing tile_buf
 //      operands directly (no type bridging needed).
 //
 
@@ -49,13 +50,16 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unistd.h>
 
@@ -710,9 +714,14 @@ struct ExpandState {
   std::string pythonExe;
   std::string daemonSocketPath;
 
-  func::FuncOp invokeTileLib(const SpecKey &key, Operation *tileOp,
-                             ModuleOp mod, MLIRContext *ctx);
-  func::FuncOp invokeTileLibDaemon(const SpecKey &key, Operation *tileOp,
+  std::optional<std::string>
+  invokeTileLibHelper(const SpecKey &key, StringRef method = {},
+                      StringRef candidateId = {});
+  std::optional<std::string>
+  discoverSingleTileLibCandidate(const SpecKey &key);
+  func::FuncOp invokeTileLib(const SpecKey &key, ModuleOp mod,
+                             MLIRContext *ctx);
+  func::FuncOp invokeTileLibDaemon(const SpecKey &key, StringRef candidateId,
                                    ModuleOp mod, MLIRContext *ctx);
 
   LogicalResult expandTileOpsInFunction(func::FuncOp func, ModuleOp mod,
@@ -877,38 +886,34 @@ static std::string buildContextAttrsJson(const SpecKey &key) {
 }
 
 // ============================================================================
-// Invoke Python DSL daemon RPC to generate a specialized template function.
+// Invoke the configured one-shot helper and return its stdout.
 // ============================================================================
-func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
-                                              Operation *tileOp, ModuleOp mod,
-                                              MLIRContext *ctx) {
-  // 1. Locate the Python executable.
+std::optional<std::string>
+ExpandState::invokeTileLibHelper(const SpecKey &key, StringRef method,
+                                StringRef candidateId) {
   auto pythonPath = llvm::sys::findProgramByName(pythonExe);
   if (!pythonPath) {
     llvm::errs() << "ExpandTileOp: cannot find '" << pythonExe << "'\n";
-    return nullptr;
+    return std::nullopt;
   }
 
-  // 2. Build operand schema JSON for daemon RPC.
   std::string operandSpecsJson = buildOperandSpecsJson(key);
   std::string contextAttrsJson = buildContextAttrsJson(key);
   if (key.targetArch.empty()) {
     llvm::errs() << "ExpandTileOp: missing pto.target_arch module attribute\n";
-    return nullptr;
+    return std::nullopt;
   }
 
-  // 3. Create temp file for stdout redirect.
   SmallString<128> tmpPath;
   int tmpFD;
-  if (auto ec = llvm::sys::fs::createTemporaryFile("tilelib_daemon", "mlir",
-                                                     tmpFD, tmpPath)) {
+  if (auto ec = llvm::sys::fs::createTemporaryFile("tilelib_helper", "out",
+                                                    tmpFD, tmpPath)) {
     llvm::errs() << "ExpandTileOp: cannot create temp file: "
                  << ec.message() << "\n";
-    return nullptr;
+    return std::nullopt;
   }
   ::close(tmpFD);
 
-  // 4. Build command args for daemon helper.
   std::string opName = "pto." + key.opName;
   SmallVector<StringRef> args = {
       *pythonPath, "-m", daemonHelperModule,
@@ -917,12 +922,19 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
       "--op",          opName,
       "--operand-specs", operandSpecsJson,
   };
+  if (!method.empty()) {
+    args.push_back("--method");
+    args.push_back(method);
+  }
   if (!key.contextAttrs.empty()) {
     args.push_back("--context-attrs");
     args.push_back(contextAttrsJson);
   }
+  if (!candidateId.empty()) {
+    args.push_back("--candidate-id");
+    args.push_back(candidateId);
+  }
 
-  // 5. Set up environment with PYTHONPATH.
   std::optional<StringRef> redirects[] = {std::nullopt, StringRef(tmpPath),
                                           std::nullopt};
 
@@ -948,7 +960,6 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
       envp.push_back(s);
   }
 
-  // 6. Execute daemon helper.
   std::string errMsg;
   int rc = llvm::sys::ExecuteAndWait(
       *pythonPath, args,
@@ -956,27 +967,83 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
       redirects, /*secondsToWait=*/30, /*memoryLimit=*/0, &errMsg);
 
   if (rc != 0) {
-    llvm::errs() << "ExpandTileOp: daemon helper failed (rc=" << rc
+    StringRef operation =
+        method.empty() ? StringRef("instantiate") : method;
+    llvm::errs() << "ExpandTileOp: daemon helper " << operation
+                 << " failed (rc=" << rc
                  << "): " << errMsg << "\n";
     llvm::sys::fs::remove(tmpPath);
-    return nullptr;
+    return std::nullopt;
   }
 
-  // 7. Read the generated MLIR.
   auto bufOrErr = llvm::MemoryBuffer::getFile(tmpPath);
   llvm::sys::fs::remove(tmpPath);
   if (!bufOrErr) {
     llvm::errs() << "ExpandTileOp: cannot read daemon output\n";
-    return nullptr;
+    return std::nullopt;
   }
-  StringRef mlirText = (*bufOrErr)->getBuffer();
-  if (mlirText.empty()) {
+  std::string output = (*bufOrErr)->getBuffer().str();
+  if (output.empty()) {
     llvm::errs() << "ExpandTileOp: empty daemon output\n";
-    return nullptr;
+    return std::nullopt;
+  }
+  return output;
+}
+
+// ============================================================================
+// Discover the only legal candidate supported by this migration milestone.
+// ============================================================================
+std::optional<std::string>
+ExpandState::discoverSingleTileLibCandidate(const SpecKey &key) {
+  auto metadataText = invokeTileLibHelper(key, "get_metadata");
+  if (!metadataText)
+    return std::nullopt;
+
+  auto parsed = llvm::json::parse(*metadataText);
+  if (!parsed) {
+    llvm::errs() << "ExpandTileOp: failed to parse PTODSL metadata: "
+                 << llvm::toString(parsed.takeError()) << "\n";
+    return std::nullopt;
   }
 
-  // 8. Parse the MLIR text.
-  auto parsedMod = parseSourceString<ModuleOp>(mlirText, ctx);
+  auto *root = parsed->getAsObject();
+  auto *candidates = root ? root->getObject("candidates") : nullptr;
+  if (!candidates) {
+    llvm::errs() << "ExpandTileOp: PTODSL metadata is missing the "
+                    "'candidates' object\n";
+    return std::nullopt;
+  }
+
+  std::string opName = "pto." + key.opName;
+  if (candidates->size() != 1) {
+    llvm::errs() << "ExpandTileOp: PTODSL metadata returned "
+                 << candidates->size() << " legal candidates for " << opName
+                 << "; version selection is required before rendering\n";
+    return std::nullopt;
+  }
+
+  const auto &candidate = *candidates->begin();
+  if (!candidate.second.getAsObject()) {
+    llvm::errs() << "ExpandTileOp: malformed metadata for candidate '"
+                 << candidate.first.str() << "'\n";
+    return std::nullopt;
+  }
+  return candidate.first.str();
+}
+
+// ============================================================================
+// Invoke the daemon RPC to generate a specialized template function.
+// ============================================================================
+func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
+                                              StringRef candidateId,
+                                              ModuleOp mod,
+                                              MLIRContext *ctx) {
+  auto mlirText = invokeTileLibHelper(key, /*method=*/{}, candidateId);
+  if (!mlirText)
+    return nullptr;
+
+  // Parse the rendered MLIR.
+  auto parsedMod = parseSourceString<ModuleOp>(*mlirText, ctx);
   if (!parsedMod) {
     llvm::errs() << "ExpandTileOp: failed to parse daemon output\n";
     return nullptr;
@@ -1048,12 +1115,20 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
 // ============================================================================
 // Invoke the selected TileLib backend to generate a specialized template.
 // ============================================================================
-func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
-                                        Operation *tileOp, ModuleOp mod,
+func::FuncOp ExpandState::invokeTileLib(const SpecKey &key, ModuleOp mod,
                                         MLIRContext *ctx) {
   // Try daemon first if daemon socket path is provided.
   if (!daemonSocketPath.empty()) {
-    func::FuncOp daemonResult = invokeTileLibDaemon(key, tileOp, mod, ctx);
+    std::string candidateId;
+    if (tileLibBackend == "ptodsl") {
+      auto discoveredCandidate = discoverSingleTileLibCandidate(key);
+      if (!discoveredCandidate)
+        return nullptr;
+      candidateId = std::move(*discoveredCandidate);
+    }
+
+    func::FuncOp daemonResult =
+        invokeTileLibDaemon(key, candidateId, mod, ctx);
     if (daemonResult)
       return daemonResult;
     if (tileLibBackend == "ptodsl") {
@@ -1283,7 +1358,7 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
     }
 
     // Invoke the selected TileLib backend (with daemon-side caching).
-    func::FuncOp dslFn = invokeTileLib(*specKeyOpt, op, mod, ctx);
+    func::FuncOp dslFn = invokeTileLib(*specKeyOpt, mod, ctx);
     if (!dslFn) {
       StringRef opName = getTileOpName(op);
       op->emitError("ExpandTileOp: failed to instantiate TileLib template for " +

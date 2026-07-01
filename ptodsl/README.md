@@ -97,8 +97,15 @@ explicit command-line override. PTODSL daemon failures are reported as errors
 and never fall back to the TileLang implementation.
 
 At this migration stage, end-to-end expansion is intended for operations with
-one legal PTODSL candidate, such as `pto.tsub`. Operations with tied template
-candidates will be enabled by the metadata-selection milestone.
+one legal PTODSL candidate, such as `pto.tsub`. `ExpandTileOp` first requests
+legal-candidate metadata and then renders with the sole candidate's ID.
+Operations with tied template candidates will be enabled when candidate
+discovery moves into the planned `DiscoverTileLibCandidates` pass and version
+selection becomes a separate stage.
+
+See the
+[PTODSL TileLib migration test checklist](docs/tilelib-migration-testing.md)
+for the complete test inventory, commands, and expected outcomes.
 
 ---
 
