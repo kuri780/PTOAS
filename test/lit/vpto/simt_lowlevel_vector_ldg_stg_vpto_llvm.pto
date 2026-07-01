@@ -12,39 +12,46 @@
 //   vector<2xf16>  → 32-bit → s32/b32 intrinsics + bitcast
 //   vector<2xbf16> → 32-bit → s32/b32 intrinsics + bitcast
 //   vector<2xf32>  → 64-bit → s64/b64 intrinsics + bitcast
-//   static offset (constant index) and dynamic offset (runtime index)
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // ── static offset: all vector types, various cache policies ──
   func.func @vector_ldg_stg_kernel(
     %gm_v2f16: !pto.ptr<vector<2xf16>, gm>,
     %gm_v2bf16: !pto.ptr<vector<2xbf16>, gm>,
-    %gm_v2f32: !pto.ptr<vector<2xf32>, gm>,
-    %dyn_offset: i64
+    %gm_v2f32: !pto.ptr<vector<2xf32>, gm>
   ) attributes {pto.aicore} {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %dyn_idx = arith.index_cast %dyn_offset : i64 to index
 
-    // ── vector<2xf16> static offset ──
+    // vector<2xf16>: cached load, uncached store
     %v2f16_load = pto.ldg %gm_v2f16[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf16>, gm> -> vector<2xf16>
     pto.stg %v2f16_load, %gm_v2f16[%c1] l1cache(uncache) l2cache(nmfv) : !pto.ptr<vector<2xf16>, gm>, vector<2xf16>
 
-    // ── vector<2xbf16> static offset ──
+    // vector<2xbf16>: uncached load, cached store
     %v2bf16_load = pto.ldg %gm_v2bf16[%c0] l1cache(uncache) l2cache(nmpref) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
     pto.stg %v2bf16_load, %gm_v2bf16[%c0] l1cache(cache) l2cache(nmlv) : !pto.ptr<vector<2xbf16>, gm>, vector<2xbf16>
 
-    // ── vector<2xf32> static offset ──
+    // vector<2xf32>: cached load (static offset 1), uncached store (static offset 0)
     %v2f32_load = pto.ldg %gm_v2f32[%c1] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf32>, gm> -> vector<2xf32>
     pto.stg %v2f32_load, %gm_v2f32[%c0] l1cache(uncache) l2cache(wtsred) : !pto.ptr<vector<2xf32>, gm>, vector<2xf32>
 
-    // ── vector<2xf32> dynamic offset ──
-    %v2f32_dyn = pto.ldg %gm_v2f32[%dyn_idx] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf32>, gm> -> vector<2xf32>
-    pto.stg %v2f32_dyn, %gm_v2f32[%dyn_idx] l1cache(uncache) l2cache(nmlv) : !pto.ptr<vector<2xf32>, gm>, vector<2xf32>
-
-    // ── default cache policy (no explicit l1cache/l2cache) ──
+    // default cache policy
     %v_default = pto.ldg %gm_v2f16[%c0] : !pto.ptr<vector<2xf16>, gm> -> vector<2xf16>
     pto.stg %v_default, %gm_v2f16[%c0] : !pto.ptr<vector<2xf16>, gm>, vector<2xf16>
 
+    return
+  }
+
+  // ── dynamic i64 offset: isolated to guarantee the GEP uses the runtime index ──
+  // This function uses ONLY dynamic offsets and no static non-zero constants,
+  // so the vector<2xf32> GEP must carry the runtime i64 index.
+  func.func @vector_ldg_stg_dyn_offset(
+    %gm_v2f32: !pto.ptr<vector<2xf32>, gm>,
+    %dyn_offset: i64
+  ) attributes {pto.aicore} {
+    %dyn_idx = arith.index_cast %dyn_offset : i64 to index
+    %v = pto.ldg %gm_v2f32[%dyn_idx] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xf32>, gm> -> vector<2xf32>
+    pto.stg %v, %gm_v2f32[%dyn_idx] l1cache(uncache) l2cache(nmlv) : !pto.ptr<vector<2xf32>, gm>, vector<2xf32>
     return
   }
 }
@@ -68,8 +75,12 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // CHECK-DAG: llvm.bitcast {{%.*}} : i32 to vector<2xbf16>
 // CHECK-DAG: llvm.bitcast {{%.*}} : i64 to vector<2xf32>
 
-// ── dynamic offset: runtime i64 index flows directly into vector GEP ──
-// CHECK-DAG: llvm.getelementptr {{%.*}}[{{%.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, vector<2xf32>
-
 // ── L2 cache constants ──
 // CHECK-DAG: llvm.mlir.constant(0 : i32)
+
+// CHECK-LABEL: llvm.func @vector_ldg_stg_dyn_offset_mix_aiv
+// This function only uses dynamic offsets; the vector<2xf32> GEP must carry the
+// runtime i64 index (no static constant can satisfy the match).
+// CHECK: llvm.getelementptr {{%.*}}[%arg{{[0-9]+}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, vector<2xf32>
+// CHECK: llvm.call @llvm.hivm.ldg.cache.s64
+// CHECK: llvm.call @llvm.hivm.stg.uncache.b64

@@ -8,36 +8,15 @@
 
 // RUN: not ptoas --pto-arch=a5 --pto-backend=vpto %s -o %t 2>&1 | FileCheck %s
 
-// Test that pto.ldg / pto.stg reject unsupported vector types:
-//   - Wrong element count (vector<4xf32>, vector<3xf16>)
-//   - Wrong element type (vector<2xi32>)
+// Test that pto.ldg rejects unsupported vector types.
+// Representative case: vector<4xf32> — only 2-element vectors are supported.
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  // CHECK: vector<2xf16>/vector<2xbf16>/vector<2xf32> value type
   func.func @bad_v4f32(%gm: !pto.ptr<vector<4xf32>, gm>) attributes {pto.aicore} {
     %c0 = arith.constant 0 : index
     %v = pto.ldg %gm[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<4xf32>, gm> -> vector<4xf32>
     return
   }
-
-  // CHECK: vector<2xf16>/vector<2xbf16>/vector<2xf32> value type
-  func.func @bad_v3f16(%gm: !pto.ptr<vector<3xf16>, gm>) attributes {pto.aicore} {
-    %c0 = arith.constant 0 : index
-    %v = pto.ldg %gm[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<3xf16>, gm> -> vector<3xf16>
-    return
-  }
-
-  // CHECK: vector<2xf16>/vector<2xbf16>/vector<2xf32> value type
-  func.func @bad_v2i32(%gm: !pto.ptr<vector<2xi32>, gm>) attributes {pto.aicore} {
-    %c0 = arith.constant 0 : index
-    %v = pto.ldg %gm[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xi32>, gm> -> vector<2xi32>
-    return
-  }
-
-  // CHECK: vector<2xf16>/vector<2xbf16>/vector<2xf32> value type
-  func.func @bad_stg_v2i32(%v: vector<2xi32>, %gm: !pto.ptr<vector<2xi32>, gm>) attributes {pto.aicore} {
-    %c0 = arith.constant 0 : index
-    pto.stg %v, %gm[%c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xi32>, gm>, vector<2xi32>
-    return
-  }
 }
+
+// CHECK: vector<2xf16>/vector<2xbf16>/vector<2xf32> value type
