@@ -6979,11 +6979,7 @@ static bool isA5Fp8LikeType(Type ty) {
 }
 
 static bool isA5MxFp8InputType(Type ty) {
-  std::string text;
-  llvm::raw_string_ostream os(text);
-  ty.print(os);
-  os.flush();
-  return text == "f8E4M3FN" || text == "f8E5M2";
+  return ty && isa<Float8E4M3FNType, Float8E5M2Type>(ty);
 }
 
 static bool isA5MxInputTypePair(Type lhsTy, Type rhsTy) {

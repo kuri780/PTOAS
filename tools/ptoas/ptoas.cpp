@@ -1874,7 +1874,8 @@ int mlir::pto::compilePTOASModule(
   char **argv = context.getArgv();
 
   if (effectiveBackend != PTOBackend::VPTO &&
-      (emitVPTO || emitVPTOLLVMDialect)) {
+      (emitVPTO || emitVPTOLLVMDialect || ptoPrintSeamIR ||
+       !ptoSeamIRFile.empty())) {
     llvm::errs() << "Error: VPTO-specific flags require "
                     "--pto-backend=vpto or pto.backend = \"vpto\".\n";
     return 1;

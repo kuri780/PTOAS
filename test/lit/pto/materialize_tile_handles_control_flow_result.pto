@@ -1,7 +1,4 @@
-// RUN: rm -f %t.seam
-// RUN: ptoas --pto-arch=a3 --pto-seam-ir-file=%t.seam %s -o %t.cpp
-// RUN: FileCheck %s --check-prefix=IR < %t.seam
-// RUN: FileCheck %s --check-prefix=SEAM-EMITC < %t.cpp
+// RUN: ptoas --pto-arch=a3 --mlir-print-ir-after=pto-materialize-tile-handles %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=IR
 // RUN: ptoas --pto-arch=a3 %s -o - 2>&1 | FileCheck %s --check-prefix=EMITC
 
 module {
@@ -51,12 +48,12 @@ module {
   }
 }
 
-// IR-LABEL: func.func @control_flow_result_tile_materialization
-// IR: %[[SEL:.*]] = arith.select %{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 16x16xf16>
-// IR: scf.if {{.*}} {
+// IR: %[[SEL:.*]] = scf.if {{.*}} -> (!pto.tile_buf<vec, 16x16xf16>) {
 // IR:   pto.tadd
+// IR:   scf.yield %{{.*}} : !pto.tile_buf<vec, 16x16xf16>
 // IR: } else {
 // IR:   pto.tmul
+// IR:   scf.yield %{{.*}} : !pto.tile_buf<vec, 16x16xf16>
 // IR: }
 // IR: pto.tadd ins(%[[SEL]], %[[SEL]]
 // IR-LABEL: func.func @loop_carried_tile_materialization
@@ -65,9 +62,6 @@ module {
 // IR:   scf.yield %{{.*}} : !pto.tile_buf<vec, 16x16xf16>
 // IR: }
 // IR: pto.tmul ins(%[[RES]], %[[RES]]
-
-// SEAM-EMITC-LABEL: AICORE void control_flow_result_tile_materialization
-// SEAM-EMITC: TADD(
 
 // EMITC-LABEL: AICORE void control_flow_result_tile_materialization
 // EMITC: if (

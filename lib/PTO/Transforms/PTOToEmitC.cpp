@@ -133,6 +133,17 @@ static Value loadEmitCVariableIfNeeded(OpBuilder &builder, Location loc,
   return value;
 }
 
+static Value getSourceEmitCVariable(Value value) {
+  if (value.getDefiningOp<emitc::VariableOp>())
+    return value;
+  if (auto loadOp = value.getDefiningOp<emitc::LoadOp>()) {
+    Value operand = loadOp.getOperand();
+    if (operand.getDefiningOp<emitc::VariableOp>())
+      return operand;
+  }
+  return {};
+}
+
 [[maybe_unused]] static constexpr llvm::StringLiteral kLoweredSetValidShapeAttrName =
     "__pto.lowered_set_validshape";
 [[maybe_unused]] static constexpr llvm::StringLiteral kLoweredSetValidShapeConfigAttrName =
@@ -14325,7 +14336,7 @@ static AICORE inline void ptoas_auto_sync_tail(
           return;
         if (callOp.getNumOperands() != 1 || callOp.getNumResults() != 1)
           return;
-        if (callOp.getOperand(0).getDefiningOp<emitc::VariableOp>())
+        if (getSourceEmitCVariable(callOp.getOperand(0)))
           tileDataReadsToSink.push_back(callOp);
       });
 
@@ -14376,6 +14387,20 @@ static AICORE inline void ptoas_auto_sync_tail(
                     continue; // 这是一个赋值操作，不算有效使用
                 }
             }
+            if (auto load = dyn_cast<emitc::LoadOp>(user)) {
+                bool loadOnlyFeedsDeadTileDataReads = true;
+                for (Operation *loadUser : load.getResult().getUsers()) {
+                    auto call = dyn_cast<emitc::CallOpaqueOp>(loadUser);
+                    if (!call || call.getCallee() != "PTOAS__TILE_DATA" ||
+                        call.getNumResults() != 1 ||
+                        !call.getResult(0).use_empty()) {
+                        loadOnlyFeedsDeadTileDataReads = false;
+                        break;
+                    }
+                }
+                if (loadOnlyFeedsDeadTileDataReads)
+                    continue;
+            }
             // 如果还有其他用途（如 TLOAD, TMOV, TMATMUL），则该变量有用
             isRead = true;
             break;
@@ -14390,7 +14415,14 @@ static AICORE inline void ptoas_auto_sync_tail(
         // 1. 先删除所有使用该变量的 TASSIGN
         llvm::SmallVector<Operation*> usersToErase;
         for (Operation* user : varOp.getResult().getUsers()) {
-             // 我们上面已经确认过，剩下的 user 只能是 TASSIGN
+             if (auto load = dyn_cast<emitc::LoadOp>(user)) {
+                 llvm::SmallVector<Operation*> loadUsersToErase;
+                 for (Operation *loadUser : load.getResult().getUsers())
+                     loadUsersToErase.push_back(loadUser);
+                 for (Operation *loadUser : loadUsersToErase)
+                     loadUser->erase();
+             }
+             // 我们上面已经确认过，剩下的 user 只能是 TASSIGN 或死 emitc.load
              usersToErase.push_back(user);
         }
         for (auto u : usersToErase) u->erase();

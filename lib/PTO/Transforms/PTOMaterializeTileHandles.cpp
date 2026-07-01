@@ -632,6 +632,34 @@ static void cloneBlockWithoutTerminator(Block *from, Block *to,
   }
 }
 
+static bool isOperationNestedIn(Operation *op, Operation *ancestor) {
+  for (; op; op = op->getParentOp()) {
+    if (op == ancestor)
+      return true;
+  }
+  return false;
+}
+
+static bool isValueOwnedByOperation(Value value, Operation *owner) {
+  if (auto result = dyn_cast<OpResult>(value))
+    return isOperationNestedIn(result.getOwner(), owner);
+  if (auto arg = dyn_cast<BlockArgument>(value))
+    return isOperationNestedIn(arg.getOwner()->getParentOp(), owner);
+  return false;
+}
+
+static void eraseTileHandlesOwnedBy(Operation *owner,
+                                    DenseMap<Value, Value> &tileHandles) {
+  SmallVector<Value, 8> keysToErase;
+  for (auto &entry : tileHandles) {
+    if (isValueOwnedByOperation(entry.first, owner) ||
+        isValueOwnedByOperation(entry.second, owner))
+      keysToErase.push_back(entry.first);
+  }
+  for (Value key : keysToErase)
+    tileHandles.erase(key);
+}
+
 static FailureOr<bool>
 materializeSCFIfResults(ModuleOp module, DenseMap<Value, Value> &tileHandles) {
   bool changed = false;
@@ -720,6 +748,7 @@ materializeSCFIfResults(ModuleOp module, DenseMap<Value, Value> &tileHandles) {
       tileHandles[newIf.getResult(idx)] = newIf.getResult(idx);
     }
 
+    eraseTileHandlesOwnedBy(ifOp, tileHandles);
     ifOp.erase();
     changed = true;
   }
@@ -818,6 +847,7 @@ materializeSCFForResults(ModuleOp module, DenseMap<Value, Value> &tileHandles) {
       tileHandles[newFor.getResult(idx)] = newFor.getResult(idx);
     }
 
+    eraseTileHandlesOwnedBy(forOp, tileHandles);
     forOp.erase();
     changed = true;
   }
