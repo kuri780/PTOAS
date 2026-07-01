@@ -147,6 +147,28 @@ def PTOA5NormalizeTMov : Pass<"pto-a5-normalize-tmov", "func::FuncOp"> {
   let dependentDialects = ["pto::PTODialect", "func::FuncDialect"];
 }
 
+def PTORemoveIdentityTMov : Pass<"pto-remove-identity-tmov", "func::FuncOp"> {
+  let summary = "Remove plain PTO TMOV operations that copy a tile onto itself";
+  let description = [{
+    Removes side-effect-free `pto.tmov` operations whose source and destination
+    are proven to refer to the same physical tile address/range. Except for
+    exact same-SSA self-copies, the proof goes through InsertSync's
+    `BaseMemInfo` exact-range analysis for statically addressable values.
+    Same-address copies are removed only when the TMOV destination/result is
+    dead and no later same-address alias use is visible, so a live copy cannot
+    be the sole synchronization bridge. This pass runs before InsertSync so
+    deleting the identity TMOV also prevents
+    synchronization from being generated only for that no-op copy.
+  }];
+  let constructor = "mlir::pto::createPTORemoveIdentityTMovPass()";
+  let dependentDialects = [
+    "pto::PTODialect",
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "memref::MemRefDialect"
+  ];
+}
+
 
 def InferPTOMemScope : Pass<"pto-infer-mem-scope"> {
   let summary = "Infer memory scope for PTO Ops";

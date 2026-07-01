@@ -1,0 +1,120 @@
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --enable-insert-sync %s -o - 2>&1 | FileCheck %s --check-prefix=CPP
+
+module attributes {pto.target_arch = "a2a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @identity_tmov_same_addr() {
+    %c0_src_i64 = arith.constant 0 : i64
+    %c0_dst_i32 = arith.constant 0 : i32
+    %c0_dst_i64 = arith.extsi %c0_dst_i32 : i32 to i64
+    %one = arith.constant 1.000000e+00 : f32
+    %src = pto.alloc_tile addr = %c0_src_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c0_dst_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    pto.tadds ins(%src, %one
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32)
+      outs(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.tmov ins(%src
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
+  func.func @live_dst_same_addr_keeps_tmov() {
+    %c0_i64 = arith.constant 0 : i64
+    %c64_i64 = arith.constant 64 : i64
+    %src = pto.pointer_cast(%c0_i64) : memref<1x16xf32, #pto.address_space<vec>>
+    %dst = pto.pointer_cast(%c0_i64) : memref<1x16xf32, #pto.address_space<vec>>
+    %out = pto.pointer_cast(%c64_i64) : memref<1x16xf32, #pto.address_space<vec>>
+    pto.tmov ins(%src : memref<1x16xf32, #pto.address_space<vec>>)
+      outs(%dst : memref<1x16xf32, #pto.address_space<vec>>)
+    pto.tmov ins(%dst : memref<1x16xf32, #pto.address_space<vec>>)
+      outs(%out : memref<1x16xf32, #pto.address_space<vec>>)
+    return
+  }
+
+  func.func @non_identity_tmov_different_addr() {
+    %c0_i64 = arith.constant 0 : i64
+    %c64_i64 = arith.constant 64 : i64
+    %src = pto.alloc_tile addr = %c0_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c64_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmov ins(%src
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
+  func.func @identity_tmov_pointer_cast_same_addr_index_cast() {
+    %c0_i64 = arith.constant 0 : i64
+    %c0_idx = arith.constant 0 : index
+    %c0_alt = arith.index_cast %c0_idx : index to i64
+    %src = pto.pointer_cast(%c0_i64) : memref<1x16xf32, #pto.address_space<vec>>
+    %dst = pto.pointer_cast(%c0_alt) : memref<1x16xf32, #pto.address_space<vec>>
+    pto.tmov ins(%src : memref<1x16xf32, #pto.address_space<vec>>)
+      outs(%dst : memref<1x16xf32, #pto.address_space<vec>>)
+    return
+  }
+
+  func.func @non_identity_tmov_extui_negative_addr() {
+    %cm1_i8 = arith.constant -1 : i8
+    %c255_i64 = arith.extui %cm1_i8 : i8 to i64
+    %cm1_i64 = arith.constant -1 : i64
+    %src = pto.alloc_tile addr = %c255_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %cm1_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmov ins(%src
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
+  func.func @non_identity_tmov_trunc_then_extsi_addr() {
+    %c255_i64 = arith.constant 255 : i64
+    %trunc_i8 = arith.trunci %c255_i64 : i64 to i8
+    %cm1_i64 = arith.extsi %trunc_i8 : i8 to i64
+    %src = pto.alloc_tile addr = %cm1_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c255_i64
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmov ins(%src
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
+  func.func @non_identity_tmov_dynamic_addr(%addr0: i64, %addr1: i64) {
+    %src = pto.pointer_cast(%addr0) : memref<1x16xf32, #pto.address_space<vec>>
+    %dst = pto.pointer_cast(%addr1) : memref<1x16xf32, #pto.address_space<vec>>
+    pto.tmov ins(%src : memref<1x16xf32, #pto.address_space<vec>>)
+      outs(%dst : memref<1x16xf32, #pto.address_space<vec>>)
+    return
+  }
+}
+
+// CPP-LABEL: AICORE void identity_tmov_same_addr
+// CPP-NOT: pipe_barrier(PIPE_V)
+// CPP-NOT: TMOV(
+// CPP: return;
+
+// CPP-LABEL: AICORE void live_dst_same_addr_keeps_tmov
+// CPP-COUNT-2: TMOV(
+
+// CPP-LABEL: AICORE void non_identity_tmov_different_addr
+// CPP: TMOV(
+
+// CPP-LABEL: AICORE void identity_tmov_pointer_cast_same_addr_index_cast
+// CPP-NOT: pipe_barrier(PIPE_V)
+// CPP-NOT: TMOV(
+// CPP: return;
+
+// CPP-LABEL: AICORE void non_identity_tmov_extui_negative_addr
+// CPP: TMOV(
+
+// CPP-LABEL: AICORE void non_identity_tmov_trunc_then_extsi_addr
+// CPP: TMOV(
+
+// CPP-LABEL: AICORE void non_identity_tmov_dynamic_addr
+// CPP: TMOV(

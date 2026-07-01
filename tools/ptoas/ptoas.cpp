@@ -1895,6 +1895,7 @@ int mlir::pto::compilePTOASModule(
     pm.addPass(pto::createPlanMemoryPass(planMemoryOption));
   }
   pm.addPass(pto::createPTOResolveReservedBuffersPass());
+  pm.addNestedPass<mlir::func::FuncOp>(pto::createPTORemoveIdentityTMovPass());
 
   // Conditionally add one automatic synchronization mode. Barrier-all is a
   // conservative standalone pass; InsertSync and GraphSyncSolver are set/wait
