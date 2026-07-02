@@ -393,7 +393,9 @@ index   = _DType(IndexType.get)
 
 # ── Packed vector type descriptors ──────────────────────────────────────────
 
-f32x2 = _DType(lambda: VectorType.get([2], F32Type.get()))
+f16x2  = _DType(lambda: VectorType.get([2], F16Type.get()))
+bf16x2 = _DType(lambda: VectorType.get([2], BF16Type.get()))
+f32x2  = _DType(lambda: VectorType.get([2], F32Type.get()))
 
 
 # ── Type constructor functions ────────────────────────────────────────────────
@@ -484,7 +486,7 @@ def part_tensor_view_type_from_dims(dims, elem) -> Type:
 __all__ = [
     "_DType", "_resolve",
     "float32", "float16", "bf16",
-    "f32x2",
+    "f16x2", "bf16x2", "f32x2",
     "f8e4m3", "f8e5m2", "hif8", "f4e1m2x2", "f4e2m1x2",
     "int1", "int8", "int16", "int32", "int64",
     "si8", "si16", "si32", "si64",

@@ -2715,7 +2715,7 @@ class _FakeTensor:
 
 def main() -> None:
     expected_public_exports = [
-        "f32x2",
+        "f16x2", "bf16x2", "f32x2",
         "f8e4m3",
         "f8e5m2",
         "hif8",
