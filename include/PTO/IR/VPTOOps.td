@@ -287,6 +287,44 @@ def PTO_MemBarOp : PTO_Op<"mem_bar"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def DsbOp : PTO_Op<"dsb"> {
+  let summary = "Issue a low-level DSB memory barrier";
+  let description = [{
+    Lowers to `llvm.hivm.DSB(i64)`. The memory domain maps directly to the CCE
+    `mem_dsb_t` enum values: `ALL`, `DDR`, `UB`, and `SEQ`.
+  }];
+
+  let arguments = (ins PTO_DsbMemAttr:$mem);
+  let results = (outs);
+
+  let assemblyFormat = [{
+    custom<LegacyOrAttrDsbMem>($mem) attr-dict
+  }];
+}
+
+def DcciOp : PTO_Op<"dcci"> {
+  let summary = "Issue a low-level DCCI cache maintenance operation";
+  let description = [{
+    Lowers to the `llvm.hivm.DCCI*` intrinsic family. The pointer address space
+    selects the intrinsic variant: GM pointers use `DCCI` / `DCCI.DST`; UB
+    pointers use `DCCI.UB` / `DCCI.DST.UB`.
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$ptr,
+    PTO_DcciCacheLineAttr:$cache,
+    OptionalAttr<PTO_DcciDstAttr>:$dst
+  );
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $ptr custom<LegacyOrAttrDcciCacheLine>($cache)
+    custom<OptionalDcciDst>($dst) attr-dict `:` type($ptr)
+  }];
+}
+
 
 class PTO_BinaryI64ConfigOp<string mnemonic> : PTO_Op<mnemonic> {
   let arguments = (ins

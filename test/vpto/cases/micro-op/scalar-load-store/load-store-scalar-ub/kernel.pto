@@ -46,6 +46,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
       nburst(%c1_i64, %c64_i64, %c64_i64)
       : !pto.ptr<i16, ub>, !pto.ptr<i16, gm>, i64, i64, i64, i64
     pto.barrier #pto.pipe<PIPE_ALL>
+    pto.dcci %arg1 "ENTIRE_DATA_CACHE", "CACHELINE_OUT" : !pto.ptr<i16, gm>
+    pto.dcci %ub_out "SINGLE_CACHE_LINE", "CACHELINE_UB" : !pto.ptr<i16, ub>
+    pto.dsb "ALL"
     return
   }
 }

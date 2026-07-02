@@ -3946,6 +3946,8 @@ static std::optional<uint64_t> getStaticByteSize(Type ty) {
 }
 
 static std::optional<pto::AddressSpace> getPTOMemorySpaceEnum(Type ty) {
+  if (auto ptr = dyn_cast<pto::PtrType>(ty))
+    return ptr.getMemorySpace().getAddressSpace();
   if (auto tb = dyn_cast<pto::TileBufType>(ty)) {
     if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(tb.getMemorySpace()))
       return as.getAddressSpace();
@@ -8022,6 +8024,105 @@ static void printLegacyOrAttrMemBar(OpAsmPrinter &p, MemBarAttr kind,
                                     ArrayRef<NamedAttribute> attrs) {
   p << ' ' << '"' << stringifyMemBarKind(kind.getKind()) << '"';
   p.printOptionalAttrDict(attrs, {"kind"});
+}
+
+static ParseResult parseLegacyOrAttrDsbMem(OpAsmParser &parser,
+                                           DsbMemAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDsbMem(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dsb memory token: " << token;
+    attr = DsbMemAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto dsbMemAttr = dyn_cast<DsbMemAttr>(parsed);
+  if (!dsbMemAttr)
+    return parser.emitError(loc, "expected dsb_mem attribute");
+  attr = dsbMemAttr;
+  return success();
+}
+
+static void printLegacyOrAttrDsbMem(OpAsmPrinter &printer, Operation *op,
+                                    DsbMemAttr mem) {
+  (void)op;
+  printer << ' ' << '"' << stringifyDsbMem(mem.getKind()) << '"';
+}
+
+static ParseResult parseLegacyOrAttrDcciCacheLine(OpAsmParser &parser,
+                                                  DcciCacheLineAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDcciCacheLine(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dcci cache token: " << token;
+    attr = DcciCacheLineAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto cacheAttr = dyn_cast<DcciCacheLineAttr>(parsed);
+  if (!cacheAttr)
+    return parser.emitError(loc, "expected dcci_cache_line attribute");
+  attr = cacheAttr;
+  return success();
+}
+
+static void printLegacyOrAttrDcciCacheLine(OpAsmPrinter &printer, Operation *op,
+                                           DcciCacheLineAttr cache) {
+  (void)op;
+  printer << ' ' << '"' << stringifyDcciCacheLine(cache.getKind()) << '"';
+}
+
+static ParseResult parseOptionalDcciDst(OpAsmParser &parser,
+                                        DcciDstAttr &attr) {
+  if (failed(parser.parseOptionalComma()))
+    return success();
+
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDcciDst(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dcci dst token: " << token;
+    attr = DcciDstAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto dstAttr = dyn_cast<DcciDstAttr>(parsed);
+  if (!dstAttr)
+    return parser.emitError(loc, "expected dcci_dst attribute");
+  attr = dstAttr;
+  return success();
+}
+
+static void printOptionalDcciDst(OpAsmPrinter &printer, Operation *op,
+                                 DcciDstAttr dst) {
+  (void)op;
+  if (!dst)
+    return;
+  printer << ", \"" << stringifyDcciDst(dst.getKind()) << '"';
+}
+
+LogicalResult DcciOp::verify() {
+  auto space = getPTOMemorySpaceEnum(getPtr().getType());
+  if (!space)
+    return emitOpError("expects ptr to have a PTO memory space");
+  if (*space != pto::AddressSpace::GM && *space != pto::AddressSpace::VEC)
+    return emitOpError("expects ptr memory space to be gm or ub/vec");
+
+  return success();
 }
 
 static ParseResult parseLegacyOrAttrPipe(OpAsmParser &parser, PipeAttr &attr) {

@@ -148,6 +148,63 @@ pto.mem_bar "VST_VLD"
 
 ---
 
+### `pto.dsb`
+
+- **syntax:** `pto.dsb "MEM_DOMAIN"`
+- **semantics:** Issues a data synchronization barrier for the selected memory domain. All prior memory effects covered by the domain must become complete before subsequent memory effects proceed.
+
+**Memory domains:**
+
+| Domain | Meaning |
+|--------|---------|
+| `ALL` | Wait for all memory-access classes covered by the target |
+| `DDR` | Wait for DDR/GM memory-access effects |
+| `UB` | Wait for UB memory-access effects |
+| `SEQ` | Wait for sequencer-visible memory-access effects |
+
+**Example:** Ensure prior GM stores are complete before publishing a scalar signal:
+
+```mlir
+pto.dsb "DDR"
+```
+
+---
+
+### `pto.dcci`
+
+- **syntax:** `pto.dcci %ptr "CACHE_SCOPE" : !pto.ptr<T, gm|ub>`
+- **syntax:** `pto.dcci %ptr "CACHE_SCOPE", "CACHE_DST" : !pto.ptr<T, gm|ub>`
+- **semantics:** Performs data-cache clean/invalidate maintenance for the selected cache scope. The pointer address space selects whether the operation applies to GM or UB-backed cache state. The optional destination domain further restricts which cache-line class is affected.
+
+**Cache scopes:**
+
+| Scope | Meaning |
+|-------|---------|
+| `SINGLE_CACHE_LINE` | Apply maintenance to the cache line containing `%ptr` |
+| `ENTIRE_DATA_CACHE` | Apply maintenance to the entire data cache; `%ptr` is still required by the IR form |
+
+**Destination domains:**
+
+| Destination | Meaning |
+|-------------|---------|
+| `CACHELINE_ALL` | All supported cache-line domains |
+| `CACHELINE_UB` | UB cache-line domain |
+| `CACHELINE_OUT` | Output/GM-visible cache-line domain |
+| `CACHELINE_ATOMIC` | Atomic cache-line domain |
+
+**Constraints:**
+- `%ptr` must be a PTO pointer or buffer-like value in GM or UB address space.
+- Omitting `CACHE_DST` uses the target's default destination-domain form.
+
+**Example:** Flush GM-visible cache state after scalar GM stores:
+
+```mlir
+pto.dcci %gm "ENTIRE_DATA_CACHE", "CACHELINE_OUT" : !pto.ptr<i8, gm>
+pto.dsb "ALL"
+```
+
+---
+
 ## Why `get_buf` / `rls_buf` is More Programmer-Friendly
 
 The buffer-based synchronization (`get_buf`/`rls_buf`) provides the **same functional capability** as `set_flag`/`wait_flag` for maintaining correct ordering of RAW/WAR/WAW dependencies across pipelines, but with significant usability advantages:

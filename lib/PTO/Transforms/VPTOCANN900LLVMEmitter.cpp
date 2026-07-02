@@ -4034,6 +4034,33 @@ static StringRef buildMemBarCallee(MemBarKind kind, MLIRContext *context) {
   llvm_unreachable("unexpected membar kind");
 }
 
+static uint64_t getDsbMemImmediate(DsbMem kind) {
+  return static_cast<uint64_t>(kind);
+}
+
+static uint64_t getDcciCacheLineImmediate(DcciCacheLine kind) {
+  return static_cast<uint64_t>(kind);
+}
+
+static uint64_t getDcciDstImmediate(DcciDst kind) {
+  return static_cast<uint64_t>(kind);
+}
+
+static StringRef buildDcciCallee(unsigned addressSpace, bool hasDst,
+                                 MLIRContext *context) {
+  if (addressSpace == static_cast<unsigned>(pto::AddressSpace::GM)) {
+    return StringAttr::get(context, hasDst ? "llvm.hivm.DCCI.DST"
+                                           : "llvm.hivm.DCCI")
+        .getValue();
+  }
+  if (addressSpace == static_cast<unsigned>(pto::AddressSpace::VEC)) {
+    return StringAttr::get(context, hasDst ? "llvm.hivm.DCCI.DST.UB"
+                                           : "llvm.hivm.DCCI.UB")
+        .getValue();
+  }
+  llvm_unreachable("unexpected dcci address space");
+}
+
 template <>
 StringRef buildSyncCallee<pto::GetBufOp>(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.GET.BUFI.mode").getValue();
@@ -8589,6 +8616,74 @@ private:
   LoweringState &state;
 };
 
+class LowerDsbOpPattern final : public OpConversionPattern<pto::DsbOp> {
+public:
+  explicit LowerDsbOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                             LoweringState &state)
+      : OpConversionPattern<pto::DsbOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::DsbOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    (void)adaptor;
+    StringRef calleeName =
+        StringAttr::get(op.getContext(), "llvm.hivm.DSB").getValue();
+    Type i64Ty = rewriter.getI64Type();
+    auto funcType = rewriter.getFunctionType(TypeRange{i64Ty}, TypeRange{});
+    Value mem =
+        getI64Constant(rewriter, op.getLoc(),
+                       getDsbMemImmediate(op.getMem().getKind()));
+    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{},
+                                  ValueRange{mem});
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
+class LowerDcciOpPattern final : public OpConversionPattern<pto::DcciOp> {
+public:
+  explicit LowerDcciOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                              LoweringState &state)
+      : OpConversionPattern<pto::DcciOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::DcciOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = dyn_cast<LLVM::LLVMPointerType>(adaptor.getPtr().getType());
+    if (!ptrType)
+      return rewriter.notifyMatchFailure(op, "expected LLVM pointer operand");
+
+    bool hasDst = static_cast<bool>(op.getDstAttr());
+    StringRef calleeName =
+        buildDcciCallee(ptrType.getAddressSpace(), hasDst, op.getContext());
+
+    Type i64Ty = rewriter.getI64Type();
+    SmallVector<Type> argTypes{ptrType, i64Ty};
+    SmallVector<Value> args{
+        adaptor.getPtr(),
+        getI64Constant(rewriter, op.getLoc(),
+                       getDcciCacheLineImmediate(op.getCache().getKind()))};
+    if (auto dst = op.getDstAttr()) {
+      argTypes.push_back(i64Ty);
+      args.push_back(getI64Constant(rewriter, op.getLoc(),
+                                    getDcciDstImmediate(dst.getKind())));
+    }
+
+    auto funcType = rewriter.getFunctionType(argTypes, TypeRange{});
+    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{}, args);
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 template <typename BufSyncOp>
 class LowerBufSyncOpPattern final : public OpConversionPattern<BufSyncOp> {
 public:
@@ -9988,7 +10083,8 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerPipeEventSyncOpPattern<pto::WaitFlagOp>,
                LowerPipeEventDynSyncOpPattern<pto::SetFlagDynOp>,
                LowerPipeEventDynSyncOpPattern<pto::WaitFlagDynOp>,
-               LowerBarrierOpPattern, LowerMemBarOpPattern,
+               LowerBarrierOpPattern, LowerMemBarOpPattern, LowerDsbOpPattern,
+               LowerDcciOpPattern,
                LowerBufSyncOpPattern<pto::GetBufOp>,
                LowerBufSyncOpPattern<pto::RlsBufOp>,
                LowerRuntimeQueryOpPattern<pto::GetBlockIdxOp>,
@@ -10050,6 +10146,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
   target.addLegalOp<UnrealizedConversionCastOp>();
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
+                      pto::DsbOp, pto::DcciOp,
                       pto::GetBufOp, pto::RlsBufOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,
                       pto::GetBlockNumOp, pto::GetSubBlockNumOp,

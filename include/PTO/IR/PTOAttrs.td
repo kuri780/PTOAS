@@ -303,6 +303,69 @@ def PTO_MemBarAttr : PTO_Attr<"MemBar", "membar"> {
 }
 
 //===----------------------------------------------------------------------===//
+// DCCI / DSB
+//===----------------------------------------------------------------------===//
+
+def PTO_DSB_MEM_ALL : I32EnumAttrCase<"ALL", 0>;
+def PTO_DSB_MEM_DDR : I32EnumAttrCase<"DDR", 1>;
+def PTO_DSB_MEM_UB  : I32EnumAttrCase<"UB", 2>;
+def PTO_DSB_MEM_SEQ : I32EnumAttrCase<"SEQ", 3>;
+
+def PTO_DsbMemEnum : PTO_I32Enum<
+  "DsbMem", "PTO DSB memory domain", [
+    PTO_DSB_MEM_ALL,
+    PTO_DSB_MEM_DDR,
+    PTO_DSB_MEM_UB,
+    PTO_DSB_MEM_SEQ
+  ]>;
+
+def PTO_DsbMemAttr : PTO_Attr<"DsbMem", "dsb_mem"> {
+  let parameters = (ins EnumParameter<PTO_DsbMemEnum>:$kind);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Memory domain for VPTO `pto.dsb`.
+  }];
+}
+
+def PTO_DCCI_CACHE_SINGLE : I32EnumAttrCase<"SINGLE_CACHE_LINE", 0>;
+def PTO_DCCI_CACHE_ENTIRE : I32EnumAttrCase<"ENTIRE_DATA_CACHE", 1>;
+
+def PTO_DcciCacheLineEnum : PTO_I32Enum<
+  "DcciCacheLine", "PTO DCCI cache-line selection", [
+    PTO_DCCI_CACHE_SINGLE,
+    PTO_DCCI_CACHE_ENTIRE
+  ]>;
+
+def PTO_DcciCacheLineAttr : PTO_Attr<"DcciCacheLine", "dcci_cache_line"> {
+  let parameters = (ins EnumParameter<PTO_DcciCacheLineEnum>:$kind);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Cache-line selection for VPTO `pto.dcci`.
+  }];
+}
+
+def PTO_DCCI_DST_ALL    : I32EnumAttrCase<"CACHELINE_ALL", 0>;
+def PTO_DCCI_DST_UB     : I32EnumAttrCase<"CACHELINE_UB", 1>;
+def PTO_DCCI_DST_OUT    : I32EnumAttrCase<"CACHELINE_OUT", 2>;
+def PTO_DCCI_DST_ATOMIC : I32EnumAttrCase<"CACHELINE_ATOMIC", 3>;
+
+def PTO_DcciDstEnum : PTO_I32Enum<
+  "DcciDst", "PTO DCCI destination cache-line domain", [
+    PTO_DCCI_DST_ALL,
+    PTO_DCCI_DST_UB,
+    PTO_DCCI_DST_OUT,
+    PTO_DCCI_DST_ATOMIC
+  ]>;
+
+def PTO_DcciDstAttr : PTO_Attr<"DcciDst", "dcci_dst"> {
+  let parameters = (ins EnumParameter<PTO_DcciDstEnum>:$kind);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Optional destination cache-line domain for VPTO `pto.dcci`.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Sync Op Type (High Level Abstraction)
 //===----------------------------------------------------------------------===//
 
