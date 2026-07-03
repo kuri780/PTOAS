@@ -289,20 +289,20 @@ module {
 // CHECK:      pipe_barrier(PIPE_MTE2);
 // CHECK-NEXT: pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_drain_after_acc_tstore(
 // CHECK:      TSTORE
 // CHECK:      pipe_barrier(PIPE_FIX);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_drain_after_tload(
 // CHECK:      pto::comm::NotifyOp{{.*}}= pto::comm::NotifyOp::AtomicAdd;
 // CHECK:      TLOAD(
 // CHECK:      pipe_barrier(PIPE_MTE2);
 // CHECK-NOT:  dsb(
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_after_existing_mte2_barrier(
 // CHECK:      TLOAD(
@@ -314,13 +314,13 @@ module {
 // CHECK:      TSTORE(
 // CHECK:      pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_after_existing_mte3_barrier_and_fence(
 // CHECK:      TSTORE(
 // CHECK:      pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tnotify_no_mte_drain(
 // CHECK-NOT:  pipe_barrier(

@@ -15,7 +15,15 @@
 module {
   func.func private @producer(
       %tile: !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-      %dst: !pto.partition_tensor_view<1x32xf32>) {
+      %dst_ptr: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c1, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %dst = pto.partition_view %dst_view,
+      offsets = [%c0, %c0], sizes = [%c1, %c32]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x32xf32>
     pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
                outs(%dst : !pto.partition_tensor_view<1x32xf32>)
     return
@@ -33,15 +41,9 @@ module {
     %tile = pto.alloc_tile :
       !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
 
-    %dst_view = pto.make_tensor_view %dst_ptr,
-      shape = [%c1, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
-    %dst = pto.partition_view %dst_view,
-      offsets = [%c0, %c0], sizes = [%c1, %c32]
-      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x32xf32>
-
-    call @producer(%tile, %dst) :
+    func.call @producer(%tile, %dst_ptr) :
       (!pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-       !pto.partition_tensor_view<1x32xf32>) -> ()
+       !pto.ptr<f32>) -> ()
     pto.fence.release #pto.fence_scope<ddr>
 
     %sig_view = pto.make_tensor_view %signal_ptr,

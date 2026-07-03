@@ -349,6 +349,14 @@ static bool diagnoseNonInlinedMemoryConsistencyCalls(ModuleOp module) {
   for (auto func : module.getOps<func::FuncOp>()) {
     if (func.isExternal())
       continue;
+    // Entry wrappers are launch/orchestration functions in EmitC tests.  They
+    // can call several kernel functions that are analyzed independently by this
+    // module pass, so rejecting those calls would incorrectly forbid the normal
+    // multi-kernel entry shape.  The unsafe case is a non-inlined call from
+    // inside an actual kernel body, where the caller-side signal/fence cannot
+    // see payload actions hidden in the callee.
+    if (func->hasAttr("pto.entry"))
+      continue;
 
     func.walk([&](func::CallOp call) {
       func::FuncOp callee = lookupCallee(call);

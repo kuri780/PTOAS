@@ -276,12 +276,29 @@ payload 时可能遇到的 stale cache。
 
 ## 7. PyPTO 生成建议
 
-PyPTO 需要在 payload publish 边界显式生成 CMO 和 fence。
+PyPTO 需要在 payload publish 和 signal acquire 边界显式生成 CMO 和 fence。PTOAS
+只负责把这些语义边界 lower 到目标 backend，并在 release fence 前补齐本地 pipe drain。
 
 PyPTO 不需要手动生成 `pto.barrier #pto.pipe<PIPE_MTE3>` 或
 `pto.barrier #pto.pipe<PIPE_FIX>`。这是低层 pipe drain 细节，由 PTOAS 根据 release fence
 前的 pending GM write pipe 自动插入。这样可以保证最终顺序是对应 pipe barrier 先于
 `dsb(DSB_DDR)`，不会出现先 fence、后 drain 的错误顺序。
+
+PyPTO 生成规则可以按下面的表实现：
+
+| 场景 | PyPTO 需要生成 | PTOAS 自动补齐 |
+| --- | --- | --- |
+| `TStore`、`TStoreFP` 或 `TPUT` 后发布 signal | `pto.fence.release #pto.fence_scope<ddr>` | `PIPE_MTE3` 或 `PIPE_FIX` drain |
+| cacheable scalar GM store 后发布 signal | `pto.cmo.clean all #pto.address_space<gm>`，然后 `pto.fence.release #pto.fence_scope<ddr>` | 无 pipe drain，除非前面还有 pending MTE3/FIX write |
+| `TLoad` 后发布 signal | 不需要显式 fence | `PIPE_MTE2` drain |
+| `TWait` 后读取 cacheable scalar GM payload | `pto.cmo.invalidate all #pto.address_space<gm>` | 无 |
+| `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 `pto.cmo.invalidate all #pto.address_space<gm>` | 无 |
+
+`pto.entry` launcher 可以调用多个 kernel 函数；每个 kernel 函数会被
+`pto-memory-consistency` 独立分析。kernel body 内部若通过 `func.call` 调用包含 payload
+访问、CMO、fence 或 signal op 的 helper，PyPTO 应在 `pto-memory-consistency` 前将 helper
+inline，或者把 payload、CMO、fence 和 signal 保持在同一个 caller 中。否则 pass 会报错，
+避免 caller 侧 `TNotify` 或 `TWait` 看不到 callee 内部的 memory-consistency 状态。
 
 ### 7.1 TPUT 发布 signal
 

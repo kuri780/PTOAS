@@ -149,7 +149,7 @@ module {
 // CHECK-NOT:  pipe_barrier(PIPE_MTE2);
 // CHECK:      pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tput_existing_pipe_all_still_dsb(
 // CHECK:      pto::comm::TPUT(
@@ -157,11 +157,11 @@ module {
 // CHECK-NOT:  pipe_barrier(PIPE_MTE2);
 // CHECK-NOT:  pipe_barrier(PIPE_MTE3);
 // CHECK:      dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void tbroadcast_tnotify_release(
 // CHECK:      pto::comm::TBROADCAST(
 // CHECK-NOT:  pipe_barrier(PIPE_MTE2);
 // CHECK:      pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(

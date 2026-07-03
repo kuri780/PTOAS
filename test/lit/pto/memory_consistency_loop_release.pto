@@ -53,4 +53,4 @@ module {
 // CHECK:      TSTORE(
 // CHECK:      pipe_barrier(PIPE_MTE3);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(

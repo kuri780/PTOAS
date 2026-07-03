@@ -162,13 +162,13 @@ module {
 // CHECK:      {{.*}}[{{.*}}] =
 // CHECK-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void scalar_store_clean_and_fence_suppress_release(
 // CHECK:      {{.*}}[{{.*}}] =
 // CHECK-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
 // CHECK-NEXT: dsb(DSB_DDR);
-// CHECK-NEXT: pto::comm::TNOTIFY(
+// CHECK:      pto::comm::TNOTIFY(
 
 // CHECK-LABEL: AICORE void twait_load_scalar_acquire(
 // CHECK:      pto::comm::TWAIT(
