@@ -41,7 +41,7 @@ module {
     scf.for %i = %c0 to %c2 step %c1 {
       pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
                  outs(%dst : !pto.partition_tensor_view<1x32xf32>)
-      pto.fence.barrier_all #pto.fence_scope<ddr>
+      pto.fence.barrier_all #pto.fence_scope<gm>
       pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
           {notifyOp = #pto<notify_op set>}
     }

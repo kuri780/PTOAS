@@ -45,7 +45,7 @@ module {
       !pto.partition_tensor_view<8x64xf32>,
       !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
       {atomicType = #pto<atomic_type atomic_none>}
-    pto.fence.barrier_all #pto.fence_scope<ddr>
+    pto.fence.barrier_all #pto.fence_scope<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
@@ -90,7 +90,7 @@ module {
       !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
       {atomicType = #pto<atomic_type atomic_none>}
     pto.barrier <PIPE_ALL>
-    pto.fence.barrier_all #pto.fence_scope<ddr>
+    pto.fence.barrier_all #pto.fence_scope<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
@@ -131,7 +131,7 @@ module {
         !pto.partition_tensor_view<1x32xf32>,
         !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>,
         !pto.partition_tensor_view<1x32xf32>) {root = 0 : i32}
-    pto.fence.barrier_all #pto.fence_scope<ddr>
+    pto.fence.barrier_all #pto.fence_scope<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>

@@ -6,53 +6,15 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Signal/payload memory-consistency regressions for cacheable scalar GM paths.
-// These are correctness checks, not precise range-clean performance tests.
+// Signal/payload memory-consistency regressions for the two public IRs kept by
+// this PR: GM fence and cache invalidation.
 
 // RUN: ptoas --pto-arch=a3 %s -o - 2>&1 | FileCheck %s
 
 module {
-  func.func @scalar_store_tnotify_release(
-      %payload_ptr: !pto.ptr<i32>,
-      %signal_ptr: !pto.ptr<i32>)
+  func.func @explicit_gm_fence_acquire()
       attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %v_i32 = arith.constant 7 : i32
-
-    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    pto.cmo.clean all #pto.address_space<gm>
-    pto.fence.barrier_all #pto.fence_scope<ddr>
-
-    %sig_view = pto.make_tensor_view %signal_ptr,
-      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
-    %sig = pto.partition_view %sig_view,
-      offsets = [%c0], sizes = [%c1]
-      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
-    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
-        {notifyOp = #pto<notify_op set>}
-    return
-  }
-
-  func.func @scalar_store_clean_and_fence_suppress_release(
-      %payload_ptr: !pto.ptr<i32>,
-      %signal_ptr: !pto.ptr<i32>)
-      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %v_i32 = arith.constant 7 : i32
-
-    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    pto.cmo.clean all #pto.address_space<gm>
-    pto.fence.barrier_all #pto.fence_scope<ddr>
-
-    %sig_view = pto.make_tensor_view %signal_ptr,
-      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
-    %sig = pto.partition_view %sig_view,
-      offsets = [%c0], sizes = [%c1]
-      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
-    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
-        {notifyOp = #pto<notify_op set>}
+    pto.fence.barrier_all #pto.fence_scope<gm>
     return
   }
 
@@ -75,35 +37,6 @@ module {
     pto.cmo.cacheinvalid all #pto.address_space<gm>
     %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
     pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    return
-  }
-
-  func.func @twait_user_invalidate_suppresses_acquire(
-      %payload_ptr: !pto.ptr<i32>,
-      %signal_ptr: !pto.ptr<i32>)
-      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %v_i32 = arith.constant 1 : i32
-
-    %sig_view = pto.make_tensor_view %signal_ptr,
-      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
-    %sig = pto.partition_view %sig_view,
-      offsets = [%c0], sizes = [%c1]
-      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
-    pto.comm.twait(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
-        {cmp = #pto<wait_cmp ge>}
-
-    pto.cmo.cacheinvalid all #pto.address_space<gm>
-    %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
-    pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    return
-  }
-
-  func.func @explicit_fence_acquire(
-      %signal_ptr: !pto.ptr<i32>)
-      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
-    pto.fence.barrier_all #pto.fence_scope<ddr>
     return
   }
 
@@ -130,68 +63,17 @@ module {
     }
     return
   }
-
-  func.func @dirty_store_before_acquire_is_cleaned(
-      %payload_ptr: !pto.ptr<i32>,
-      %signal_ptr: !pto.ptr<i32>)
-      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %v_i32 = arith.constant 3 : i32
-
-    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    pto.cmo.clean all #pto.address_space<gm>
-    pto.fence.barrier_all #pto.fence_scope<ddr>
-
-    %sig_view = pto.make_tensor_view %signal_ptr,
-      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
-    %sig = pto.partition_view %sig_view,
-      offsets = [%c0], sizes = [%c1]
-      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
-    pto.comm.twait(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
-        {cmp = #pto<wait_cmp ge>}
-
-    pto.cmo.cacheinvalid all #pto.address_space<gm>
-    %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
-    pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
-    return
-  }
 }
 
-// CHECK-LABEL: AICORE void scalar_store_tnotify_release(
-// CHECK:      {{.*}}[{{.*}}] =
-// CHECK-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
-// CHECK-NEXT: dsb(DSB_DDR);
-// CHECK:      pto::comm::TNOTIFY(
-
-// CHECK-LABEL: AICORE void scalar_store_clean_and_fence_suppress_release(
-// CHECK:      {{.*}}[{{.*}}] =
-// CHECK-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
-// CHECK-NEXT: dsb(DSB_DDR);
-// CHECK:      pto::comm::TNOTIFY(
+// CHECK-LABEL: AICORE void explicit_gm_fence_acquire(
+// CHECK:      dsb(DSB_DDR);
 
 // CHECK-LABEL: AICORE void twait_load_scalar_acquire(
 // CHECK:      pto::comm::TWAIT(
 // CHECK:      dcci((__gm__ void*)0, ENTIRE_DATA_CACHE);
 // CHECK:      {{.*}} = {{.*}}[{{.*}}];
 
-// CHECK-LABEL: AICORE void twait_user_invalidate_suppresses_acquire(
-// CHECK:      pto::comm::TWAIT(
-// CHECK-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE);
-// CHECK:      {{.*}} = {{.*}}[{{.*}}];
-
-// CHECK-LABEL: AICORE void explicit_fence_acquire(
-// CHECK:      dsb(DSB_DDR);
-
 // CHECK-LABEL: AICORE void ttest_load_scalar_conservative_acquire(
 // CHECK:      pto::comm::TTEST(
-// CHECK:      dcci((__gm__ void*)0, ENTIRE_DATA_CACHE);
-// CHECK:      {{.*}} = {{.*}}[{{.*}}];
-
-// CHECK-LABEL: AICORE void dirty_store_before_acquire_is_cleaned(
-// CHECK:      {{.*}}[{{.*}}] =
-// CHECK:      dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
-// CHECK-NEXT: dsb(DSB_DDR);
-// CHECK:      pto::comm::TWAIT(
 // CHECK:      dcci((__gm__ void*)0, ENTIRE_DATA_CACHE);
 // CHECK:      {{.*}} = {{.*}}[{{.*}}];

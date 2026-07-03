@@ -5337,7 +5337,8 @@ struct PTOFenceToEmitC : public OpConversionPattern<FenceOp> {
   LogicalResult matchAndRewrite(FenceOp op, typename FenceOp::Adaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     (void)adaptor;
-    if (op.getScope().getScope() != pto::FenceScope::DDR)
+    if (op.getScope().getScope() != pto::FenceScope::GM &&
+        op.getScope().getScope() != pto::FenceScope::All)
       return rewriter.notifyMatchFailure(op, "unsupported fence scope");
 
     emitDsbDdr(rewriter, op.getLoc());
@@ -6502,18 +6503,6 @@ struct PTOTAssignToEmitC : public OpConversionPattern<pto::TAssignOp> {
 // pto.load_scalar / pto.store_scalar lowering -> ptr[offset]
 //===----------------------------------------------------------------------===//
 
-static void emitCleanGmCache(ConversionPatternRewriter &rewriter,
-                             Location loc) {
-  auto *ctx = rewriter.getContext();
-  auto args = rewriter.getArrayAttr({
-      emitc::OpaqueAttr::get(ctx, "(__gm__ void*)0"),
-      emitc::OpaqueAttr::get(ctx, "ENTIRE_DATA_CACHE"),
-      emitc::OpaqueAttr::get(ctx, "CACHELINE_OUT"),
-  });
-  rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "dcci", args,
-                                       ArrayAttr{}, ValueRange{});
-}
-
 static void emitInvalidateGmCache(ConversionPatternRewriter &rewriter,
                                   Location loc) {
   auto *ctx = rewriter.getContext();
@@ -6528,20 +6517,6 @@ static void emitInvalidateGmCache(ConversionPatternRewriter &rewriter,
 static bool isGmCmoSpace(pto::AddressSpace space) {
   return space == pto::AddressSpace::GM || space == pto::AddressSpace::Zero;
 }
-
-struct PTOCmoCleanToEmitC : public OpConversionPattern<pto::CmoCleanOp> {
-  using OpConversionPattern<pto::CmoCleanOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(pto::CmoCleanOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    (void)adaptor;
-    if (!isGmCmoSpace(op.getSpace().getAddressSpace()))
-      return rewriter.notifyMatchFailure(op, "unsupported CMO clean space");
-    emitCleanGmCache(rewriter, op.getLoc());
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
 
 struct PTOCmoCacheInvalidToEmitC
     : public OpConversionPattern<pto::CmoCacheInvalidOp> {
@@ -13845,7 +13820,6 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
     PTOTGemvMXBiasToTGEMV_MX,
     PTOBarrierToEmitC,
     PTOFenceToEmitC<pto::FenceBarrierAllOp>,
-    PTOCmoCleanToEmitC,
     PTOCmoCacheInvalidToEmitC
   >(typeConverter, ctx);
 

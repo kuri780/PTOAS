@@ -21,14 +21,12 @@ def main() -> None:
         pto.register_dialect(ctx, load=True)
         module = Module.create()
         with InsertionPoint(module.body):
-            pto.CmoCleanOp(pto.AddressSpace.GM)
             pto.CmoCacheInvalidOp(pto.AddressSpace.GM)
-            pto.FenceBarrierAllOp(pto.FenceScope.DDR)
+            pto.FenceBarrierAllOp(pto.FenceScope.GM)
 
         text = str(module)
-        assert_contains(text, "pto.cmo.clean all <gm>")
         assert_contains(text, "pto.cmo.cacheinvalid all <gm>")
-        assert_contains(text, "pto.fence.barrier_all <ddr>")
+        assert_contains(text, "pto.fence.barrier_all <gm>")
 
     print("memory_consistency_bindings: PASS")
 

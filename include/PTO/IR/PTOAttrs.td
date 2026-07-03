@@ -302,11 +302,15 @@ def PTO_MemBarAttr : PTO_Attr<"MemBar", "membar"> {
   }];
 }
 
-def PTO_FENCE_SCOPE_DDR : I32EnumAttrCase<"DDR", 0, "ddr">;
+def PTO_FENCE_SCOPE_LOCAL_MEMORY : I32EnumAttrCase<"LocalMemory", 0, "local_memory">;
+def PTO_FENCE_SCOPE_GM : I32EnumAttrCase<"GM", 1, "gm">;
+def PTO_FENCE_SCOPE_ALL : I32EnumAttrCase<"All", 2, "all">;
 
 def PTO_FenceScopeEnum : PTO_I32Enum<
   "FenceScope", "PTO memory fence scope", [
-    PTO_FENCE_SCOPE_DDR
+    PTO_FENCE_SCOPE_LOCAL_MEMORY,
+    PTO_FENCE_SCOPE_GM,
+    PTO_FENCE_SCOPE_ALL
   ]>;
 
 def PTO_FenceScopeAttr : PTO_Attr<"FenceScope", "fence_scope"> {

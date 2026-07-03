@@ -2816,18 +2816,6 @@ def BarrierOp : PTO_Op<"barrier"> {
   let assemblyFormat = "$pipe attr-dict";
 }
 
-def CmoCleanOp : PTO_Op<"cmo.clean"> {
-  let summary = "Clean cache lines for a memory space";
-  let description = [{
-    Cache maintenance operation that writes dirty cache lines back to the
-    specified memory space. The first version supports whole-cache GM clean and
-    lowers to `dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT)`.
-  }];
-
-  let arguments = (ins PTO_AddressSpaceAttr:$space);
-  let assemblyFormat = "`all` $space attr-dict";
-}
-
 def CmoCacheInvalidOp : PTO_Op<"cmo.cacheinvalid"> {
   let summary = "Invalidate cache lines for a memory space";
   let description = [{
@@ -2845,7 +2833,7 @@ def FenceBarrierAllOp : PTO_Op<"fence.barrier_all"> {
   let description = [{
     Memory fence for a visibility scope. Around signal/payload communication it
     can be used as the producer-side publish barrier or the consumer-side
-    acquire barrier depending on placement. `scope = ddr` lowers to
+    acquire barrier depending on placement. `scope = gm` lowers to
     `dsb(DSB_DDR)`.
   }];
 

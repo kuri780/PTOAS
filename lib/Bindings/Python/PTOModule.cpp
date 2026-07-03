@@ -142,7 +142,9 @@ static void bindPTOModule(pybind11::module &m) {
     .value("SCALING", mlir::pto::AddressSpace::SCALING)
     .export_values();
     py::enum_<mlir::pto::FenceScope>(m, "FenceScope")
-    .value("DDR", mlir::pto::FenceScope::DDR)
+    .value("LocalMemory", mlir::pto::FenceScope::LocalMemory)
+    .value("GM", mlir::pto::FenceScope::GM)
+    .value("All", mlir::pto::FenceScope::All)
     .export_values();
     py::enum_<mlir::pto::BLayout>(m, "BLayout")
     .value("RowMajor", mlir::pto::BLayout::RowMajor)

@@ -74,8 +74,8 @@ static bool shouldEncodeViaGenericV0CompatibilityShim(mlir::Operation &op) {
     return static_cast<bool>(tci.getTmp());
   if (auto trowexpandadd = llvm::dyn_cast<mlir::pto::TRowExpandAddOp>(&op))
     return static_cast<bool>(trowexpandadd.getTmp());
-  if (llvm::isa<mlir::pto::CmoCleanOp, mlir::pto::CmoCacheInvalidOp,
-                mlir::pto::FenceBarrierAllOp>(&op))
+  if (llvm::isa<mlir::pto::CmoCacheInvalidOp, mlir::pto::FenceBarrierAllOp>(
+          &op))
     return true;
   return false;
 }

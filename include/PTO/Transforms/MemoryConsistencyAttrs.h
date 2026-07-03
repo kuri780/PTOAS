@@ -18,14 +18,6 @@ inline constexpr llvm::StringLiteral kTNotifyDrainMte2AttrName =
     "__pto.emitc.tnotify_drain_mte2";
 inline constexpr llvm::StringLiteral kTNotifyDrainMte3AttrName =
     "__pto.emitc.tnotify_drain_mte3";
-inline constexpr llvm::StringLiteral kTNotifyDsbDdrAttrName =
-    "__pto.emitc.tnotify_dsb_ddr";
-inline constexpr llvm::StringLiteral kTNotifyCleanGmCacheAttrName =
-    "__pto.emitc.tnotify_clean_gm_cache";
-inline constexpr llvm::StringLiteral kAcquireCleanGmCacheAttrName =
-    "__pto.emitc.acquire_clean_gm_cache";
-inline constexpr llvm::StringLiteral kAcquireDsbDdrAttrName =
-    "__pto.emitc.acquire_dsb_ddr";
 inline constexpr llvm::StringLiteral kAcquireInvalidateGmCacheAttrName =
     "__pto.emitc.acquire_invalidate_gm_cache";
 
