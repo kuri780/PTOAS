@@ -1337,15 +1337,17 @@ for (int i = 0; i < N; i++)
 **Example — pto.vcgadd (group reduction per VLane) semantics:**
 
 ```c
-int K = N / 8;  // elements per VLane
+int groups = 8;
+int K = 32 / sizeof(T);  // elements per 32-byte VLane
 for (int g = 0; g < 8; g++) {
     T sum = 0;
     for (int i = 0; i < K; i++)
-        sum += src[g*K + i];
-    dst[g*K] = sum;
-    for (int i = 1; i < K; i++)
-        dst[g*K + i] = 0;
+        if (mask[g*K + i])
+            sum += src[g*K + i];
+    dst[g] = sum;
 }
+for (int i = groups; i < N; i++)
+    dst[i] = 0;
 ```
 
 For A5 reduction result types:
