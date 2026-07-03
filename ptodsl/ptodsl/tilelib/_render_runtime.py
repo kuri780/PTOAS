@@ -30,7 +30,7 @@ from .metadata import ScalarSpec, TileSpec, VectorSpec, ViewSpec, scalar_descrip
 from .._ast_rewrite import rewrite_jit_function
 from .._bootstrap import make_context
 from .._surface_types import Tile
-from .._surface_values import TileValue
+from .._surface_values import PartitionTensorViewValue, TensorViewValue, TileValue
 from .._tracing import KernelModuleSpec, ModuleStyle, TracingRuntime
 from .._tracing.active import activate_runtime, activate_session
 from .._surface_values import wrap_surface_value
@@ -149,7 +149,21 @@ class _TemplateTrace(TracingRuntime):
                 bound.append(_TemplateTile(arg, spec))
             elif isinstance(spec, ScalarSpec):
                 bound.append(wrap_surface_value(arg))
-            elif isinstance(spec, (ViewSpec, VectorSpec)):
+            elif isinstance(spec, ViewSpec):
+                root = TensorViewValue(
+                    arg,
+                    shape=tuple(spec.shape),
+                    strides=tuple(spec.strides) if spec.strides is not None else None,
+                )
+                bound.append(
+                    PartitionTensorViewValue(
+                        arg,
+                        root_tensor_view=root,
+                        offsets=tuple(0 for _ in spec.shape),
+                        sizes=tuple(spec.shape),
+                    )
+                )
+            elif isinstance(spec, VectorSpec):
                 bound.append(wrap_surface_value(arg))
             else:
                 raise TypeError(f"unsupported operand spec {type(spec).__name__}")

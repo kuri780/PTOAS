@@ -677,6 +677,21 @@ def infer_ptr_type_from_surface_value(surface_value):
     if part_type is not None:
         return _resolve(ptr(part_type.element_type, "gm"))
 
+    try:
+        memref_type = MemRefType(value_type)
+    except Exception:
+        memref_type = None
+    if memref_type is not None:
+        space_attr = memref_type.memory_space
+        space_enum = "gm"
+        if space_attr is not None:
+            space_value = getattr(space_attr, "value", None)
+            if space_value is not None:
+                space_enum = _ADDRESS_SPACE_VALUE_TO_KEYWORD.get(space_value, "gm")
+            else:
+                space_enum = str(space_attr).split("<")[-1].rstrip(">")
+        return _resolve(ptr(memref_type.element_type, space_enum))
+
     tile_type = _maybe_cast_tile_buf_type(value_type)
     if tile_type is None:
         raise TypeError("as_ptr() expects a Tile, TensorView, or PartitionTensorView surface value")
