@@ -5,26 +5,14 @@
 // THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
-
-#ifndef PTO_IR_PTOTYPEUTILS_H
-#define PTO_IR_PTOTYPEUTILS_H
-
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Operation.h"
-
-namespace mlir::pto {
-
-bool isPTOFloat8Type(Type t);
-bool isPTOHiFloat8Type(Type t);
-bool isPTOF8E8M0Type(Type t);
-bool isPTOHiFloat8x2Type(Type t);
-bool isPTOFloat4PackedType(Type t);
-bool isPTOPackedFloatVectorType(Type t);
-bool isPTOLowPrecisionType(Type t);
-
-unsigned getPTOStorageElemBitWidth(Type t);
-unsigned getPTOStorageElemByteSize(Type t);
-
-} // namespace mlir::pto
-
-#endif // PTO_IR_PTOTYPEUTILS_H
+#ifndef __VEC_SCOPE__
+#define __VEC_SCOPE__
+#endif
+#include <stdint.h>
+#ifndef __CPU_SIM
+#include "acl/acl.h"
+#endif
+extern "C" __global__ [aicore] void simt_vector_ldg_stg_f16x2_core_kernel(__gm__ half *v1);
+void LaunchSimt_vector_ldg_stg_f16x2_core_kernel(uint16_t *v1, void *stream) {
+  simt_vector_ldg_stg_f16x2_core_kernel<<<1, nullptr, stream>>>((__gm__ half *)v1);
+}

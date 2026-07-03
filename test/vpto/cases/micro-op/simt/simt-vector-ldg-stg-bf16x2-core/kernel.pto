@@ -1,0 +1,80 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Vector ldg/stg test (bf16x2): 2 lanes, each lane loads two bf16x2 vectors from
+// region A and two from region B, adds them element-wise, and stores the
+// results to region C.  All memory regions share a single buffer.
+//
+// Buffer layout (in vector<2xbf16> indices, 24 bf16s = 12 vectors total):
+//   A[0..3]: input A  (lane 0 → {0,1}, lane 1 → {2,3})
+//   B[4..7]: input B  (lane 0 → {4,5}, lane 1 → {6,7})
+//   C[8..11]: output (lane 0 → {8,9}, lane 1 → {10,11})
+//
+// Lane computation: C[base+8] = A[base] + B[base+4]
+//                   C[base+9] = A[base+1] + B[base+5]
+// where base = laneid * 2
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @simt_vector_ldg_stg_bf16x2_core_kernel(%buf: !pto.ptr<vector<2xbf16>, gm>) attributes {pto.aicore} {
+    %dim_z = arith.constant 1 : i32
+    %dim_y = arith.constant 1 : i32
+    %dim_x = arith.constant 2 : i32
+
+    pto.simt_launch @simt_vector_ldg_stg_bf16x2_core_body<<<%dim_x, %dim_y, %dim_z>>>(%buf)
+      : (!pto.ptr<vector<2xbf16>, gm>) -> ()
+
+    pto.barrier #pto.pipe<PIPE_ALL>
+    return
+  }
+
+  func.func @simt_vector_ldg_stg_bf16x2_core_body(%buf: !pto.ptr<vector<2xbf16>, gm>) attributes {pto.simt_entry} {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    %c4 = arith.constant 4 : i32
+    %c8 = arith.constant 8 : i32
+
+    %laneid = pto.get_laneid : i32
+
+    // base = laneid * 2  (vector offset into each region)
+    %base = arith.muli %laneid, %c2 : i32
+
+    // A offsets: base, base + 1
+    %a1_off = arith.addi %base, %c1 : i32
+
+    // B offsets: base + 4, base + 5
+    %b0_off = arith.addi %base, %c4 : i32
+    %b1_off = arith.addi %b0_off, %c1 : i32
+
+    // C offsets: base + 8, base + 9
+    %c0_off = arith.addi %base, %c8 : i32
+    %c1_off = arith.addi %c0_off, %c1 : i32
+
+    // Cast to index
+    %idx_a0 = arith.index_castui %base : i32 to index
+    %idx_a1 = arith.index_castui %a1_off : i32 to index
+    %idx_b0 = arith.index_castui %b0_off : i32 to index
+    %idx_b1 = arith.index_castui %b1_off : i32 to index
+    %idx_c0 = arith.index_castui %c0_off : i32 to index
+    %idx_c1 = arith.index_castui %c1_off : i32 to index
+
+    // Operation 0: C[base+8] = A[base] + B[base+4]
+    %a0 = pto.ldg %buf[%idx_a0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
+    %b0 = pto.ldg %buf[%idx_b0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
+    %sum0 = arith.addf %a0, %b0 : vector<2xbf16>
+    pto.stg %sum0, %buf[%idx_c0] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm>, vector<2xbf16>
+
+    // Operation 1: C[base+9] = A[base+1] + B[base+5]
+    %a1 = pto.ldg %buf[%idx_a1] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
+    %b1 = pto.ldg %buf[%idx_b1] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm> -> vector<2xbf16>
+    %sum1 = arith.addf %a1, %b1 : vector<2xbf16>
+    pto.stg %sum1, %buf[%idx_c1] l1cache(cache) l2cache(nmfv) : !pto.ptr<vector<2xbf16>, gm>, vector<2xbf16>
+
+    return
+  }
+}

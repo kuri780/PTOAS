@@ -32,6 +32,14 @@ bool mlir::pto::isPTOFloat4PackedType(Type t) {
   return isa<F4E1M2x2Type, F4E2M1x2Type>(t);
 }
 
+bool mlir::pto::isPTOPackedFloatVectorType(Type t) {
+  auto vecType = dyn_cast<VectorType>(t);
+  if (!vecType || vecType.getRank() != 1 || vecType.getDimSize(0) != 2)
+    return false;
+  Type elemType = vecType.getElementType();
+  return elemType.isF16() || elemType.isBF16() || elemType.isF32();
+}
+
 bool mlir::pto::isPTOLowPrecisionType(Type t) {
   return isPTOFloat8Type(t) || isPTOHiFloat8Type(t) || isPTOF8E8M0Type(t) ||
          isPTOHiFloat8x2Type(t) || isPTOFloat4PackedType(t);
