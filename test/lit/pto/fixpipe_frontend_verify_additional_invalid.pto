@@ -1,0 +1,410 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: split-file %s %t
+// RUN: not ptoas --pto-arch=a5 %t/scalar_wrong_family.pto 2>&1 | FileCheck %s --check-prefix=SCALAR_WRONG_FAMILY
+// RUN: not ptoas --pto-arch=a5 %t/vector_wrong_family.pto 2>&1 | FileCheck %s --check-prefix=VECTOR_WRONG_FAMILY
+// RUN: not ptoas --pto-arch=a5 %t/scalar_bad_id.pto 2>&1 | FileCheck %s --check-prefix=SCALAR_BAD_ID
+// RUN: not ptoas --pto-arch=a5 %t/vector_bad_id.pto 2>&1 | FileCheck %s --check-prefix=VECTOR_BAD_ID
+// RUN: not ptoas --pto-arch=a5 %t/vector_wrong_loc.pto 2>&1 | FileCheck %s --check-prefix=VECTOR_WRONG_LOC
+// RUN: not ptoas --pto-arch=a5 %t/scalar_wrong_type.pto 2>&1 | FileCheck %s --check-prefix=SCALAR_WRONG_TYPE
+// RUN: not ptoas --pto-arch=a5 %t/req8_scalar_signless_i8.pto 2>&1 | FileCheck %s --check-prefix=REQ8_SCALAR_SIGNLESS_I8
+// RUN: not ptoas --pto-arch=a5 %t/req8_scalar_mixed_signedness.pto 2>&1 | FileCheck %s --check-prefix=REQ8_MIXED_SIGNEDNESS
+// RUN: not ptoas --pto-arch=a5 %t/req8_vec_signless_i8.pto 2>&1 | FileCheck %s --check-prefix=REQ8_VEC_SIGNLESS_I8
+// RUN: not ptoas --pto-arch=a5 %t/qf322b8_scalar_signless_i8.pto 2>&1 | FileCheck %s --check-prefix=QF322B8_SCALAR_SIGNLESS_I8
+// RUN: not ptoas --pto-arch=a5 %t/qf322b8_scalar_mixed_signedness.pto 2>&1 | FileCheck %s --check-prefix=QF322B8_MIXED_SIGNEDNESS
+// RUN: not ptoas --pto-arch=a5 %t/qf322b8_vec_signless_i8.pto 2>&1 | FileCheck %s --check-prefix=QF322B8_VEC_SIGNLESS_I8
+// RUN: not ptoas --pto-arch=a5 %t/qf322b8_vec_ui8.pto 2>&1 | FileCheck %s --check-prefix=QF322B8_VEC_UI8
+// RUN: not ptoas --pto-arch=a5 %t/duplicate_fixpipe_init_same_id.pto 2>&1 | FileCheck %s --check-prefix=DUPLICATE_FIXPIPE_INIT_SAME_ID
+
+//--- scalar_wrong_family.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %scale = arith.constant 1.0 : f32
+    pto.set_quant_scalar(%scale : f32) {id = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// SCALAR_WRONG_FAMILY: error: 'pto.set_quant_scalar' op expects 'id' = 0 to reference a pipe with scalar quantization mode, but found non-scalar mode
+
+//--- vector_wrong_family.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.set_quant_vector(%fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// VECTOR_WRONG_FAMILY: error: 'pto.set_quant_vector' op expects 'id' = 0 to reference a pipe with vector quantization mode, but found non-vector mode
+
+//--- scalar_bad_id.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %scale = arith.constant 1.0 : f32
+    pto.set_quant_scalar(%scale : f32) {id = 1}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// SCALAR_BAD_ID: error: 'pto.set_quant_scalar' op expects 'id' = 1 to match a frontend or lowered initialize_pipe op in the same function
+
+//--- vector_bad_id.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.set_quant_vector(%fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 1}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// VECTOR_BAD_ID: error: 'pto.set_quant_vector' op expects 'id' = 1 to match a frontend or lowered initialize_pipe op in the same function
+
+//--- vector_wrong_loc.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.set_quant_vector(%fp : !pto.tile_buf<loc=vec, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// VECTOR_WRONG_LOC: error: 'pto.set_quant_vector' op expects 'scaling_tile' to use loc=scaling
+
+//--- scalar_wrong_type.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %scale = arith.constant 1.0 : f16
+    pto.set_quant_scalar(%scale : f16) {id = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// SCALAR_WRONG_TYPE: error: 'pto.set_quant_scalar' op operand #0 must be 32-bit float, but got 'f16'
+
+//--- req8_scalar_signless_i8.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=i8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// REQ8_SCALAR_SIGNLESS_I8: error: 'pto.aiv_initialize_pipe' op expects consumer element type to match acc_push_epilogue.quant req8_scalar
+
+//--- req8_scalar_mixed_signedness.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv0 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=ui8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %recv1 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=si8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// REQ8_MIXED_SIGNEDNESS: error: 'pto.aiv_initialize_pipe' op expects all tpop_from_aic results for fixpipe pipe id = 0 to use the same tile type
+
+//--- req8_vec_signless_i8.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = req8_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=i8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// REQ8_VEC_SIGNLESS_I8: error: 'pto.aiv_initialize_pipe' op expects consumer element type to match acc_push_epilogue.quant req8_vec
+
+//--- qf322b8_scalar_signless_i8.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=i8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// QF322B8_SCALAR_SIGNLESS_I8: error: 'pto.aiv_initialize_pipe' op expects consumer element type to match acc_push_epilogue.quant qf322b8_pre_scalar
+
+//--- qf322b8_scalar_mixed_signedness.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv0 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=ui8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %recv1 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=si8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// QF322B8_MIXED_SIGNEDNESS: error: 'pto.aiv_initialize_pipe' op expects all tpop_from_aic results for fixpipe pipe id = 0 to use the same tile type
+
+//--- qf322b8_vec_signless_i8.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=i8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// QF322B8_VEC_SIGNLESS_I8: error: 'pto.aiv_initialize_pipe' op expects consumer element type to match acc_push_epilogue.quant qf322b8_pre_vec
+
+//--- qf322b8_vec_ui8.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322b8_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=ui8, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// QF322B8_VEC_UI8: error: 'pto.aiv_initialize_pipe' op expects consumer element type to match acc_push_epilogue.quant qf322b8_pre_vec
+
+//--- duplicate_fixpipe_init_same_id.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322bf16_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %scale = arith.constant 1.0 : f32
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.set_quant_scalar(%scale : f32) {id = 0}
+    pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// DUPLICATE_FIXPIPE_INIT_SAME_ID: error: 'pto.aic_initialize_pipe' op requires 'id' to be unique across frontend initialize_pipe ops in the function

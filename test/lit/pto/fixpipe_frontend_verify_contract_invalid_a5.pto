@@ -1,0 +1,301 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: split-file %s %t
+// RUN: not ptoas --pto-arch=a5 %t/scalar_different_block.pto 2>&1 | FileCheck %s --check-prefix=SCALAR_DIFFERENT_BLOCK
+// RUN: not ptoas --pto-arch=a5 %t/vector_different_block.pto 2>&1 | FileCheck %s --check-prefix=VECTOR_DIFFERENT_BLOCK
+// RUN: not ptoas --pto-arch=a5 %t/peer_layout_mismatch.pto 2>&1 | FileCheck %s --check-prefix=PEER_LAYOUT_MISMATCH
+// RUN: not ptoas --pto-arch=a5 %t/peer_quant_mismatch.pto 2>&1 | FileCheck %s --check-prefix=PEER_QUANT_MISMATCH
+// RUN: not ptoas --pto-arch=a5 %t/peer_relu_mismatch.pto 2>&1 | FileCheck %s --check-prefix=PEER_RELU_MISMATCH
+// RUN: not ptoas --pto-arch=a5 %t/peer_consumer_missing_epilogue.pto 2>&1 | FileCheck %s --check-prefix=PEER_CONSUMER_MISSING_EPILOGUE
+// RUN: not ptoas --pto-arch=a5 %t/peer_producer_missing_epilogue.pto 2>&1 | FileCheck %s --check-prefix=PEER_PRODUCER_MISSING_EPILOGUE
+// RUN: not ptoas --pto-arch=a5 %t/consumer_layout_mismatch.pto 2>&1 | FileCheck %s --check-prefix=CONSUMER_LAYOUT_MISMATCH
+// RUN: not ptoas --pto-arch=a5 %t/tpop_two_dtypes_mismatch.pto 2>&1 | FileCheck %s --check-prefix=TPOP_TWO_DTYPES_MISMATCH
+// RUN: not ptoas --pto-arch=a5 %t/tpop_two_layouts_mismatch.pto 2>&1 | FileCheck %s --check-prefix=TPOP_TWO_LAYOUTS_MISMATCH
+
+//--- scalar_different_block.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %true = arith.constant true
+    %scale = arith.constant 1.000000e+00 : f32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.set_quant_scalar(%scale : f32) {id = 0}
+    scf.if %true {
+      pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    }
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// SCALAR_DIFFERENT_BLOCK: error: 'pto.tpush_to_aiv' op expects a preceding pto.set_quant_scalar with id = 0 in the same block
+
+//--- vector_different_block.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %true = arith.constant true
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.set_quant_vector(%fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0}
+    scf.if %true {
+      pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    }
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// VECTOR_DIFFERENT_BLOCK: error: 'pto.tpush_to_aiv' op expects a preceding pto.set_quant_vector with id = 0 in the same block
+
+//--- peer_layout_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2dn, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// PEER_LAYOUT_MISMATCH: error: 'pto.aic_initialize_pipe' op expects acc_push_epilogue.layout to match peer consumer
+
+//--- peer_quant_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = f32_f16, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// PEER_QUANT_MISMATCH: error: 'pto.aic_initialize_pipe' op expects acc_push_epilogue.quant to match peer consumer
+
+//--- peer_relu_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = normal_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// PEER_RELU_MISMATCH: error: 'pto.aic_initialize_pipe' op expects acc_push_epilogue.relu to match peer consumer
+
+//--- peer_consumer_missing_epilogue.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// PEER_CONSUMER_MISSING_EPILOGUE: error: 'pto.aic_initialize_pipe' op expects peer consumer pipe init to also have 'acc_push_epilogue' for fixpipe contract consistency
+
+//--- peer_producer_missing_epilogue.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// PEER_PRODUCER_MISSING_EPILOGUE: error: 'pto.aiv_initialize_pipe' op expects peer producer pipe init to also have 'acc_push_epilogue' for fixpipe contract consistency
+
+//--- consumer_layout_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// CONSUMER_LAYOUT_MISMATCH: error: 'pto.aiv_initialize_pipe' op expects consumer tile layout to match acc_push_epilogue.layout nz2nd
+
+//--- tpop_two_dtypes_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv0 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %recv1 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=bf16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// TPOP_TWO_DTYPES_MISMATCH: error: 'pto.aiv_initialize_pipe' op expects all tpop_from_aic results for fixpipe pipe id = 0 to use the same tile type
+
+//--- tpop_two_layouts_mismatch.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv0 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %recv1 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// TPOP_TWO_LAYOUTS_MISMATCH: error: 'pto.aiv_initialize_pipe' op expects all tpop_from_aic results for fixpipe pipe id = 0 to use the same tile type

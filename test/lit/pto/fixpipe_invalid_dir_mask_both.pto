@@ -1,0 +1,29 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: not ptoas --pto-arch=a5 --pto-level=3 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @bad_dir_mask_both(%c2v_buf: i32, %v2c_buf: i32) attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 3,
+      slot_size = 1024,
+      slot_num = 8,
+      nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<
+        layout = nz2nd,
+        quant = f32_f16,
+        relu = no_relu
+      >
+    } (c2v_consumer_buf = %c2v_buf : i32, v2c_consumer_buf = %v2c_buf : i32)
+    return
+  }
+}
+
+// CHECK: error: 'pto.aic_initialize_pipe' op expects fixpipe pipe (with 'acc_push_epilogue') to have dir_mask = 1 (C2V only)

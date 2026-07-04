@@ -1,0 +1,169 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: split-file %s %t
+// RUN: not ptoas --pto-arch=a5 %t/relu_scalar.pto 2>&1 | FileCheck %s --check-prefix=RELU_SCALAR
+// RUN: not ptoas --pto-arch=a5 %t/relu_vector.pto 2>&1 | FileCheck %s --check-prefix=RELU_VECTOR
+// RUN: not ptoas --pto-arch=a5 %t/relu_pwl.pto 2>&1 | FileCheck %s --check-prefix=RELU_PWL
+// RUN: not ptoas --pto-arch=a5 %t/quant_hif8_vec.pto 2>&1 | FileCheck %s --check-prefix=QUANT_HIF8_VEC
+// RUN: not ptoas --pto-arch=a5 %t/quant_fp8_vec.pto 2>&1 | FileCheck %s --check-prefix=QUANT_FP8_VEC
+// RUN: not ptoas --pto-arch=a5 %t/quant_bf16_vec.pto 2>&1 | FileCheck %s --check-prefix=QUANT_BF16_VEC
+// RUN: not ptoas --pto-arch=a5 %t/quant_f16_vec.pto 2>&1 | FileCheck %s --check-prefix=QUANT_F16_VEC
+// RUN: not ptoas --pto-arch=a5 %t/quant_f32_pre.pto 2>&1 | FileCheck %s --check-prefix=QUANT_F32_PRE
+
+//--- relu_scalar.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = scalar_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// RELU_SCALAR: error: expected ::mlir::pto::FixpipeRelu to be one of: no_relu, normal_relu
+// RELU_SCALAR: error: failed to parse PTO_AccPushEpilogueAttr parameter 'relu' which is to be a `::mlir::pto::FixpipeRelu`
+
+//--- relu_vector.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = vector_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// RELU_VECTOR: error: expected ::mlir::pto::FixpipeRelu to be one of: no_relu, normal_relu
+// RELU_VECTOR: error: failed to parse PTO_AccPushEpilogueAttr parameter 'relu' which is to be a `::mlir::pto::FixpipeRelu`
+
+//--- relu_pwl.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = pwl>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// RELU_PWL: error: expected ::mlir::pto::FixpipeRelu to be one of: no_relu, normal_relu
+// RELU_PWL: error: failed to parse PTO_AccPushEpilogueAttr parameter 'relu' which is to be a `::mlir::pto::FixpipeRelu`
+
+//--- quant_hif8_vec.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = qf322hif8_pre_vec, relu = no_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// QUANT_HIF8_VEC: error: expected ::mlir::pto::FixpipeQuant to be one of:
+// QUANT_HIF8_VEC: error: failed to parse PTO_AccPushEpilogueAttr parameter 'quant' which is to be a `::mlir::pto::FixpipeQuant`
+
+//--- quant_fp8_vec.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = qf322fp8_pre_vec, relu = no_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// QUANT_FP8_VEC: error: expected ::mlir::pto::FixpipeQuant to be one of:
+// QUANT_FP8_VEC: error: failed to parse PTO_AccPushEpilogueAttr parameter 'quant' which is to be a `::mlir::pto::FixpipeQuant`
+
+//--- quant_bf16_vec.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = qf322bf16_pre_vec, relu = no_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// QUANT_BF16_VEC: error: expected ::mlir::pto::FixpipeQuant to be one of:
+// QUANT_BF16_VEC: error: failed to parse PTO_AccPushEpilogueAttr parameter 'quant' which is to be a `::mlir::pto::FixpipeQuant`
+
+//--- quant_f16_vec.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = qf322f16_pre_vec, relu = no_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// QUANT_F16_VEC: error: expected ::mlir::pto::FixpipeQuant to be one of:
+// QUANT_F16_VEC: error: failed to parse PTO_AccPushEpilogueAttr parameter 'quant' which is to be a `::mlir::pto::FixpipeQuant`
+
+//--- quant_f32_pre.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 256,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = qf322f32_pre_scalar, relu = no_relu>
+    } (c2v_consumer_buf = %c0_i32 : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// QUANT_F32_PRE: error: expected ::mlir::pto::FixpipeQuant to be one of:
+// QUANT_F32_PRE: error: failed to parse PTO_AccPushEpilogueAttr parameter 'quant' which is to be a `::mlir::pto::FixpipeQuant`

@@ -1,0 +1,147 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: split-file %s %t
+// RUN: not ptoas --pto-arch=a5 %t/init_sub_blockid.pto 2>&1 | FileCheck %s --check-prefix=INIT_SUBBLOCK
+// RUN: not ptoas --pto-arch=a5 %t/tpush_st_phase.pto 2>&1 | FileCheck %s --check-prefix=TPUSH_STPHASE
+// RUN: not ptoas --pto-arch=a5 %t/tpush_atomic_type.pto 2>&1 | FileCheck %s --check-prefix=TPUSH_ATOMIC
+// RUN: not ptoas --pto-arch=a5 %t/talloc_to_aiv_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TALLOC_AIV
+// RUN: not ptoas --pto-arch=a5 %t/talloc_to_aic_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TALLOC_AIC
+// RUN: not ptoas --pto-arch=a5 %t/tpop_from_aic_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TPOP_AIC
+// RUN: not ptoas --pto-arch=a5 %t/tpop_from_aiv_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TPOP_AIV
+// RUN: not ptoas --pto-arch=a5 %t/tfree_from_aic_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TFREE_AIC
+// RUN: not ptoas --pto-arch=a5 %t/tfree_from_aiv_hidden_attr.pto 2>&1 | FileCheck %s --check-prefix=TFREE_AIV
+// RUN: not ptoas --pto-arch=a5 %t/set_quant_scalar_clip_relu.pto 2>&1 | FileCheck %s --check-prefix=SCALAR_CLIP
+// RUN: not ptoas --pto-arch=a5 %t/set_quant_vector_channel_split.pto 2>&1 | FileCheck %s --check-prefix=VECTOR_CHANNEL
+
+//--- init_sub_blockid.pto
+module {
+  func.func @cube_kernel(%opaque_buf: i32) attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 512,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = no_convert, relu = no_relu>
+    } (c2v_consumer_buf = %opaque_buf : i32,
+       v2c_consumer_buf = %c0_i32 : i32) {subBlockId = 1 : i64}
+    return
+  }
+}
+
+// INIT_SUBBLOCK: error: 'pto.aic_initialize_pipe' op does not allow unpublished fixpipe attr 'subBlockId'
+
+//--- tpush_st_phase.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %acc_tile = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0} {stPhase = #pto<st_phase final>}
+    return
+  }
+}
+
+// TPUSH_STPHASE: error: 'pto.tpush_to_aiv' op does not allow unpublished fixpipe attr 'stPhase'
+
+//--- tpush_atomic_type.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %acc_tile = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0} {atomicType = #pto<atomic_type atomic_none>}
+    return
+  }
+}
+
+// TPUSH_ATOMIC: error: 'pto.tpush_to_aiv' op does not allow unpublished fixpipe attr 'atomicType'
+
+//--- talloc_to_aiv_hidden_attr.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %entry = pto.talloc_to_aiv {id = 0, split = 0} {subBlockId = 1 : i64}
+      -> !pto.tensor_view<16x16xf32>
+    return
+  }
+}
+
+// TALLOC_AIV: error: 'pto.talloc_to_aiv' op does not allow unpublished fixpipe attr 'subBlockId'
+
+//--- talloc_to_aic_hidden_attr.pto
+module {
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %entry = pto.talloc_to_aic {id = 0, split = 0} {stPhase = #pto<st_phase final>}
+      -> !pto.tensor_view<16x16xf32>
+    return
+  }
+}
+
+// TALLOC_AIC: error: 'pto.talloc_to_aic' op does not allow unpublished fixpipe attr 'stPhase'
+
+//--- tpop_from_aic_hidden_attr.pto
+module {
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %recv = pto.tpop_from_aic {id = 0, split = 0} {atomicType = #pto<atomic_type atomic_none>}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    return
+  }
+}
+
+// TPOP_AIC: error: 'pto.tpop_from_aic' op does not allow unpublished fixpipe attr 'atomicType'
+
+//--- tpop_from_aiv_hidden_attr.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %recv = pto.tpop_from_aiv {id = 0, split = 0} {clipReluMode = 1 : i64}
+      -> !pto.tile_buf<loc=mat, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    return
+  }
+}
+
+// TPOP_AIV: error: 'pto.tpop_from_aiv' op does not allow unpublished fixpipe attr 'clipReluMode'
+
+//--- tfree_from_aic_hidden_attr.pto
+module {
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    pto.tfree_from_aic {id = 0, split = 0} {isChannelSplit = true}
+    return
+  }
+}
+
+// TFREE_AIC: error: 'pto.tfree_from_aic' op does not allow unpublished fixpipe attr 'isChannelSplit'
+
+//--- tfree_from_aiv_hidden_attr.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    pto.tfree_from_aiv {id = 0, split = 0} {sub_blockid = 1 : i64}
+    return
+  }
+}
+
+// TFREE_AIV: error: 'pto.tfree_from_aiv' op does not allow unpublished fixpipe attr 'sub_blockid'
+
+//--- set_quant_scalar_clip_relu.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %scale = arith.constant 1.000000e+00 : f32
+    pto.set_quant_scalar(%scale : f32) {id = 0} {clipReluMode = 1 : i64}
+    return
+  }
+}
+
+// SCALAR_CLIP: error: 'pto.set_quant_scalar' op does not allow unpublished fixpipe attr 'clipReluMode'
+
+//--- set_quant_vector_channel_split.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.set_quant_vector(%fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0} {isChannelSplit = true}
+    return
+  }
+}
+
+// VECTOR_CHANNEL: error: 'pto.set_quant_vector' op does not allow unpublished fixpipe attr 'isChannelSplit'

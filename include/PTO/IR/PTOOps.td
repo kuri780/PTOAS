@@ -1752,6 +1752,7 @@ def AicInitializePipeOp : PTO_Op<"aic_initialize_pipe",
       OptionalAttr<I32Attr>:$slot_num,
       OptionalAttr<I32Attr>:$local_slot_num,
       OptionalAttr<BoolAttr>:$nosplit,
+      OptionalAttr<PTO_AccPushEpilogueAttr>:$acc_push_epilogue,
       Optional<PtrType>:$gm_slot_buffer,
       Optional<TensorViewType>:$gm_slot_tensor,
       Optional<I32>:$c2v_consumer_buf,
@@ -1774,6 +1775,7 @@ def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe",
       OptionalAttr<I32Attr>:$slot_num,
       OptionalAttr<I32Attr>:$local_slot_num,
       OptionalAttr<BoolAttr>:$nosplit,
+      OptionalAttr<PTO_AccPushEpilogueAttr>:$acc_push_epilogue,
       Optional<PtrType>:$gm_slot_buffer,
       Optional<TensorViewType>:$gm_slot_tensor,
       Optional<I32>:$c2v_consumer_buf,
@@ -1819,7 +1821,9 @@ def TAllocToAicOp : PTO_TOp<"talloc_to_aic"> {
   }];
 }
 
-def TPushToAivOp : PTO_TOp<"tpush_to_aiv"> {
+def TPushToAivOp : PTO_TOp<"tpush_to_aiv", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
   let summary = "Frontend C2V producer push from Cube to Vector";
 
   let arguments = (ins
@@ -1926,6 +1930,66 @@ def TFreeFromAivOp : PTO_TOp<"tfree_from_aiv"> {
   let assemblyFormat = [{
     (`(` $entry^ `:` qualified(type($entry)) `)`)?
     `{` (`id` `=` $id^ `,`)? `split` `=` $split `}` attr-dict
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Fixpipe Quant Config Ops
+//===----------------------------------------------------------------------===//
+
+def SetQuantScalarOp : PTO_Op<"set_quant_scalar", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Set scalar quantization parameters for fixpipe producer";
+
+  let description = [{
+    Producer-side scalar quantization configuration for fixpipe TPUSH.
+    Binds an f32 scalar quant payload to a logical pipe id.
+    This binding persists until overwritten by another set_quant_scalar with
+    the same id. Used by scalar quant modes: deqf16_scalar, req8_scalar,
+    qf322b8_pre_scalar, qf322f16_pre_scalar, qf322bf16_pre_scalar,
+    qs322bf16_pre_scalar, qf322hif8_pre_scalar, qf322fp8_pre_scalar.
+  }];
+
+  let arguments = (ins
+      F32:$scale,
+      DefaultValuedOptionalAttr<I32Attr, "0">:$id
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $scale `:` type($scale) `)` `{` `id` `=` $id `}` attr-dict
+  }];
+}
+
+def SetQuantVectorOp : PTO_Op<"set_quant_vector", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Set vector quantization parameters for fixpipe producer";
+
+  let description = [{
+    Producer-side vector quantization configuration for fixpipe TPUSH.
+    Binds a vector quant payload (scaling tile) to a logical pipe id.
+    The input tile must have loc=scaling and an element type in the
+    f16/bf16/f32 family. This binding persists until
+    overwritten by another set_quant_vector with the same id.
+    Used by vector quant modes: deqf16_vec, req8_vec, qf322b8_pre_vec,
+    qs322bf16_pre_vec.
+  }];
+
+  let arguments = (ins
+      PTOPipeEntryType:$scaling_tile,
+      DefaultValuedOptionalAttr<I32Attr, "0">:$id
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $scaling_tile `:` qualified(type($scaling_tile)) `)`
+    `{` `id` `=` $id `}` attr-dict
   }];
 }
 
@@ -2252,6 +2316,7 @@ def InitializeL2G2LPipeOp : PTO_Op<"initialize_l2g2l_pipe", [
       OptionalAttr<I32Attr>:$local_slot_num,
       OptionalAttr<I32Attr>:$flag_base,
       OptionalAttr<BoolAttr>:$nosplit,
+      OptionalAttr<PTO_AccPushEpilogueAttr>:$acc_push_epilogue,
       AnyType:$gm_addr,
       Optional<AnyType>:$local_addr,
       Optional<AnyType>:$peer_local_addr
@@ -2286,6 +2351,7 @@ def InitializeL2LPipeOp : PTO_Op<"initialize_l2l_pipe", [
       I32Attr:$slot_num,
       OptionalAttr<I32Attr>:$flag_base,
       OptionalAttr<BoolAttr>:$nosplit,
+      OptionalAttr<PTO_AccPushEpilogueAttr>:$acc_push_epilogue,
       AnyType:$local_addr,
       Optional<AnyType>:$peer_local_addr
   );

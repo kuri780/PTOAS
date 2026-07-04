@@ -1,0 +1,61 @@
+// RUN: ptoas --pto-arch=a5 --emit-pto-ir %s | FileCheck %s
+
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %scale = arith.constant 1.000000e+00 : f32
+    %c2v_import = pto.import_reserved_buffer {
+      name = "c2v_fifo",
+      peer_func = @vector_kernel
+    } -> i32
+
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 512,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = normal_relu>
+    }
+      (c2v_consumer_buf = %c2v_import : i32,
+       v2c_consumer_buf = %c0_i32 : i32)
+
+    %acc_tile = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.set_quant_scalar(%scale : f32) {id = 0}
+    pto.tpush_to_aiv(%acc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {
+      name = "c2v_fifo",
+      size = 4096,
+      location = #pto.address_space<vec>,
+      auto = true
+    } -> i32
+
+    pto.aiv_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 512,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = normal_relu>
+    }
+      (c2v_consumer_buf = %c2v_local : i32,
+       v2c_consumer_buf = %c0_i32 : i32)
+
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// CHECK: pto.initialize_l2l_pipe{dir_mask = 1, slot_size = 512, slot_num = 8, flag_base = 0, nosplit = true} ({{.*}} : i32) {__pto.frontend_id = 0 : i32, __pto.peer_dir_mask = 1 : i8, __pto.peer_owner_func = @vector_kernel, __pto.peer_reserve_name = "c2v_fifo", acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = normal_relu>} -> !pto.pipe
+// CHECK: pto.set_quant_scalar(%{{.*}} : f32) {id = 0}
+// CHECK: pto.tpush(
+// CHECK: pto.initialize_l2l_pipe{dir_mask = 1, slot_size = 512, slot_num = 8, flag_base = 0, nosplit = true} ({{.*}} : i32) {__pto.frontend_id = 0 : i32, __pto.peer_dir_mask = 1 : i8, __pto.peer_owner_func = @vector_kernel, __pto.peer_reserve_name = "c2v_fifo", acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = normal_relu>} -> !pto.pipe
+// CHECK: pto.tpop(
+// CHECK: pto.tfree(

@@ -1218,4 +1218,94 @@ def PTO_TInsertModeAttr : PTO_Attr<"TInsertMode", "tinsert_mode"> {
   let assemblyFormat = "`<` params `>`";
 }
 
+//===----------------------------------------------------------------------===//
+// Fixpipe Layout Mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FixpipeLayout_NZ2ND : I32EnumAttrCase<"NZ2ND", 0, "nz2nd">;
+def PTO_FixpipeLayout_NZ2DN : I32EnumAttrCase<"NZ2DN", 1, "nz2dn">;
+def PTO_FixpipeLayout_NZ2NZ : I32EnumAttrCase<"NZ2NZ", 2, "nz2nz">;
+
+def PTO_FixpipeLayoutEnum : PTO_I32Enum<
+  "FixpipeLayout", "Fixpipe layout mode", [
+    PTO_FixpipeLayout_NZ2ND,
+    PTO_FixpipeLayout_NZ2DN,
+    PTO_FixpipeLayout_NZ2NZ
+  ]>;
+
+//===----------------------------------------------------------------------===//
+// Fixpipe Quant Mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FixpipeQuant_NoConvert : I32EnumAttrCase<"NoConvert", 0, "no_convert">;
+def PTO_FixpipeQuant_F32F16 : I32EnumAttrCase<"F32F16", 1, "f32_f16">;
+def PTO_FixpipeQuant_F32BF16 : I32EnumAttrCase<"F32BF16", 2, "f32_bf16">;
+def PTO_FixpipeQuant_REQ8Scalar : I32EnumAttrCase<"REQ8Scalar", 3, "req8_scalar">;
+def PTO_FixpipeQuant_REQ8Vec : I32EnumAttrCase<"REQ8Vec", 4, "req8_vec">;
+def PTO_FixpipeQuant_DEQF16Scalar : I32EnumAttrCase<"DEQF16Scalar", 5, "deqf16_scalar">;
+def PTO_FixpipeQuant_DEQF16Vec : I32EnumAttrCase<"DEQF16Vec", 6, "deqf16_vec">;
+def PTO_FixpipeQuant_QF322B8PreScalar : I32EnumAttrCase<"QF322B8PreScalar", 7, "qf322b8_pre_scalar">;
+def PTO_FixpipeQuant_QF322B8PreVec : I32EnumAttrCase<"QF322B8PreVec", 8, "qf322b8_pre_vec">;
+def PTO_FixpipeQuant_QF322F16PreScalar : I32EnumAttrCase<"QF322F16PreScalar", 9, "qf322f16_pre_scalar">;
+def PTO_FixpipeQuant_QF322BF16PreScalar : I32EnumAttrCase<"QF322BF16PreScalar", 10, "qf322bf16_pre_scalar">;
+def PTO_FixpipeQuant_QS322BF16PreScalar : I32EnumAttrCase<"QS322BF16PreScalar", 11, "qs322bf16_pre_scalar">;
+def PTO_FixpipeQuant_QS322BF16PreVec : I32EnumAttrCase<"QS322BF16PreVec", 12, "qs322bf16_pre_vec">;
+def PTO_FixpipeQuant_QF322HIF8PreScalar : I32EnumAttrCase<"QF322HIF8PreScalar", 13, "qf322hif8_pre_scalar">;
+def PTO_FixpipeQuant_QF322FP8PreScalar : I32EnumAttrCase<"QF322FP8PreScalar", 14, "qf322fp8_pre_scalar">;
+
+def PTO_FixpipeQuantEnum : PTO_I32Enum<
+  "FixpipeQuant", "Fixpipe quantization mode", [
+    PTO_FixpipeQuant_NoConvert,
+    PTO_FixpipeQuant_F32F16,
+    PTO_FixpipeQuant_F32BF16,
+    PTO_FixpipeQuant_REQ8Scalar,
+    PTO_FixpipeQuant_REQ8Vec,
+    PTO_FixpipeQuant_DEQF16Scalar,
+    PTO_FixpipeQuant_DEQF16Vec,
+    PTO_FixpipeQuant_QF322B8PreScalar,
+    PTO_FixpipeQuant_QF322B8PreVec,
+    PTO_FixpipeQuant_QF322F16PreScalar,
+    PTO_FixpipeQuant_QF322BF16PreScalar,
+    PTO_FixpipeQuant_QS322BF16PreScalar,
+    PTO_FixpipeQuant_QS322BF16PreVec,
+    PTO_FixpipeQuant_QF322HIF8PreScalar,
+    PTO_FixpipeQuant_QF322FP8PreScalar
+  ]>;
+
+//===----------------------------------------------------------------------===//
+// Fixpipe Relu Mode
+//===----------------------------------------------------------------------===//
+
+def PTO_FixpipeRelu_NoRelu : I32EnumAttrCase<"NoRelu", 0, "no_relu">;
+def PTO_FixpipeRelu_NormalRelu : I32EnumAttrCase<"NormalRelu", 1, "normal_relu">;
+
+def PTO_FixpipeReluEnum : PTO_I32Enum<
+  "FixpipeRelu", "Fixpipe ReLU mode", [
+    PTO_FixpipeRelu_NoRelu,
+    PTO_FixpipeRelu_NormalRelu
+  ]>;
+
+//===----------------------------------------------------------------------===//
+// AccPushEpilogue Attribute
+//===----------------------------------------------------------------------===//
+
+def PTO_AccPushEpilogueAttr : PTO_Attr<"AccPushEpilogue", "acc_push_epilogue"> {
+  let summary = "Fixpipe configuration for Acc producer push";
+  let description = [{
+    Per-pipe contract for fixpipe-style TPUSH from Cube Acc to Vector.
+    Contains three independent configuration dimensions:
+    - layout: NZ2ND / NZ2DN / NZ2NZ
+    - quant: quantization mode (no_convert, deqf16_scalar, req8_vec, etc.)
+    - relu: no_relu / normal_relu
+  }];
+
+  let parameters = (ins
+    EnumParameter<PTO_FixpipeLayoutEnum>:$layout,
+    EnumParameter<PTO_FixpipeQuantEnum>:$quant,
+    EnumParameter<PTO_FixpipeReluEnum>:$relu
+  );
+
+  let assemblyFormat = "`<` `layout` `=` $layout `,` `quant` `=` $quant `,` `relu` `=` $relu `>`";
+}
+
 #endif // MLIR_DIALECT_PTO_IR_PTOATTRS

@@ -1,0 +1,63 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: split-file %s %t
+// RUN: not ptoas --pto-arch=a3 %t/qs322bf16_non_a5.pto 2>&1 | FileCheck %s --check-prefix=QS322BF16_NON_A5
+// RUN: not ptoas --pto-arch=a3 %t/fp8_non_a5.pto 2>&1 | FileCheck %s --check-prefix=FP8_NON_A5
+
+//--- qs322bf16_non_a5.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qs322bf16_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 512, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qs322bf16_pre_vec, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=bf16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// QS322BF16_NON_A5: error: 'pto.aic_initialize_pipe' op expects 'qs322bf16_pre_*' quantization modes to be used only on A5 target
+
+//--- fp8_non_a5.pto
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_import = pto.import_reserved_buffer {name = "c2v_fifo", peer_func = @vector_kernel} -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322fp8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %c2v_local = pto.reserve_buffer {name = "c2v_fifo", size = 4096, location = #pto.address_space<vec>, auto = true} -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 256, nosplit = true,
+      acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = qf322fp8_pre_scalar, relu = no_relu>}
+      (c2v_consumer_buf = %c2v_local : i32, v2c_consumer_buf = %c0_i32 : i32)
+    %recv = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f8E4M3FN, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// FP8_NON_A5: error: 'pto.aic_initialize_pipe' op expects 'qf322hif8_pre_scalar'/'qf322fp8_pre_scalar' to be used only on A5 target

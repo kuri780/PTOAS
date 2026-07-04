@@ -503,6 +503,7 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
       UpdateOpGenInfo(curOpInfo, llvm::to_vector(callOp->getOperands()));
       OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (isa<pto::TAllocOp, pto::TPushOp, pto::TFreeOp,
+                   pto::SetQuantScalarOp, pto::SetQuantVectorOp,
                    pto::InitializeL2LPipeOp, pto::InitializeL2G2LPipeOp,
                    pto::BuildAsyncSessionOp,
                    pto::TPutAsyncOp, pto::TGetAsyncOp, pto::TPutOp,

@@ -1,0 +1,82 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+//
+// RUN: ptoas --pto-arch=a5 %s 2>&1 | FileCheck %s --check-prefix=A5
+
+module {
+  func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %scale0 = arith.constant 1.000000e+00 : f32
+    %scale1 = arith.constant 2.500000e+00 : f32
+
+    %c2v_import = pto.import_reserved_buffer {
+      name = "c2v_fifo",
+      peer_func = @vector_kernel
+    } -> i32
+
+    pto.aic_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 512,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>
+    }
+      (c2v_consumer_buf = %c2v_import : i32,
+       v2c_consumer_buf = %c0_i32 : i32)
+
+    %acc0 = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    %acc1 = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    pto.set_quant_scalar(%scale0 : f32) {id = 0}
+    pto.tpush_to_aiv(%acc0 : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+
+    pto.set_quant_scalar(%scale1 : f32) {id = 0}
+    pto.tpush_to_aiv(%acc1 : !pto.tile_buf<loc=acc, dtype=i32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+
+    %c2v_local = pto.reserve_buffer {
+      name = "c2v_fifo",
+      size = 4096,
+      location = #pto.address_space<vec>,
+      auto = true
+    } -> i32
+
+    pto.aiv_initialize_pipe {
+      id = 0,
+      dir_mask = 1,
+      slot_size = 512,
+      nosplit = true,
+      acc_push_epilogue =
+          #pto.acc_push_epilogue<layout = nz2nd, quant = deqf16_scalar, relu = no_relu>
+    }
+      (c2v_consumer_buf = %c2v_local : i32,
+       v2c_consumer_buf = %c0_i32 : i32)
+
+    %recv0 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %recv1 = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 0}
+    pto.tfree_from_aic {id = 0, split = 0}
+    return
+  }
+}
+
+// A5-LABEL: AICORE void cube_kernel(
+// A5-DAG: const float [[SCALE1:.*]] = 2.5f;
+// A5-DAG: const float [[SCALE0:.*]] = 1.0f;
+// A5: using Pipe0FixpipeConfig = FixpipeParams<LayoutMode_t::NZ2ND, QuantMode_t::DEQF16, ReluPreMode::NoRelu>;
+// A5: SET_QUANT_SCALAR<half>([[SCALE0]]);
+// A5-NEXT: TPUSH<{{.*}}, Pipe0FixpipeConfig>(
+// A5: SET_QUANT_SCALAR<half>([[SCALE1]]);
+// A5-NEXT: TPUSH<{{.*}}, Pipe0FixpipeConfig>(

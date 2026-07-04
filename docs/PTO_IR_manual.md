@@ -58,7 +58,11 @@ Element types describe the primitive scalar values that can be stored in tensors
 
 Common element categories include:
 
-- **Integers**: signless integers such as `i1/i8/i16/i32`. Signedness is not encoded in the type; it is selected by operation semantics or attributes where required.
+- **Integers**: signless integers such as `i1/i8/i16/i32`, and, where an op
+  surface requires it, explicitly signed/unsigned integers such as
+  `si8/ui8/si16/ui16/si32/ui32`. Whether an operation accepts only signless
+  integers or also accepts explicit signedness is operation-specific and
+  documented per op family.
 - **Floating-point**: IEEE floating-point types such as `f16/f32`. Some targets may also support additional formats (e.g., `bf16` or low-precision exponent/mantissa formats) with stricter constraints.
 - **Index-like**: index values may appear as scalar operands in certain operations (e.g., offsets, sizes, or scalar comparisons).
 
@@ -1256,7 +1260,19 @@ For each element (i, j) in the tile valid region:
 
 **Type Note (PTO IR):**
 
-- PTO IR uses signless integers. There is no distinct unsigned integer type in verifier rules; documentation strings like `ui8` are represented by signless `i8` in IR type checks.
+- PTO IR is not limited to signless integers. In particular, several current
+  surfaces already use distinct signed/unsigned integer element types such as
+  `ui8`, `si8`, `ui16`, and `ui32`, and verifier rules may depend on that
+  signedness.
+- For this `preQuantScalar` contract, destination element types written below as
+  `i8(ui8)` mean:
+  - signless `i8` remains accepted on legacy surfaces that only constrain width
+    and numeric family
+  - explicit `ui8` is also a first-class PTO IR dtype on surfaces whose
+    semantics depend on unsignedness
+- When a newer contract needs signedness to be user-visible, the manual will
+  call that out explicitly instead of relying on signless `i8` as a synonym for
+  `ui8`.
 
 **Hardware Mapping:**
 

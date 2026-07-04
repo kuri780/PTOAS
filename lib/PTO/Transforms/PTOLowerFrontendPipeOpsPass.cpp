@@ -36,6 +36,11 @@ constexpr int8_t kBidirectionalDirMask = 3;
 constexpr int32_t kSingleDirectionSlotNum = 8;
 constexpr int32_t kBidirectionalSlotNum = 4;
 constexpr llvm::StringLiteral kFrontendPipeIdAttrName = "__pto.frontend_id";
+constexpr llvm::StringLiteral kPipePeerOwnerFuncAttrName =
+    "__pto.peer_owner_func";
+constexpr llvm::StringLiteral kPipePeerReserveNameAttrName =
+    "__pto.peer_reserve_name";
+constexpr llvm::StringLiteral kPipePeerDirMaskAttrName = "__pto.peer_dir_mask";
 constexpr llvm::StringLiteral kGlobalTensorStridesAttrName =
     "__pto.globaltensor_strides";
 
@@ -63,6 +68,42 @@ static void propagateFrontendIdAttr(InitOpT initOp, Operation *pipeOp,
     return;
   pipeOp->setAttr(kFrontendPipeIdAttrName,
                   rewriter.getI32IntegerAttr(initOp.getId()));
+}
+
+template <typename InitOpT>
+static void propagateFixpipePeerKeyAttrs(InitOpT initOp, Operation *pipeOp,
+                                         IRRewriter &rewriter) {
+  if (!pipeOp || !initOp.getAccPushEpilogueAttr() ||
+      initOp.getDirMask() != kC2VDirMask || !initOp.getC2vConsumerBuf())
+    return;
+
+  auto currentFunc = initOp->template getParentOfType<func::FuncOp>();
+  if (!currentFunc)
+    return;
+
+  auto setPeerKeyAttrs = [&](FlatSymbolRefAttr ownerFuncAttr,
+                             StringRef reserveName) {
+    pipeOp->setAttr(kPipePeerOwnerFuncAttrName, ownerFuncAttr);
+    pipeOp->setAttr(kPipePeerReserveNameAttrName,
+                    rewriter.getStringAttr(reserveName));
+    pipeOp->setAttr(kPipePeerDirMaskAttrName,
+                    rewriter.getI8IntegerAttr(kC2VDirMask));
+  };
+
+  if (auto reserveOp =
+          initOp.getC2vConsumerBuf().template getDefiningOp<ReserveBufferOp>()) {
+    setPeerKeyAttrs(FlatSymbolRefAttr::get(currentFunc), reserveOp.getName());
+    return;
+  }
+
+  if (auto importOp = initOp.getC2vConsumerBuf()
+                          .template getDefiningOp<ImportReservedBufferOp>()) {
+    auto peerFunc = lookupPeerFuncAcrossContainer(importOp.getOperation(),
+                                                  importOp.getPeerFuncAttr());
+    if (!peerFunc)
+      return;
+    setPeerKeyAttrs(FlatSymbolRefAttr::get(peerFunc), importOp.getName());
+  }
 }
 
 template <typename InitOpT>
@@ -128,11 +169,13 @@ static FailureOr<Value> createFrontendGlobalTensorPipe(InitOpT initOp,
   auto slotSizeAttr = rewriter.getI32IntegerAttr(initOp.getSlotSize());
   auto slotNumAttr = rewriter.getI32IntegerAttr(slotNum);
   auto noSplitAttr = initOp.getNosplitAttr();
+  auto accPushEpilogueAttr = initOp.getAccPushEpilogueAttr();
   auto pipe = rewriter.create<InitializeL2G2LPipeOp>(
       loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, IntegerAttr{},
-      IntegerAttr{}, noSplitAttr, initOp.getGmSlotTensor(), Value{},
-      Value{});
+      IntegerAttr{}, noSplitAttr, accPushEpilogueAttr, initOp.getGmSlotTensor(),
+      Value{}, Value{});
   propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
+  propagateFixpipePeerKeyAttrs(initOp, pipe.getOperation(), rewriter);
   return pipe.getPipe();
 }
 
@@ -149,6 +192,7 @@ static FailureOr<Value> createFrontendLocalPipe(InitOpT initOp,
   auto slotSizeAttr = rewriter.getI32IntegerAttr(initOp.getSlotSize());
   auto slotNumAttr = rewriter.getI32IntegerAttr(slotNum);
   auto noSplitAttr = initOp.getNosplitAttr();
+  auto accPushEpilogueAttr = initOp.getAccPushEpilogueAttr();
 
   if (arch == PTOArch::A5) {
     if (!localAddr)
@@ -156,8 +200,9 @@ static FailureOr<Value> createFrontendLocalPipe(InitOpT initOp,
           "requires local consumer buffer operands when lowering to a5");
     auto pipe = rewriter.create<InitializeL2LPipeOp>(
         loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, IntegerAttr{},
-        noSplitAttr, localAddr, peerLocalAddr);
+        noSplitAttr, accPushEpilogueAttr, localAddr, peerLocalAddr);
     propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
+    propagateFixpipePeerKeyAttrs(initOp, pipe.getOperation(), rewriter);
     return pipe.getPipe();
   }
 
@@ -172,9 +217,10 @@ static FailureOr<Value> createFrontendLocalPipe(InitOpT initOp,
     localSlotNumAttr = rewriter.getI32IntegerAttr(slotNum);
   auto pipe = rewriter.create<InitializeL2G2LPipeOp>(
       loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, localSlotNumAttr,
-      IntegerAttr{}, noSplitAttr, initOp.getGmSlotBuffer(), localAddr,
-      peerLocalAddr);
+      IntegerAttr{}, noSplitAttr, accPushEpilogueAttr, initOp.getGmSlotBuffer(),
+      localAddr, peerLocalAddr);
   propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
+  propagateFixpipePeerKeyAttrs(initOp, pipe.getOperation(), rewriter);
   return pipe.getPipe();
 }
 
