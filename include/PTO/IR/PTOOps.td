@@ -2817,11 +2817,13 @@ def BarrierOp : PTO_Op<"barrier"> {
 }
 
 def CmoCacheInvalidOp : PTO_Op<"cmo.cacheinvalid"> {
-  let summary = "Invalidate cache lines for a memory space";
+  let summary = "Perform cache maintenance for a memory space";
   let description = [{
-    Cache maintenance operation that invalidates cache lines for the specified
-    memory space. The first version supports whole-cache GM invalidate and
-    lowers to `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)`.
+    Cache maintenance operation for the specified memory space. The first
+    version supports whole-cache GM maintenance and lowers to PTO-ISA's
+    two-argument `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)`.
+    MemoryConsistency interprets it as an explicit CMO boundary on both
+    producer release and consumer acquire paths.
   }];
 
   let arguments = (ins PTO_AddressSpaceAttr:$space);

@@ -26,7 +26,7 @@ signal ready 不等价于 payload 一定已经可见。原因是 signal 和 payl
 | PTO IR | 语义 | EmitC lowering |
 | --- | --- | --- |
 | `pto.fence.barrier_all #pto.fence_scope<gm>` | GM visibility barrier，可用于 publish 或 acquire 边界 | `dsb(DSB_DDR)` |
-| `pto.cmo.cacheinvalid all #pto.address_space<gm>` | 失效 GM 相关 stale cache line | `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)` |
+| `pto.cmo.cacheinvalid all #pto.address_space<gm>` | 显式 GM cache maintenance 边界，可用于 release 或 acquire | `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)` |
 
 对应 PyPTO 写法：
 
@@ -78,21 +78,17 @@ whole-cache 形式：
 dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 ```
 
-它用于 `cmo.cacheinvalid all #pto.address_space<gm>`，让后续 cacheable GM load 不再使用本地
-stale cache line。
+它是 PTOAS 暴露给上游的显式 CMO 边界。虽然 op 名称沿用 `cacheinvalid`，但当前
+PTO-ISA 对齐的 two-argument `dcci` 同时服务两类上下文：
 
-本 PR 不暴露 `pto.cmo.clean`。原因是当前没有在 PTOAS 中确认可靠的 clean/writeback
-IR 语义和精确作用范围。历史 scalar GM store flush 路径保留已有 release 序列，
-但同样对齐 PTO-ISA，只使用 two-argument whole-cache `dcci`：
+- release 侧：放在 cacheable scalar GM store 之后、`fence.barrier_all` 之前，作为发布
+  payload 前的 cache maintenance。
+- acquire 侧：放在 `TWait` 或 `TTest` 之后、cacheable GM load 之前，避免读取本地 stale
+  cache line。
 
-```cpp
-dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
-dsb((mem_dsb_t)0);
-```
-
-这条路径是已有 EmitC scalar store flush 行为，不作为新的 public `pto.cmo.clean`
-契约暴露。因此 cacheable scalar GM store publish 场景暂不在本 PR 支持范围内，pass
-会报错而不是静默生成新的 clean IR。
+本 PR 不新增 `pto.cmo.clean`。原因是当前 release 侧和 acquire 侧都对齐到 PTO-ISA
+two-argument `dcci`，新增一个 lowering 相同的 public op 会让 PyPTO 和用户难以区分。
+后续如果确认需要暴露不同 destination 或精确 writeback 语义，再单独扩展 CMO IR。
 
 ## 4. MemoryConsistency Pass
 
@@ -105,7 +101,7 @@ VPTO backend 都会先经过这一步。
 - 识别 signal acquire 后是否存在 cacheable GM payload read。
 - 校验用户或 PyPTO 是否已经插入必要的 `fence.barrier_all` 或 `cmo.cacheinvalid`。
 - 在显式 `barrier_all` 前自动补齐必要的 MTE3 或 FIX pipe drain。
-- 对缺失、顺序错误或当前 unsupported 的场景报编译错误。
+- 对缺失或顺序错误的场景报编译错误。
 
 这个 pass 不负责分配 event id，也不属于 InsertSync 自动同步流水线。
 
@@ -177,16 +173,27 @@ pto.cmo.cacheinvalid all #pto.address_space<gm>
 
 ### 5.4 Cacheable Scalar GM Store 后发布 Signal
 
-该场景当前暂不支持：
+适用场景：
 
 ```mlir
-pto.store_scalar ...
+pto.store_scalar %value, %payload[%idx] : !pto.ptr<i32>, i32
+pto.cmo.cacheinvalid all #pto.address_space<gm>
+pto.fence.barrier_all #pto.fence_scope<gm>
 pto.comm.tnotify ...
 ```
 
-原因是 publish 前需要可靠的 GM cache clean/writeback 语义，但本 PR 不暴露
-`pto.cmo.clean`。如果 pass 看到 cacheable scalar GM store 后发布 signal，会报错并要求改用
-non-cacheable GM write 路径，或等待后续补齐 clean/writeback ABI。
+最终 EmitC 关键顺序是：
+
+```cpp
+payload[idx] = value;
+dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+dsb(DSB_DDR);
+pto::comm::TNOTIFY(...);
+```
+
+这里 `cmo.cacheinvalid` 表示 publish 前的显式 CMO 边界，`fence.barrier_all` 表示
+GM visibility fence。二者顺序不能交换。如果缺少 `cmo.cacheinvalid`，或者把它放在
+`fence.barrier_all` 后面，PTOAS 会报错。
 
 ## 6. PyPTO 对接说明
 
@@ -203,7 +210,7 @@ PyPTO 生成规则：
 | `TLoad` 后发布 signal | 不需要显式 fence | `PIPE_MTE2` drain |
 | `TWait` 后读取 cacheable scalar GM payload | `pto.cmo.cacheinvalid all #pto.address_space<gm>` | 无 |
 | `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 `pto.cmo.cacheinvalid all #pto.address_space<gm>` | 无 |
-| cacheable scalar GM store 后发布 signal | 当前不支持 | 编译期报错 |
+| cacheable scalar GM store 后发布 signal | `pto.cmo.cacheinvalid all #pto.address_space<gm>`，随后 `pto.fence.barrier_all #pto.fence_scope<gm>` | 无 |
 
 `pto.entry` launcher 可以调用多个 kernel 函数；每个 kernel 函数会被
 `pto-memory-consistency` 独立分析。kernel body 内部若通过 `func.call` 调用包含 payload
@@ -266,6 +273,27 @@ pto.CmoCacheInvalidOp(pto.AddressSpace.GM)
 pto.LoadScalarOp(...)
 ```
 
+### 6.3 Scalar Store 发布 Signal
+
+```mlir
+pto.store_scalar %value, %payload[%idx] : !pto.ptr<i32>, i32
+pto.cmo.cacheinvalid all #pto.address_space<gm>
+pto.fence.barrier_all #pto.fence_scope<gm>
+pto.comm.tnotify ...
+```
+
+对应 PyPTO 写法：
+
+```python
+pto.StoreScalarOp(...)
+pto.CmoCacheInvalidOp(pto.AddressSpace.GM)
+pto.FenceBarrierAllOp(pto.FenceScope.GM)
+pto.TNotifyOp(...)
+```
+
+这对应 cacheable scalar GM store 发布 payload 的场景。`CmoCacheInvalidOp` 和
+`FenceBarrierAllOp` 都是必需的，且顺序必须是 CMO 在 fence 之前。
+
 ## 7. Backend Lowering 状态
 
 ### 7.1 EmitC
@@ -290,7 +318,6 @@ memory-consistency op，需要确认 DSB/DCCI intrinsic ABI 后再接真实 lowe
 ## 8. 当前限制
 
 - `cmo.cacheinvalid` 是 whole-cache 粒度，不是精确地址范围。
-- 不支持 cacheable scalar GM store publish 场景。
 - `TWait` 和 `TTest` acquire 侧当前只覆盖 `load_scalar`。
 - VPTO 暂不支持 CMO 和 GM fence 的真实 lowering。
 - 对复杂 CFG 的分析仍是保守近似，不做完整 path-sensitive 数据流。
@@ -299,6 +326,6 @@ memory-consistency op，需要确认 DSB/DCCI intrinsic ABI 后再接真实 lowe
 
 1. 和 VPTO/Bisheng 对齐 DSB 和 DCCI intrinsic ABI，并补齐 VPTO lowering。
 2. 将 whole-cache `cacheinvalid` 优化成精确 GM address range CMO。
-3. 明确 clean/writeback ABI，再决定是否引入 `pto.cmo.clean`。
+3. 如果后续确认 release writeback 需要不同 destination 或更精确语义，再决定是否引入新的 CMO op。
 4. 扩展 acquire 侧 consumer 范围，从 `load_scalar` 扩展到更多 cacheable GM read。
 5. 将 macro op phase 的 memory descriptor 做得更精细，减少误报。

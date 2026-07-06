@@ -38,14 +38,14 @@ struct TNotifyReleaseState {
   bool drainMte3 = false;
   bool drainFix = false;
   bool needsDsbDdr = false;
-  bool unsupportedCacheableGmStore = false;
+  bool needsGmCacheCmo = false;
 
   void merge(const TNotifyReleaseState &other) {
     drainMte2 |= other.drainMte2;
     drainMte3 |= other.drainMte3;
     drainFix |= other.drainFix;
     needsDsbDdr |= other.needsDsbDdr;
-    unsupportedCacheableGmStore |= other.unsupportedCacheableGmStore;
+    needsGmCacheCmo |= other.needsGmCacheCmo;
   }
 
   void clear() {
@@ -53,7 +53,7 @@ struct TNotifyReleaseState {
     drainMte3 = false;
     drainFix = false;
     needsDsbDdr = false;
-    unsupportedCacheableGmStore = false;
+    needsGmCacheCmo = false;
   }
 
   void applyBarrier(pto::PIPE pipe) {
@@ -80,9 +80,15 @@ struct TNotifyReleaseState {
   void applyFenceBarrierAll(pto::FenceScope scope) {
     if (scope != pto::FenceScope::GM && scope != pto::FenceScope::All)
       return;
-    if (drainMte3 || drainFix || unsupportedCacheableGmStore)
+    if (drainMte3 || drainFix || needsGmCacheCmo)
       return;
     needsDsbDdr = false;
+  }
+
+  void applyCmoCacheInvalid(pto::AddressSpace space) {
+    if (!isGmAddressSpace(space))
+      return;
+    needsGmCacheCmo = false;
   }
 };
 
@@ -101,8 +107,9 @@ struct SignalAcquireState {
   }
 
   void applyCmoCacheInvalid(pto::AddressSpace space) {
-    if (!isGmAddressSpace(space) || dirtyGmCache)
+    if (!isGmAddressSpace(space))
       return;
+    dirtyGmCache = false;
     pendingInvalidateGmCache = false;
   }
 };
@@ -141,6 +148,13 @@ static TNotifyReleaseState getFixGmWriteReleaseState() {
   return state;
 }
 
+static TNotifyReleaseState getCacheableGmStoreReleaseState() {
+  TNotifyReleaseState state;
+  state.needsGmCacheCmo = true;
+  state.needsDsbDdr = true;
+  return state;
+}
+
 static TNotifyReleaseState getReleaseStateForMacroModel(Operation *op) {
   TNotifyReleaseState state;
   auto model = getSyncMacroModel(op);
@@ -163,11 +177,8 @@ static TNotifyReleaseState getDirectTNotifyReleaseState(Operation *op) {
     return {};
 
   if (auto store = dyn_cast<pto::StoreScalarOp>(op)) {
-    if (isGmScalarMemory(store.getPtr().getType())) {
-      TNotifyReleaseState state;
-      state.unsupportedCacheableGmStore = true;
-      return state;
-    }
+    if (isGmScalarMemory(store.getPtr().getType()))
+      return getCacheableGmStoreReleaseState();
   }
 
   if (isa<pto::TLoadOp, pto::TPrefetchOp>(op))
@@ -186,7 +197,7 @@ static TNotifyReleaseState getDirectTNotifyReleaseState(Operation *op) {
 
   TNotifyReleaseState macroState = getReleaseStateForMacroModel(op);
   if (macroState.drainMte3 || macroState.drainFix ||
-      macroState.needsDsbDdr || macroState.unsupportedCacheableGmStore)
+      macroState.needsDsbDdr || macroState.needsGmCacheCmo)
     return macroState;
 
   return {};
@@ -252,6 +263,8 @@ getTNotifyReleaseExitState(Operation *op,
 
   if (auto barrier = dyn_cast<pto::BarrierOp>(op))
     pendingState.applyBarrier(barrier.getPipe().getPipe());
+  if (auto cmo = dyn_cast<pto::CmoCacheInvalidOp>(op))
+    pendingState.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace());
   if (auto fence = dyn_cast<pto::FenceBarrierAllOp>(op))
     applyFenceBarrierAllForSummary(fence, pendingState);
   return pendingState;
@@ -287,7 +300,7 @@ static bool isMemoryConsistencyRelevantDirectOp(Operation *op) {
   TNotifyReleaseState macroState = getReleaseStateForMacroModel(op);
   return macroState.drainMte2 || macroState.drainMte3 ||
          macroState.drainFix || macroState.needsDsbDdr ||
-         macroState.unsupportedCacheableGmStore;
+         macroState.needsGmCacheCmo;
 }
 
 static bool calleeContainsMemoryConsistencyRelevantOps(
@@ -372,12 +385,12 @@ static void setTNotifyPipeDrainAttrs(pto::TNotifyOp op,
 static void diagnoseTNotifyRelease(pto::TNotifyOp op,
                                    const TNotifyReleaseState &state,
                                    bool &hasFailure) {
-  if (state.unsupportedCacheableGmStore) {
+  if (state.needsGmCacheCmo) {
     op.emitOpError()
-        << "cannot publish a signal after cacheable GM scalar stores because "
-           "PTOAS does not yet expose a supported GM cache clean operation; "
-           "use a non-cacheable GM write path or add clean support before "
-           "`pto.fence.barrier_all`";
+        << "requires explicit "
+           "`pto.cmo.cacheinvalid all #pto.address_space<gm>` before "
+           "`pto.fence.barrier_all #pto.fence_scope<gm>` when publishing a "
+           "signal after cacheable GM scalar stores";
     hasFailure = true;
     return;
   }
@@ -473,6 +486,8 @@ annotateTNotifyReleaseForBlock(Block &block,
 
     if (auto barrier = dyn_cast<pto::BarrierOp>(op))
       pendingState.applyBarrier(barrier.getPipe().getPipe());
+    if (auto cmo = dyn_cast<pto::CmoCacheInvalidOp>(op))
+      pendingState.applyCmoCacheInvalid(cmo.getSpace().getAddressSpace());
     if (auto fence = dyn_cast<pto::FenceBarrierAllOp>(op)) {
       insertDrainsBeforeBarrierAll(fence, pendingState);
       pendingState.applyFenceBarrierAll(fence.getScope().getScope());
@@ -517,8 +532,8 @@ static void diagnoseAcquireLoad(pto::LoadScalarOp op,
   if (state.dirtyGmCache) {
     op.emitOpError()
         << "cannot perform a cacheable GM load after signal acquire while "
-           "dirty GM cache may exist, because PTOAS does not yet expose a "
-           "supported GM cache clean operation";
+           "dirty GM cache may exist; insert explicit "
+           "`pto.cmo.cacheinvalid all #pto.address_space<gm>` before the load";
     hasFailure = true;
     return;
   }

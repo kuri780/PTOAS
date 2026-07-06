@@ -63,6 +63,28 @@ module {
     }
     return
   }
+
+  func.func @store_scalar_tnotify_release(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 7 : i32
+
+    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    pto.cmo.cacheinvalid all #pto.address_space<gm>
+    pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op set>}
+    return
+  }
 }
 
 // CHECK-LABEL: AICORE void explicit_gm_fence_acquire(
@@ -77,3 +99,9 @@ module {
 // CHECK:      pto::comm::TTEST(
 // CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CHECK:      {{.*}} = {{.*}}[{{.*}}];
+
+// CHECK-LABEL: AICORE void store_scalar_tnotify_release(
+// CHECK:      {{.*}}[{{.*}}] = {{.*}};
+// CHECK:      dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
+// CHECK-NEXT: dsb(DSB_DDR);
+// CHECK:      pto::comm::TNOTIFY(

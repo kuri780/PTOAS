@@ -40,7 +40,7 @@ module {
     return
   }
 
-  func.func @unsupported_scalar_publish(
+  func.func @missing_scalar_release_cmo(
       %payload_ptr: !pto.ptr<i32>,
       %signal_ptr: !pto.ptr<i32>)
       attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
@@ -50,6 +50,28 @@ module {
 
     pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
     pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op set>}
+    return
+  }
+
+  func.func @scalar_release_cmo_after_fence(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 7 : i32
+
+    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    pto.fence.barrier_all #pto.fence_scope<gm>
+    pto.cmo.cacheinvalid all #pto.address_space<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
@@ -81,8 +103,32 @@ module {
     pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
     return
   }
+
+  func.func @dirty_cache_before_acquire_load(
+      %payload_ptr: !pto.ptr<i32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.twait(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {cmp = #pto<wait_cmp ge>}
+
+    pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    %val = pto.load_scalar %payload_ptr[%c0] : !pto.ptr<i32> -> i32
+    pto.store_scalar %val, %payload_ptr[%c0] : !pto.ptr<i32>, i32
+    return
+  }
 }
 
 // CHECK: requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>`
-// CHECK: cannot publish a signal after cacheable GM scalar stores
-// CHECK: requires explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>`
+// CHECK: requires explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before `pto.fence.barrier_all #pto.fence_scope<gm>`
+// CHECK: requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>`
+// CHECK: requires explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before a cacheable GM load
+// CHECK: dirty GM cache may exist; insert explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before the load
