@@ -694,6 +694,17 @@ def inline_subkernel_scope_probe(*, TRACE_TOKEN: pto.const_expr = 0):
         pto.pipe_barrier(pto.Pipe.ALL)
 
 
+@pto.jit(target="a5", mode="explicit")
+def inline_simt_launch_dims_probe(
+    gm: pto.ptr(pto.i32, "gm"),
+    *,
+    TRACE_TOKEN: pto.const_expr = 0,
+):
+    with pto.simt(32, 2, 1):
+        tid = pto.get_tid_x()
+        pto.stg(tid, gm, scalar.index_cast(tid))
+
+
 @pto.simt
 def simt_tid_probe():
     pto.get_tid_x()
@@ -862,6 +873,50 @@ def ast_subkernel_runtime_for_helper(rows: pto.i32):
 def simt_helper_lowering_probe(*, TRACE_TOKEN: pto.const_expr = 0):
     simt_tid_probe()
     simt_tid_probe()
+
+
+@pto.simt
+def alloc_buffer_local_helper():
+    _ = pto.alloc_buffer((32,), pto.f32)
+
+
+@pto.jit(target="a5", mode="explicit")
+def alloc_buffer_local_probe():
+    alloc_buffer_local_helper()
+
+
+@pto.simt
+def rmsnorm_alloc_buffer_frag_helper(
+    w_ub: pto.ptr(pto.f32, pto.MemorySpace.UB),
+    x_ub: pto.ptr(pto.f32, pto.MemorySpace.UB),
+):
+    _ = pto.get_tid_x()
+    _ = w_ub
+    _ = x_ub
+    _ = pto.alloc_buffer((32,), pto.f32)
+    _ = pto.alloc_buffer((1,), pto.f32)
+
+
+@pto.jit(target="a5", mode="explicit")
+def rmsnorm_alloc_buffer_layout_probe(
+    X: pto.ptr(pto.f32, "gm"),
+    W: pto.ptr(pto.f32, "gm"),
+    Y: pto.ptr(pto.f32, "gm"),
+    RSTD: pto.ptr(pto.f32, "gm"),
+):
+    ub_base = pto.castptr(pto.const(0, dtype=pto.ui64), pto.ptr(pto.f32, "ub"))
+    w_ub = pto.addptr(ub_base, 0)
+    reduce_scratch = pto.addptr(ub_base, 4096)
+    x_ub = pto.addptr(ub_base, 4224)
+    y_ub = pto.addptr(ub_base, 12416)
+    rstd_ub = pto.addptr(ub_base, 20608)
+
+    pto.mte_gm_ub(W, w_ub, 0, 4096 * 4, nburst=(1, 0, 0))
+    pto.mte_gm_ub(X, x_ub, 0, 4096 * 4, nburst=(1, 0, 0))
+    rmsnorm_alloc_buffer_frag_helper(w_ub, x_ub)
+    pto.mte_ub_gm(y_ub, Y, 4096 * 4, nburst=(1, 0, 0))
+    pto.mte_ub_gm(rstd_ub, RSTD, 4, nburst=(1, 0, 0))
+    _ = reduce_scratch
 
 
 @pto.jit(target="a5")
@@ -1561,6 +1616,45 @@ def scalar_pointer_offset_probe():
     _ = row_start
     _ = row_stop
     _ = valid_cols
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_vector_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    x4 = scalar.load(data_ptr, 0, contiguous=4)
+    scale4 = pto.vec(pto.f32, 4, init=1.0)
+    y4 = x4 * scale4
+    scalar.store(y4, data_ptr, 4)
+
+
+@pto.simt
+def scalar_contiguous_local_alloc_buffer_helper():
+    data = pto.alloc_buffer((16,), pto.f32)
+    x4 = scalar.load(data, 0, contiguous=4)
+    scale4 = pto.vec(pto.f32, 4, init=1.0)
+    y4 = x4 * scale4
+    scalar.store(y4, data, 4)
+
+
+@pto.jit(target="a5", mode="explicit")
+def scalar_contiguous_local_alloc_buffer_probe():
+    scalar_contiguous_local_alloc_buffer_helper()
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_width_mismatch_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    x4 = scalar.load(data_ptr, 0, contiguous=4)
+    scalar.store(x4, data_ptr, 4, contiguous=2)
+
+
+@pto.jit(target="a5")
+def scalar_contiguous_scalar_store_probe():
+    data_tile = pto.alloc_tile(shape=[1, 16], dtype=pto.f32, valid_shape=[1, 16])
+    data_ptr = data_tile.as_ptr()
+    scalar.store(1.0, data_ptr, 0, contiguous=4)
 
 
 @pto.jit(target="a5")
@@ -2922,6 +3016,7 @@ def main() -> None:
     fixed_integer_index_coercion_probe.verify()
     integer_loop_bound_probe.verify()
     scalar_pointer_offset_probe.verify()
+    scalar_contiguous_vector_probe.verify()
     addptr_surface_probe.verify()
     simt_pointer_offset_probe.verify()
     scalar_store_element_coercion_probe.verify()
@@ -4110,6 +4205,31 @@ def main() -> None:
         "outlined inline helpers should preserve the authored SIMD/Cube sections and SIMT scalar ops",
     )
 
+    inline_simt_launch_text = inline_simt_launch_dims_probe.compile(TRACE_TOKEN=1).mlir_text()
+    expect_parse_roundtrip_and_verify(inline_simt_launch_text, "inline simt launch-dims specialization")
+    expect(
+        re.search(r"pto\.simt_launch @inline_simt_[0-9]+__ptodsl_[0-9a-f]+<<<", inline_simt_launch_text)
+        is not None,
+        "with pto.simt(dim_x, dim_y, dim_z) should emit VPTO simt_launch sugar",
+    )
+    expect(
+        "pto.store_vfsimt_info" not in inline_simt_launch_text,
+        "with pto.simt(dim_x, dim_y, dim_z) should leave launch metadata to simt_launch expansion",
+    )
+    expect(
+        re.search(
+            r"func\.func @inline_simt_[0-9]+__ptodsl_[0-9a-f]+\(%arg0: !pto\.ptr<i32, gm>\) attributes \{[^}]*pto\.simt_entry[^}]*\}",
+            inline_simt_launch_text,
+        )
+        is not None,
+        "inline SIMT launch-dims helper should capture enclosing values as helper arguments",
+    )
+    expect_raises(
+        TypeError,
+        lambda: pto.simt(32, 1),
+        "expects exactly three",
+    )
+
     simt_text = simt_helper_lowering_probe.compile(TRACE_TOKEN=1).mlir_text()
     expect_parse_roundtrip_and_verify(simt_text, "simt helper lowering specialization")
     expect(
@@ -4141,6 +4261,37 @@ def main() -> None:
     expect("pto.get_tid_x" in simt_text, "SIMT helper body should contain pto.get_tid_x")
     expect("pto.get_tid_y" in simt_text, "SIMT helper body should contain pto.get_tid_y")
     expect("pto.get_tid_z" in simt_text, "SIMT helper body should contain pto.get_tid_z")
+
+    alloc_buffer_local_text = alloc_buffer_local_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(alloc_buffer_local_text, "alloc_buffer local specialization")
+    expect(
+        "llvm.alloca" in alloc_buffer_local_text and "x f32" in alloc_buffer_local_text,
+        "alloc_buffer should lower to an LLVM stack allocation in the SIMT helper",
+    )
+    expect(
+        re.search(
+            r"func\.func @alloc_buffer_local_helper__simt_\d+\(\) attributes \{pto\.simt_entry\}",
+            alloc_buffer_local_text,
+        )
+        is not None,
+        "alloc_buffer probe should keep allocation inside the SIMT helper body",
+    )
+    rmsnorm_alloc_buffer_text = rmsnorm_alloc_buffer_layout_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(rmsnorm_alloc_buffer_text, "RMSNorm hand-authored UB layout specialization")
+    for expected_offset in (4096, 4224, 12416, 20608):
+        expect(
+            f"arith.constant {expected_offset} : index" in rmsnorm_alloc_buffer_text,
+            f"RMSNorm hand-authored UB layout should materialize f32 offset {expected_offset}",
+        )
+    expect(
+        rmsnorm_alloc_buffer_text.count("llvm.alloca") == 2,
+        "RMSNorm alloc_buffer fragment helper should allocate x_frag and sum_sq locally",
+    )
+    expect(
+        re.search(r"call @rmsnorm_alloc_buffer_frag_helper__simt_\d+\(", rmsnorm_alloc_buffer_text)
+        is not None,
+        "RMSNorm alloc_buffer layout should pass UB scratch pointers through the existing SIMT helper call path",
+    )
 
     simt_launch_text = simt_explicit_launch_probe.compile(TRACE_TOKEN=1).mlir_text()
     expect_parse_roundtrip_and_verify(simt_launch_text, "explicit simt launch specialization")
@@ -4817,6 +4968,28 @@ def main() -> None:
     expect(
         re.search(r"pto\.load %\d+\[%c2(?:_\d+)?\]", scalar_pointer_offset_text) is not None,
         "scalar.load(ptr + 2) should lower as element offset 2",
+    )
+
+    scalar_contiguous_text = scalar_contiguous_vector_probe.compile().mlir_text()
+    expect_parse_roundtrip_and_verify(scalar_contiguous_text, "scalar contiguous vector specialization")
+    expect("llvm.load" in scalar_contiguous_text, "scalar.load(..., contiguous=N) should lower to llvm.load")
+    expect("llvm.store" in scalar_contiguous_text, "scalar.store(vector, ...) should lower to llvm.store")
+    expect("vector<4xf32>" in scalar_contiguous_text, "contiguous=4 over f32 should produce vector<4xf32>")
+    expect("llvm.insertelement" in scalar_contiguous_text, "pto.vec(..., init=scalar) should broadcast with insertelement")
+    expect("arith.mulf" in scalar_contiguous_text, "VecValue multiplication should lower to arith.mulf")
+    expect(
+        "pto.load" not in scalar_contiguous_text and "pto.store" not in scalar_contiguous_text,
+        "contiguous vector memory access should not lower through scalar pto.load/store",
+    )
+    expect_raises(
+        ValueError,
+        lambda: scalar_contiguous_width_mismatch_probe.compile(),
+        "does not match vector lane count",
+    )
+    expect_raises(
+        TypeError,
+        lambda: scalar_contiguous_scalar_store_probe.compile(),
+        "scalar.store(scalar, ..., contiguous=N) is not supported",
     )
 
     addptr_surface_text = addptr_surface_probe.compile().mlir_text()

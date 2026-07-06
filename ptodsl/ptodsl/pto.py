@@ -30,9 +30,10 @@ from ._types import (           # noqa: F401
     si8, si16, si32, si64,
     ui8, ui16, ui32, ui64,
     index,
-    ptr, vreg_type, mask_type,
+    ptr, vreg_type, vec_type, mask_type,
     _resolve,
 )
+from ._builtin_vector import vec  # noqa: F401
 from ._surface_types import (   # noqa: F401
     const_expr,
     BarrierType,
@@ -103,7 +104,7 @@ from ._ops import (             # noqa: F401
     vaxpy, vaddrelu, vsubrelu,
     vsel,
     make_tensor_view, partition_view,
-    alloc_tile,
+    alloc_buffer, alloc_tile,
     tsort32, tmrgsort, tgather,
     mte_load, mte_store, mte_gm_ub, mte_ub_gm, mte_ub_ub, mte_ub_l1,
     mte_gm_l1, mte_l1_ub, mte_gm_l1_frac, mte_l1_bt, mte_l1_fb, mem_bar,
@@ -142,6 +143,9 @@ from ._control_flow import (    # noqa: F401
     static_range,
     LoopHandle, BranchHandle,
 )
+
+# ── All-reduce ─────────────────────────────────────────────────────────────────
+from ._allreduce import simt_allreduce_max, simt_allreduce_min, simt_allreduce_sum  # noqa: F401
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401

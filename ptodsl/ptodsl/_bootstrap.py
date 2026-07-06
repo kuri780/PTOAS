@@ -61,6 +61,10 @@ def _bootstrap_python_paths() -> None:
 _bootstrap_python_paths()
 
 from mlir.dialects import pto as _pto_dialect  # noqa: E402
+try:
+    from mlir.dialects import llvm as _llvm_dialect  # noqa: E402
+except Exception:  # pragma: no cover - depends on the installed MLIR package.
+    _llvm_dialect = None
 from mlir.ir import Context, Location           # noqa: E402
 
 
@@ -68,6 +72,8 @@ def make_context() -> Context:
     """Create a fresh MLIR Context with the PTO dialect loaded."""
     ctx = Context()
     _pto_dialect.register_dialect(ctx, load=True)
+    if _llvm_dialect is not None and hasattr(_llvm_dialect, "register_dialect"):
+        _llvm_dialect.register_dialect(ctx, load=True)
     return ctx
 
 

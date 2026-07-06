@@ -41,6 +41,7 @@ from ._scalar_adaptation import (
 )
 from ._runtime_scalar_ops import emit_runtime_binary_op
 from ._surface_values import (
+    AllocatedBufferValue,
     MaskResultValue,
     PartitionTensorViewValue,
     TensorViewValue,
@@ -65,6 +66,7 @@ from ._types import (
     mask_type,
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
+    ptr,
     tensor_view_type,
     tensor_view_type_from_dims,
     vreg_type,
@@ -82,7 +84,9 @@ from mlir.ir import (
     IndexType,
     IntegerType,
     MemRefType,
+    Operation,
     Type,
+    TypeAttr,
 )
 
 # Pipe name shorthands → canonical PIPE_* names
@@ -2313,6 +2317,89 @@ def _tile_transfer_partition(tv, tile, *, offsets=None, sizes=None, context: str
             f"{len(normalized_offsets)} and {len(normalized_sizes)}"
         )
     return partition_view(tv, offsets=normalized_offsets, sizes=normalized_sizes)
+
+
+def alloc_buffer(shape, dtype, **kwargs):
+    """
+    Allocate SIMT lane-local scratch storage and return an address-like value.
+
+    The allocation emits an LLVM stack allocation in the surrounding SIMT
+    helper. UB scratch uses explicit ``pto.castptr`` / ``pto.addptr`` pointer
+    authoring and an appropriate host launch wrapper.
+    """
+    if kwargs:
+        unexpected = ", ".join(sorted(kwargs))
+        raise TypeError(
+            f"pto.alloc_buffer(...) does not accept keyword argument(s): {unexpected}. "
+            "It only allocates SIMT local buffers; author UB scratch explicitly with "
+            "pto.castptr/pto.addptr and pass the dynamic UB byte count at launch."
+        )
+    _require_explicit_mode("pto.alloc_buffer(...)")
+    element_type = _resolve(dtype)
+    element_count = _static_alloc_buffer_element_count(shape)
+    elem_bytes = _element_bytewidth(element_type)
+    byte_size = element_count * elem_bytes
+
+    return _alloc_local_buffer(
+        shape,
+        dtype,
+        element_type,
+        element_count,
+        byte_size,
+    )
+
+
+def _static_alloc_buffer_element_count(shape):
+    if isinstance(shape, int):
+        dims = (shape,)
+    elif isinstance(shape, (list, tuple)):
+        dims = tuple(shape)
+    else:
+        raise TypeError("pto.alloc_buffer(shape, ...) expects an int or a tuple/list of static dimensions")
+    if not dims:
+        raise ValueError("pto.alloc_buffer(shape, ...) expects at least one dimension")
+    count = 1
+    for dim in dims:
+        raw_dim = unwrap_surface_value(dim)
+        if isinstance(raw_dim, bool):
+            raise TypeError("pto.alloc_buffer(shape, ...) does not accept bool dimensions")
+        if not isinstance(raw_dim, int):
+            raise TypeError(
+                "pto.alloc_buffer(shape, ...) requires static integer dimensions; "
+                f"got {getattr(raw_dim, 'type', type(raw_dim).__name__)}"
+            )
+        if raw_dim <= 0:
+            raise ValueError(f"pto.alloc_buffer(shape, ...) dimensions must be positive, got {raw_dim}")
+        count *= raw_dim
+    return count
+
+
+def _alloc_local_buffer(shape, dtype, element_type, element_count, byte_size):
+    i32 = IntegerType.get_signless(32)
+    count = _materialize_integer_literal(i32, element_count)
+    llvm_ptr_type = Type.parse("!llvm.ptr")
+    alloca = Operation.create(
+        "llvm.alloca",
+        results=[llvm_ptr_type],
+        operands=[count],
+        attributes={
+            "elem_type": TypeAttr.get(element_type),
+        },
+    ).results[0]
+    return AllocatedBufferValue(
+        alloca,
+        shape=_normalize_alloc_buffer_shape_metadata(shape),
+        dtype=dtype,
+        element_type=element_type,
+        element_count=element_count,
+        byte_size=byte_size,
+    )
+
+
+def _normalize_alloc_buffer_shape_metadata(shape):
+    if isinstance(shape, int):
+        return (shape,)
+    return tuple(unwrap_surface_value(dim) for dim in shape)
 
 
 def alloc_tile(
@@ -5464,7 +5551,7 @@ __all__ = [
     "vaxpy", "vaddrelu", "vsubrelu",
     "vsel",
     "make_tensor_view", "partition_view",
-    "alloc_tile",
+    "alloc_buffer", "alloc_tile",
     "tload", "tstore", "tmov", "tinsert",
     "tmatmul", "tmatmul_acc", "tmatmul_mx", "tmatmul_mx_acc", "tmatmul_mx_bias",
     "tgemv_mx", "tgemv_mx_acc", "tgemv_mx_bias",

@@ -18,7 +18,7 @@ from ._types import (
 )
 
 from mlir.dialects import arith
-from mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType
+from mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType, VectorType
 
 
 def classify_runtime_scalar_type(type_obj):
@@ -28,6 +28,10 @@ def classify_runtime_scalar_type(type_obj):
         return "integer"
     if any(cls.isinstance(type_obj) for cls in (BF16Type, F16Type, F32Type)):
         return "float"
+    if VectorType.isinstance(type_obj):
+        element_type = VectorType(type_obj).element_type
+        if any(cls.isinstance(element_type) for cls in (BF16Type, F16Type, F32Type)):
+            return "float"
     raise TypeError(f"runtime scalar operators only support index/int/float values, got {type_obj}")
 
 

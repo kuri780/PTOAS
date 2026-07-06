@@ -1864,3 +1864,38 @@ The `mte_l1_l0a`/`mte_l1_l0b` stage operands from the authored source tiles into
 | `pto.mad_mx_bias(lhs, rhs, dst, bias, m, n, k, **clauses)` | MX-format bias-init matmul |
 
 MX variants require MX-enabled dtypes (f8) and pre-loaded scale payloads. For most users, the standard `mad`, `mad_acc`, and `mad_bias` are the primary interface.
+
+---
+
+## 8.4 Builtin vector values
+
+`pto.vec(dtype, lanes, *, init=None)` names a builtin vector type or
+constructs a vector value. When `init` is a scalar, it is broadcast to
+all `lanes` lanes. When `init` is `None`, the call returns a vector type
+descriptor.
+
+#### `pto.vec(dtype, lanes, *, init=None)`
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `dtype` | PTO dtype | Element type, such as `pto.f32` |
+| `lanes` | Positive Python `int` | Number of lanes |
+| `init` | Scalar value, vector value, or `None` | Optional initializer; scalar values are broadcast to all lanes |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `result` | Vector type or `pto.vec(dtype, lanes)` value | Without `init`, returns a vector type descriptor; with `init`, returns a vector value |
+
+**Example**:
+
+<!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile scalar contiguous vector probes"} -->
+```python
+x4 = scalar.load(ptr, offset, contiguous=4)
+rstd4 = pto.vec(pto.f32, 4, init=rstd)
+y4 = x4 * rstd4
+scalar.store(y4, ptr, offset)
+```

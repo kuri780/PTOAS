@@ -35,7 +35,9 @@ When in doubt, ask: *can this value change between launches of the same compiled
 
 ## 6.2 Scalar access: load and store
 
-`scalar.load` reads a single scalar element from a typed pointer or tile location. `scalar.store` writes a scalar back. These are the canonical scalar memory ops for SIMT authoring. The offset is counted in elements, not bytes.
+`scalar.load` reads one scalar element from a typed pointer or tile location.
+`scalar.store` writes one scalar element back. These are the canonical scalar
+memory ops for SIMT authoring. Offsets are counted in elements, not bytes.
 
 #### `scalar.load(ptr: PtrType, offset: Index) -> ScalarType`
 
@@ -100,6 +102,63 @@ scalar.store(value, tile[row, col])
 ```python
 scalar.store(value, ptr, offset)
 ```
+
+### Contiguous vector access
+
+Pass `contiguous=N` to read or write `N` adjacent elements as a single
+vector value. `N` must be a positive integer greater than `1`.
+
+#### `scalar.load(ptr: PtrType, offset: Index, *, contiguous: int) -> VecValue`
+
+**Description**: Loads `contiguous` adjacent elements from a typed pointer.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ptr` | `PtrType` | Typed source pointer |
+| `offset` | `Index` | First element to load |
+| `contiguous` | Positive Python `int` greater than `1` | Number of adjacent elements to load |
+
+**Returns**:
+
+| Return Value | Type | Description |
+|--------------|------|-------------|
+| `value` | `pto.vec(T, N)` | Vector value with `N == contiguous` and element type `T` |
+
+**Example**:
+
+```python
+x4 = scalar.load(ptr, offset, contiguous=4)
+```
+
+---
+
+#### `scalar.store(value: VecValue, ptr: PtrType, offset: Index, *, contiguous: int | None = None) -> None`
+
+**Description**: Stores a vector value to adjacent elements of a typed pointer.
+The store width is taken from the vector lane count. If `contiguous` is
+provided, it must match that lane count.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | `pto.vec(T, N)` | Vector value to write |
+| `ptr` | `PtrType` | Typed destination pointer |
+| `offset` | `Index` | First element to store |
+| `contiguous` | `int` or `None` | Optional width check; when provided, it must equal `N` |
+
+**Example**:
+
+```python
+scalar.store(x4, ptr, offset)
+scalar.store(x4, ptr, offset, contiguous=4)  # optional width check
+```
+
+`scalar.store(scalar_value, ptr, offset, contiguous=N)` is rejected because
+scalar values are not implicitly broadcast for vector stores. To build an
+explicit broadcast vector, use `pto.vec(...)`; see Section 8.4.
 
 ### Scalar value adaptation
 

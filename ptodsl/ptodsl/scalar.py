@@ -24,12 +24,20 @@ from ._runtime_scalar_ops import (
     emit_runtime_max,
     emit_runtime_min,
 )
-from ._surface_values import resolve_address_access, unwrap_surface_value, wrap_surface_value
+from ._surface_values import (
+    AddressOffsetValue,
+    AllocatedBufferValue,
+    VecValue,
+    resolve_address_access,
+    unwrap_surface_value,
+    wrap_surface_value,
+)
 from ._types import _resolve
 
 from mlir.dialects import arith
+from mlir.dialects import llvm
 from mlir.dialects import math
-from mlir.ir import IndexType, MemRefType, Operation
+from mlir.ir import IndexType, IntegerType, MemRefType, Operation, VectorType
 from mlir.dialects import pto as _pto
 
 
@@ -120,10 +128,17 @@ def abs(value):
     return wrap_surface_value(emit_runtime_abs(unwrap_surface_value(value)))
 
 
-def load(ptr_or_ref, offset=None):
-    """Load one scalar element from a PTODSL address view or tile element."""
+def load(ptr_or_ref, offset=None, *, contiguous=None):
+    """Load one scalar element or a contiguous builtin vector from a PTODSL address view."""
+    width = _normalize_contiguous(contiguous, context="scalar.load(...)")
+    allocated_buffer = _allocated_buffer_target(ptr_or_ref)
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
-    result_type = _infer_buffer_element_type(buffer_value.type)
+    result_type = _infer_buffer_element_type(buffer_value.type, allocated_buffer=allocated_buffer)
+    if width > 1:
+        return VecValue(_emit_contiguous_load(buffer_value, index_value, result_type, width))
+    if allocated_buffer is not None:
+        ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, result_type)
+        return wrap_surface_value(llvm.LoadOp(result_type, ptr_value).res)
     return wrap_surface_value(Operation.create(
         "pto.load",
         results=[result_type],
@@ -131,21 +146,159 @@ def load(ptr_or_ref, offset=None):
     ).results[0])
 
 
-def store(value, ptr_or_ref, offset=None):
-    """Store one scalar element to a PTODSL address view or tile element."""
+def store(value, ptr_or_ref, offset=None, *, contiguous=None):
+    """Store one scalar element or a builtin vector to a PTODSL address view."""
+    allocated_buffer = _allocated_buffer_target(ptr_or_ref)
     buffer_value, index_value = resolve_address_access(ptr_or_ref, offset)
-    elem_type = _infer_buffer_element_type(buffer_value.type)
+    elem_type = _infer_buffer_element_type(buffer_value.type, allocated_buffer=allocated_buffer)
+    raw_value = unwrap_surface_value(value)
+    if hasattr(raw_value, "type") and VectorType.isinstance(raw_value.type):
+        vec_value = value if isinstance(value, VecValue) else VecValue(raw_value)
+        width = _normalize_contiguous(contiguous, context="scalar.store(...)", default=vec_value.lanes)
+        if width != vec_value.lanes:
+            raise ValueError(
+                f"scalar.store(..., contiguous={width}) does not match vector lane count {vec_value.lanes}"
+            )
+        if vec_value.element_type != elem_type:
+            raise TypeError(
+                "scalar.store(vector, ...) element type must match the destination pointer element type: "
+                f"got {vec_value.element_type}, expected {elem_type}"
+            )
+        _emit_contiguous_store(raw_value, buffer_value, index_value)
+        return
+
+    width = _normalize_contiguous(contiguous, context="scalar.store(...)")
+    if width > 1:
+        raise TypeError("scalar.store(scalar, ..., contiguous=N) is not supported; pass a vector value")
+    coerced_value = coerce_scalar_to_type(value, elem_type, context="scalar.store(...)")
+    if allocated_buffer is not None:
+        ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, elem_type)
+        llvm.StoreOp(coerced_value, ptr_value)
+        return
     Operation.create(
         "pto.store",
-        operands=[buffer_value, index_value, coerce_scalar_to_type(value, elem_type, context="scalar.store(...)")],
+        operands=[buffer_value, index_value, coerced_value],
     )
 
 
-def _infer_buffer_element_type(buffer_type):
+def _normalize_contiguous(contiguous, *, context: str, default: int = 1) -> int:
+    if contiguous is None:
+        return default
+    if isinstance(contiguous, bool) or not isinstance(contiguous, int):
+        raise TypeError(f"{context} expects contiguous to be a positive Python integer")
+    if contiguous <= 0:
+        raise ValueError(f"{context} expects contiguous to be positive")
+    return contiguous
+
+
+def _allocated_buffer_target(target):
+    if isinstance(target, AllocatedBufferValue):
+        return target
+    if isinstance(target, AddressOffsetValue) and isinstance(target.base, AllocatedBufferValue):
+        return target.base
+    return None
+
+
+def _is_local_allocated_buffer(allocated_buffer) -> bool:
+    return allocated_buffer is not None
+
+
+def _infer_buffer_element_type(buffer_type, *, allocated_buffer=None):
+    if allocated_buffer is not None:
+        return allocated_buffer.element_type
     try:
         return _pto.PtrType(buffer_type).element_type
     except Exception:
         return MemRefType(buffer_type).element_type
+
+
+def _emit_contiguous_load(buffer_value, index_value, elem_type, width: int):
+    vector_type = VectorType.get([width], elem_type)
+    ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, elem_type)
+    return llvm.LoadOp(vector_type, ptr_value).res
+
+
+def _emit_contiguous_store(vector_value, buffer_value, index_value):
+    elem_type = VectorType(vector_value.type).element_type
+    ptr_value = _emit_llvm_byte_pointer(buffer_value, index_value, elem_type)
+    llvm.StoreOp(vector_value, ptr_value)
+
+
+def _emit_llvm_byte_pointer(buffer_value, index_value, elem_type):
+    byte_offset = _emit_byte_offset(index_value, elem_type)
+    llvm_ptr_type = _as_llvm_ptr_type(buffer_value.type)
+    if llvm_ptr_type is not None:
+        return llvm.GEPOp(
+            llvm_ptr_type,
+            buffer_value,
+            [byte_offset],
+            [-2147483648],
+            IntegerType.get_signless(8),
+        ).res
+
+    pto_ptr_type = _as_pto_ptr_type(buffer_value.type)
+    i64 = IntegerType.get_signless(64)
+    addr_as_i64 = _pto.CastPtrOp(i64, buffer_value).result
+    llvm_ptr_type = llvm.PointerType.get(_pto_ptr_llvm_address_space(pto_ptr_type))
+    llvm_base = llvm.IntToPtrOp(llvm_ptr_type, addr_as_i64).res
+    return llvm.GEPOp(
+        llvm_ptr_type,
+        llvm_base,
+        [byte_offset],
+        [-2147483648],
+        IntegerType.get_signless(8),
+    ).res
+
+
+def _as_llvm_ptr_type(type_obj):
+    try:
+        return llvm.PointerType(type_obj)
+    except Exception:
+        return None
+
+
+def _emit_byte_offset(index_value, elem_type):
+    bytewidth = _element_bytewidth(elem_type)
+    bytewidth_const = arith.ConstantOp(IndexType.get(), bytewidth).result
+    byte_index = arith.MulIOp(index_value, bytewidth_const).result
+    return arith.IndexCastOp(IntegerType.get_signless(64), byte_index).result
+
+
+def _as_pto_ptr_type(type_obj):
+    try:
+        return _pto.PtrType(type_obj)
+    except Exception as exc:
+        raise TypeError(
+            "contiguous scalar.load/store currently expects a PTO pointer-backed address"
+        ) from exc
+
+
+def _pto_ptr_llvm_address_space(ptr_type) -> int:
+    memory_space = getattr(ptr_type, "memory_space", None)
+    value = getattr(memory_space, "value", None)
+    if value is not None:
+        return int(value)
+    text = str(ptr_type)
+    if ", ub>" in text or ", vec>" in text:
+        return 6
+    if ", gm>" in text or text.endswith(">"):
+        return 1
+    raise TypeError(f"unable to infer LLVM address space for pointer type {ptr_type}")
+
+
+def _element_bytewidth(elem_type):
+    if str(elem_type) == "f32":
+        return 4
+    if str(elem_type) in {"f16", "bf16"}:
+        return 2
+    if IntegerType.isinstance(elem_type):
+        width = IntegerType(elem_type).width
+        if width % 8 != 0:
+            raise TypeError(f"unsupported sub-byte integer element type {elem_type}")
+        return width // 8
+    if str(elem_type).startswith("f8") or str(elem_type).startswith("!pto."):
+        return 1
+    raise TypeError(f"unsupported element type {elem_type}")
 
 
 __all__ = [

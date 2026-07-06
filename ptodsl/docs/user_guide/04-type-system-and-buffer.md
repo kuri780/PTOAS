@@ -175,7 +175,29 @@ ptr_ub  = pto.ptr(pto.f16, pto.MemorySpace.UB)
 | `MemorySpace.ACC` | Cube L0C accumulator buffer |
 | `MemorySpace.BIAS` | Cube bias table buffer |
 
-## 4.5 TensorView
+## 4.5 Explicit scratch buffers
+
+`pto.alloc_buffer(shape, dtype)` allocates a lane-local temporary buffer
+inside SIMT code.
+
+```text
+pto.alloc_buffer(shape, dtype)
+```
+
+<!-- ptodsl-doc-pending: {"reason":"illustrative fragment; covered by test_jit_compile alloc_buffer probes"} -->
+```python
+scratch = pto.alloc_buffer((32,), pto.f32)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `shape` | Static positive integer shape. Pass an `int`, `tuple[int, ...]`, or `list[int]`. |
+| `dtype` | Element type of the returned buffer, such as `pto.f32` or `pto.i32`. |
+
+The returned value wraps the buffer address together with its allocation
+metadata: shape, dtype, element type, element count, and byte size.
+
+## 4.6 TensorView
 
 `TensorView` is a descriptor for a tensor in Global Memory. Create one inside a `@pto.jit` body with `make_tensor_view`:
 
@@ -205,7 +227,7 @@ def kernel(
 
 Strides support non-contiguous tensors. Pass `strides=A.strides` from the source tensor for the default row-major layout, or supply explicit strides for sub-views. Use `tv.as_ptr()` to obtain a typed GM pointer for use with MTE Ops in explicit-mode orchestration.
 
-## 4.6 PartitionTensorView
+## 4.7 PartitionTensorView
 
 `partition_view` creates a sub-view of a TensorView at a given offset and size. It describes *which part* of the GM tensor a `tile.load` or `tile.store` should operate on:
 
@@ -216,7 +238,7 @@ part = pto.partition_view(tv, offsets=[row_offset, 0], sizes=[BLOCK, dim])
 
 The result is a `PartitionTensorView` — a lightweight descriptor, not a data buffer. It carries the partition's shape, strides, and element type (inherited from the source TensorView). Use `part.as_ptr()` to obtain a typed GM pointer for MTE Ops in explicit-mode orchestration.
 
-## 4.7 Tile
+## 4.8 Tile
 
 A `Tile` is an on-chip buffer allocated in UB or cube-local memory. Allocate tiles with `alloc_tile`:
 

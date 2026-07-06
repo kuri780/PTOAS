@@ -10,8 +10,8 @@ scalar values loaded from tiles.
 #### `pto.store_vfsimt_info(dim_z, dim_y, dim_x) -> None`
 
 **Description**: Emits the low-level VPTO launch descriptor operation. Most
-code should use `body[dim_x, dim_y, dim_z](...)` or `pto.simt_launch(...)`
-instead.
+code should use `body[dim_x, dim_y, dim_z](...)`, `pto.simt_launch(...)`, or
+the inline form `with pto.simt(dim_x, dim_y, dim_z):` instead.
 
 **Parameters**:
 
@@ -583,3 +583,27 @@ def simt_ops_sync_state_probe(dst: pto.ptr(pto.i32, "gm")):
     save_lane_state[32, 1, 1]()
     use_lane_state[32, 1, 1](dst)
 ```
+
+## 13.5 SIMT allreduce
+
+`pto.simt_allreduce_sum`, `pto.simt_allreduce_max`, and
+`pto.simt_allreduce_min` reduce a scalar value across SIMT work-items.
+
+#### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
+#### `pto.simt_allreduce_max(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
+#### `pto.simt_allreduce_min(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
+
+**Description**: Reduce `value` across `threads` work-items. The result is
+replicated to every participating work-item.
+
+**Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `value` | PTO scalar | Per-lane value to reduce |
+| `threads` | Python `int` | Number of work-items participating in the reduction |
+| `scale` | Python `int` | Number of consecutive work-items that share the same reduced result; must divide `threads` |
+| `thread_offset` | Python `int` | Offset subtracted from `get_tid_x()` for lane-index computation |
+| `scratch` | UB pointer or `None` | Required unless `threads ≤ scale` or `(threads ≤ 32 ∧ pow2(threads) ∧ pow2(scale))` |
+
+**Returns**: PTO scalar with the same type as `value`.

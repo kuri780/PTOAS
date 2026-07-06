@@ -257,7 +257,9 @@ These are hardware-bound compute sub-kernels, each mapped to a specific NPU comp
 
 Each can be invoked as a named decorated function (`@pto.cube` /
 `@pto.simd` / `@pto.simt`) or inline as a context manager
-(`with pto.cube():`, `with pto.simd():`, `with pto.simt():`).
+(`with pto.cube():`, `with pto.simd():`, `with pto.simt():`). Inline SIMT
+scopes can also spell launch dimensions directly with
+`with pto.simt(dim_x, dim_y, dim_z):`.
 
 The boundary contract is strict: vreg values do not escape a simd kernel, cube-local state does not leak into UB, and data crosses layer boundaries only through UB-backed tiles or typed UB pointers.
 

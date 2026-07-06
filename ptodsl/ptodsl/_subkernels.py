@@ -405,6 +405,7 @@ class _SubkernelSurface:
         ast_rewrite: bool = True,
         simt_max_threads: int | None = None,
         simt_max_regs: int | None = None,
+        simt_inline_dims: tuple | None = None,
     ):
         self._role = role
         self._name = name
@@ -412,9 +413,12 @@ class _SubkernelSurface:
         self._ast_rewrite = ast_rewrite
         self._simt_max_threads = simt_max_threads
         self._simt_max_regs = simt_max_regs
+        self._simt_inline_dims = simt_inline_dims
         self._session_cm = None
 
     def __call__(self, fn):
+        if self._simt_inline_dims is not None:
+            raise TypeError("pto.simt(dim_x, dim_y, dim_z) is only supported as an inline context manager")
         return SubkernelTemplate(
             SubkernelSpec(
                 role=self._role,
@@ -446,6 +450,7 @@ class _SubkernelSurface:
             self._role.value,
             symbol_name,
             self._target,
+            simt_launch_dims=self._simt_inline_dims,
         )
         self._session_cm.__enter__()
         return None
@@ -465,6 +470,7 @@ def _subkernel_decorator(
     ast_rewrite: bool = True,
     simt_max_threads: int | None = None,
     simt_max_regs: int | None = None,
+    simt_inline_dims: tuple | None = None,
 ):
     return _SubkernelSurface(
         role,
@@ -473,6 +479,7 @@ def _subkernel_decorator(
         ast_rewrite=ast_rewrite,
         simt_max_threads=simt_max_threads,
         simt_max_regs=simt_max_regs,
+        simt_inline_dims=simt_inline_dims,
     )
 
 
@@ -485,6 +492,7 @@ def _decorate_subkernel(
     ast_rewrite: bool = True,
     simt_max_threads: int | None = None,
     simt_max_regs: int | None = None,
+    simt_inline_dims: tuple | None = None,
 ):
     if fn is not None:
         return _subkernel_decorator(
@@ -494,6 +502,7 @@ def _decorate_subkernel(
             ast_rewrite=ast_rewrite,
             simt_max_threads=simt_max_threads,
             simt_max_regs=simt_max_regs,
+            simt_inline_dims=simt_inline_dims,
         )(fn)
     return _subkernel_decorator(
         role,
@@ -502,6 +511,7 @@ def _decorate_subkernel(
         ast_rewrite=ast_rewrite,
         simt_max_threads=simt_max_threads,
         simt_max_regs=simt_max_regs,
+        simt_inline_dims=simt_inline_dims,
     )
 
 
@@ -527,7 +537,7 @@ def _validate_simt_resource_attr(name: str, value: int | None) -> int | None:
 
 def simt(
     fn=None,
-    *,
+    *dims,
     name: str | None = None,
     target: str = "a5",
     ast_rewrite: bool = True,
@@ -536,6 +546,14 @@ def simt(
 ):
     max_threads = _validate_simt_resource_attr("max_threads", max_threads)
     max_regs = _validate_simt_resource_attr("max_regs", max_regs)
+    simt_inline_dims = None
+    if fn is not None and not callable(fn):
+        dims = (fn, *dims)
+        fn = None
+    if dims:
+        if len(dims) != 3:
+            raise TypeError("pto.simt(dim_x, dim_y, dim_z) expects exactly three launch dimensions")
+        simt_inline_dims = tuple(dims)
     return _decorate_subkernel(
         KernelRole.SIMT,
         fn,
@@ -544,6 +562,7 @@ def simt(
         ast_rewrite=ast_rewrite,
         simt_max_threads=max_threads,
         simt_max_regs=max_regs,
+        simt_inline_dims=simt_inline_dims,
     )
 
 

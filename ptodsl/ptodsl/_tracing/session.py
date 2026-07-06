@@ -119,6 +119,7 @@ class InlineSubkernelOutlineFrame:
     owner_symbol_name: str
     wrapper_op: object
     body_block: object
+    simt_launch_dims: tuple | None = None
 
 
 class TraceSession:
@@ -289,7 +290,14 @@ class TraceSession:
                 raise RuntimeError("PTODSL trace-session subkernel stack corruption detected")
 
     @contextmanager
-    def enter_inline_subkernel(self, role: str, symbol_name: str, target: str):
+    def enter_inline_subkernel(
+        self,
+        role: str,
+        symbol_name: str,
+        target: str,
+        *,
+        simt_launch_dims: tuple | None = None,
+    ):
         """Capture one inline subkernel scope and outline it into a helper on exit."""
         frame = SubkernelTraceFrame(
             role=role,
@@ -303,6 +311,7 @@ class TraceSession:
             owner_symbol_name=self.current_function_owner_symbol_name,
             wrapper_op=wrapper_op,
             body_block=body_block,
+            simt_launch_dims=simt_launch_dims,
         )
         self._subkernel_stack.append(frame)
         try:
@@ -413,9 +422,17 @@ class TraceSession:
             )
 
         with InsertionPoint(outline_frame.wrapper_op.operation):
-            if role == "simt":
-                self._emit_simt_helper_launch_metadata()
-            func.CallOp(helper_fn, list(captures))
+            if role == "simt" and outline_frame.simt_launch_dims is not None:
+                dim_x, dim_y, dim_z = _coerce_simt_launch_dims(outline_frame.simt_launch_dims)
+                Operation.create(
+                    "pto.simt_launch",
+                    attributes={"callee": FlatSymbolRefAttr.get(_symbol_name(helper_fn))},
+                    operands=[dim_x, dim_y, dim_z, *captures],
+                )
+            else:
+                if role == "simt":
+                    self._emit_simt_helper_launch_metadata()
+                func.CallOp(helper_fn, list(captures))
 
         entry_block = helper_fn.add_entry_block()
         with InsertionPoint(entry_block):
