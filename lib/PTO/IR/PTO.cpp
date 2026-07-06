@@ -15104,6 +15104,32 @@ static LogicalResult verifyFrontendSplitOp(Operation *op,
   return verifySplitAttr(op, split);
 }
 
+static LogicalResult verifyAivSubblockIdOperand(Operation *op,
+                                                Value aivSubblockId,
+                                                int64_t split,
+                                                Type pipeEntryType) {
+  if (!aivSubblockId)
+    return success();
+
+  if (split == 0) {
+    return op->emitOpError(
+        "expects 'aiv_subblockid' only when 'split' is 1 or 2");
+  }
+
+  if (isa<TensorViewType>(pipeEntryType)) {
+    return op->emitOpError(
+        "does not support 'aiv_subblockid' for !pto.tensor_view pipe entries");
+  }
+
+  auto addrSpace = getPTOMemorySpaceEnum(pipeEntryType);
+  if (!addrSpace || *addrSpace != AddressSpace::VEC) {
+    return op->emitOpError(
+        "expects 'aiv_subblockid' only on AIV-side vector tile pipe entries");
+  }
+
+  return success();
+}
+
 static FailureOr<int8_t> lookupFrontendInitDirMaskById(Operation *op,
                                                        func::FuncOp funcOp,
                                                        int32_t id) {
@@ -15770,13 +15796,19 @@ LogicalResult TPushToAicOp::verify() {
   if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
                                            /*expectC2V=*/false)))
     return failure();
-  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
-                                              getTile().getType());
+  if (failed(verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                                  getTile().getType())))
+    return failure();
+  return verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                    getSplit(), getTile().getType());
 }
 
 LogicalResult TPopFromAicOp::verify() {
-  return verifyFrontendPopOp(*this, FunctionKernelKind::Vector, "vector",
-                             /*expectC2V=*/true);
+  if (failed(verifyFrontendPopOp(*this, FunctionKernelKind::Vector, "vector",
+                                 /*expectC2V=*/true)))
+    return failure();
+  return verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                    getSplit(), getTile().getType());
 }
 
 LogicalResult TPopFromAivOp::verify() {
@@ -15865,6 +15897,9 @@ LogicalResult TPushOp::verify() {
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
     return failure();
+  if (failed(verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                        getSplit(), getTile().getType())))
+    return failure();
   if (failed(verifyTensorEntryMatchesInternalPipeInit(
           getOperation(), getPipeHandle(), getTile().getType())))
     return failure();
@@ -15891,6 +15926,9 @@ LogicalResult TPopOp::verify() {
   if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
+    return failure();
+  if (failed(verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                        getSplit(), getTile().getType())))
     return failure();
   if (failed(verifyTensorEntryMatchesInternalPipeInit(
           getOperation(), getPipeHandle(), getTile().getType())))
@@ -16425,6 +16463,9 @@ void TPushOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   addEffect(effects, &getTileMutable(), MemoryEffects::Read::get());
+  auto aivSubblockId = getAivSubblockidMutable();
+  if (!aivSubblockId.empty())
+    addEffect(effects, &*aivSubblockId.begin(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
 }
@@ -16442,6 +16483,9 @@ void TPopOp::getEffects(
         &effects) {
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
+  auto aivSubblockId = getAivSubblockidMutable();
+  if (!aivSubblockId.empty())
+    addEffect(effects, &*aivSubblockId.begin(), MemoryEffects::Read::get());
   addEffect(effects, &getTileMutable(), MemoryEffects::Write::get());
 }
 

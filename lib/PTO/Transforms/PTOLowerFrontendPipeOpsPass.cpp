@@ -451,7 +451,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
         return failure();
       }
       rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), handles.c2vPipe,
-                                           push.getSplitAttr());
+                                           Value{}, push.getSplitAttr());
       continue;
     }
 
@@ -466,6 +466,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
         return failure();
       }
       rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), handles.v2cPipe,
+                                           push.getAivSubblockid(),
                                            push.getSplitAttr());
       continue;
     }
@@ -496,7 +497,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
         }
       }
       rewriter.create<TPopOp>(pop.getLoc(), entry, handles.c2vPipe,
-                              pop.getSplitAttr());
+                              pop.getAivSubblockid(), pop.getSplitAttr());
       rewriter.replaceOp(pop, entry);
       continue;
     }
@@ -527,7 +528,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
         }
       }
       rewriter.create<TPopOp>(pop.getLoc(), entry, handles.v2cPipe,
-                              pop.getSplitAttr());
+                              Value{}, pop.getSplitAttr());
       rewriter.replaceOp(pop, entry);
       continue;
     }

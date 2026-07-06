@@ -7966,9 +7966,15 @@ struct PTOTPushToEmitC : public OpConversionPattern<mlir::pto::TPushOp> {
 
     std::string callee =
         "TPUSH<" + *pipeTok + ", " + *tileTok + ", " + *splitTok + ">";
+    SmallVector<Value> callOperands{peelUnrealized(adaptor.getPipeHandle()),
+                                    convertedTile};
+    if (Value aivSubblockId = adaptor.getAivSubblockid()) {
+      Value aivSubblockIdI32 = rewriter.create<emitc::CastOp>(
+          op.getLoc(), rewriter.getI32Type(), peelUnrealized(aivSubblockId));
+      callOperands.push_back(aivSubblockIdI32);
+    }
     rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{},
-        ValueRange{peelUnrealized(adaptor.getPipeHandle()), convertedTile});
+        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{}, callOperands);
     return success();
   }
 
@@ -7996,9 +8002,15 @@ struct PTOTPopToEmitC : public OpConversionPattern<mlir::pto::TPopOp> {
 
     std::string callee =
         "TPOP<" + *pipeTok + ", " + *tileTok + ", " + *splitTok + ">";
+    SmallVector<Value> callOperands{peelUnrealized(adaptor.getPipeHandle()),
+                                    convertedTile};
+    if (Value aivSubblockId = adaptor.getAivSubblockid()) {
+      Value aivSubblockIdI32 = rewriter.create<emitc::CastOp>(
+          op.getLoc(), rewriter.getI32Type(), peelUnrealized(aivSubblockId));
+      callOperands.push_back(aivSubblockIdI32);
+    }
     rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{},
-        ValueRange{peelUnrealized(adaptor.getPipeHandle()), convertedTile});
+        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{}, callOperands);
     return success();
   }
 
