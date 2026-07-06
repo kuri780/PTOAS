@@ -9,7 +9,7 @@
 1. **IR 解析与验证**：解析 `.pto` 输入文件，验证 PTO Dialect 操作（Ops）的语义正确性。
 2. **编译优化 (Passes)**：执行针对达芬奇架构（Da Vinci Architecture）的特定优化 Pass，如算子融合、自动同步插入策略等。
 3. **代码生成 (Lowering)**：支持将 PTO IR 下降（Lowering）到 `EmitC` / `Linalg` Dialect，最终生成可调用 `pto-isa` C++ 库的代码。
-4. **Python 绑定 (Python Bindings)**：提供无缝集成的 Python 模块。通过与 MLIR Core 绑定集成，支持 **PyPTO**、**TileLang**、**CuTile** 等框架在 Python 端直接构建、操作和编译 PTO Bytecode。
+4. **Python 绑定 (Python Bindings)**：提供无缝集成的 Python 模块。通过与 MLIR Core 绑定集成，支持 **PyPTO**、**PTODSL**、**CuTile** 等框架在 Python 端直接构建、操作和编译 PTO Bytecode。
 
 ---
 
@@ -51,11 +51,11 @@ export WORKSPACE_DIR=$HOME/llvm-workspace
 
 # LLVM 源码与构建路径
 export LLVM_SOURCE_DIR=$WORKSPACE_DIR/llvm-project
-export LLVM_BUILD_DIR=$LLVM_SOURCE_DIR/build-shared-21
+export LLVM_BUILD_DIR=$LLVM_SOURCE_DIR/build-shared
 
 # PTOAS 源码与安装路径
 export PTO_SOURCE_DIR=$WORKSPACE_DIR/PTOAS
-export PTO_INSTALL_DIR=$PTO_SOURCE_DIR/install-llvm21
+export PTO_INSTALL_DIR=$PTO_SOURCE_DIR/install
 # =======================================================
 
 # 创建工作目录
@@ -129,7 +129,7 @@ export PYBIND11_CMAKE_DIR=$(python3 -m pybind11 --cmakedir)
 # 注意：此处直接使用了 3.0 章节中定义的变量，无需手动修改
 cmake -G Ninja \
     -S . \
-    -B build-llvm21 \
+    -B build \
     -DLLVM_DIR=$LLVM_BUILD_DIR/lib/cmake/llvm \
     -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir \
     -DPython3_EXECUTABLE=$(which python3) \
@@ -168,11 +168,56 @@ $PTO_SOURCE_DIR/build-llvm21/tools/ptobc/ptobc
 
 ```
 
+### 3.4 Python 安装合同 (Python Distribution Contract)
+
+如果你要使用 Python 绑定、PTODSL资源，推荐使用仓库根目录
+`ptoas` 包的安装合同，而不是手动拼 `PYTHONPATH`：
+
+```bash
+# 非 editable 的源码安装
+cd $PTO_SOURCE_DIR
+pip install . --no-build-isolation
+
+# PTOAS / PTODSL 开发者的 editable 安装
+cd $PTO_SOURCE_DIR
+pip install -e . --no-build-isolation
+```
+
+发布或 CI 产出的 `ptoas` wheel 也遵循同一合同：
+
+```bash
+pip install /path/to/ptoas-*.whl
+```
+
+安装完成后，以下导入应直接可用：
+
+```python
+import ptodsl
+from ptodsl import pto, scalar
+from mlir.dialects import pto as mlir_pto
+```
+
+> 说明：
+> - `ptoas` wheel 会同时安装 PTODSL。
+> - `ptoas-bin-*.tar.gz` 这类 compiler-only 二进制 tarball 只提供 CLI/toolchain，
+>   **不是** PTODSL-capable Python distribution；仅解压 tarball 不能保证
+>   `import ptodsl` 可用。
+
 ---
 
 ## 4. 运行环境配置 (Runtime Environment)
 
-构建完成后，需要配置环境变量以便系统能找到 Python 包和动态库。您可以将以下命令添加到 `.bashrc` 或启动脚本中。
+如果你已经通过 `pip install .`、`pip install -e .` 或 `pip install ptoas-*.whl`
+完成安装，那么 `import ptodsl` / `from mlir.dialects import pto` 不应再依赖手动
+设置 `PYTHONPATH`。
+
+下面这组环境变量主要用于**直接消费 build/install tree** 的场景，例如：
+
+- 不走 pip 安装，直接调试 CMake install 输出
+- 调试 `ptoas` CLI、动态库搜索路径或 MLIR Python overlay
+- 复用仓库脚本做 compile-only / simulator / sample 生成
+
+您可以将以下命令添加到 `.bashrc` 或启动脚本中。
 
 ```bash
 # --- 运行时变量配置 (基于之前定义的路径) ---
@@ -217,23 +262,29 @@ ptoas --version
 
 ### 5.2 Python 接口 (Python API)
 
-配置好环境变量后，PTO Dialect 将作为 `mlir.dialects` 的一部分被加载。
+在支持的 `ptoas` 安装环境中，PTO Dialect 与 PTODSL 都可以直接导入。
 
 ```python
 from mlir.ir import Context, Module, Location
 # [关键] 从 mlir.dialects 导入 pto，这是 Out-of-tree 绑定的标准用法
 from mlir.dialects import pto
+from ptodsl import pto as jit_pto, scalar
 
 with Context() as ctx, Location.unknown():
     pto.register_dialect(ctx, load=True)
     module = Module.create()
     print("PTO Dialect registered successfully!")
+    print("PTODSL imported successfully!", jit_pto, scalar)
 
 ```
 
 ### 5.3 运行测试
 
 ```bash
+# 建议先进入支持的 PTOAS / PTODSL 安装环境
+cd $PTO_SOURCE_DIR
+pip install -e . --no-build-isolation
+
 # 运行python binding 测试
 cd $PTO_SOURCE_DIR/test/samples/MatMul/
 python3 ./tmatmulk.py > ./tmatmulk.pto

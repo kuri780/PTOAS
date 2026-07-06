@@ -25,18 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-import sys
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        package_root = candidate / "ptodsl"
-        if (package_root / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(package_root))
-            break
-    else:
-        raise RuntimeError("Unable to locate the PTODSL Python package root from fa_dn_matmul.py")
 
 from ptodsl import pto
 

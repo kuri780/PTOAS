@@ -83,10 +83,9 @@ RUN export LD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:$LD_LIBRARY_
 
 RUN pip install /wheelhouse/ptoas*.whl
 
-# test import without adjusting $PYTHONPATH and $LD_LIBRARY_PATH, in some irrelevant dir
+# test the installed wheel contract without adjusting $PYTHONPATH
 WORKDIR /test
-RUN python -c "import mlir.ir"
-RUN python -c "from mlir.dialects import pto"
+RUN bash "$PTO_SOURCE_DIR/docker/test_wheel_imports.sh"
 
 # test ptoas cli
 ENV PATH=$PTO_BUILD_DIR/tools/ptoas:$PATH
@@ -119,6 +118,7 @@ FROM quay.io/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11 AS runtime
 # Copy only the wheel, ptoas binary, its .so dependencies, and test scripts from builder
 COPY --from=builder /wheelhouse/ptoas*.whl /tmp/
 COPY --from=builder /llvm-workspace/PTOAS/build-release/tools/ptoas/ptoas /usr/local/bin/ptoas
+COPY docker/test_wheel_imports.sh /usr/local/bin/test_wheel_imports.sh
 
 RUN mkdir -p /usr/local/lib/ptoas
 COPY --from=builder /ptoas-deps/. /usr/local/lib/ptoas/
@@ -126,10 +126,9 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/ptoas:${LD_LIBRARY_PATH}
 
 RUN pip install --no-cache-dir /tmp/ptoas*.whl && rm /tmp/ptoas*.whl
 
-# test import without adjusting $PYTHONPATH and $LD_LIBRARY_PATH, in some irrelevant dir
+# test the installed wheel contract without adjusting $PYTHONPATH
 WORKDIR /test
-RUN python -c "import mlir.ir"
-RUN python -c "from mlir.dialects import pto"
+RUN bash /usr/local/bin/test_wheel_imports.sh
 
 # same MatMul/Abs sample tests as in builder
 COPY --from=builder /llvm-workspace/PTOAS/test/samples/MatMul/tmatmulk.py /sources/test/MatMul/

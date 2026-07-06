@@ -17,8 +17,6 @@ from typing import Optional
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
-
 from ptodsl import pto, scalar
 from ptodsl import _types as pto_types
 from ptodsl._bootstrap import make_context

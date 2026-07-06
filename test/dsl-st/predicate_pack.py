@@ -25,13 +25,7 @@ This matches the existing VPTO runtime predicate tests and avoids the ambiguity
 of inferring mask semantics through predicated vector stores.
 """
 
-from pathlib import Path
-import sys
-
 import numpy as np
-
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import auto_main, golden_output_case
 from ptodsl import pto

@@ -30,21 +30,8 @@ Run under the CPU simulator:
 
 import argparse
 import time
-from pathlib import Path
-import sys
 
 import numpy as np
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate))
-            break
-    else:
-        raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from topk_launch.py"
-        )
 
 from ptodsl import pto
 

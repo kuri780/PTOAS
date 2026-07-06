@@ -9,7 +9,7 @@ Acting as the bridge between upper-level AI frameworks and underlying NPU/GPGPU/
 1. **IR Parsing & Verification**: Parses `.pto` input files and verifies the semantic correctness of PTO Dialect operations (Ops).
 2. **Compilation & Optimization (Passes)**: Executes optimization passes targeting the Da Vinci Architecture, such as operator fusion and automatic synchronization insertion.
 3. **Code Generation (Lowering)**: Supports lowering PTO IR to `EmitC` / `Linalg` dialects, ultimately generating code that calls the `pto-isa` C++ library.
-4. **Python Bindings**: Provides seamlessly integrated Python modules. Through integration with MLIR Core bindings, frameworks such as **PyPTO**, **TileLang**, and **CuTile** can build, manipulate, and compile PTO Bytecode directly from Python.
+4. **Python Bindings**: Provides seamlessly integrated Python modules. Through integration with MLIR Core bindings, frameworks such as **PyPTO**, **PTODSL**, and **CuTile** can build, manipulate, and compile PTO Bytecode directly from Python.
 
 ---
 
@@ -115,7 +115,7 @@ cd $PTO_SOURCE_DIR
 
 # 2. Build and install via pip
 #    The build backend (pyproject.toml) drives CMake + Ninja automatically.
-pip install .
+pip install . --no-build-isolation
 ```
 
 This produces the same artifacts as a manual CMake build:
@@ -139,15 +139,36 @@ $PTO_INSTALL_DIR/
         └── _pto_ops_gen.py
 ```
 
-### 3.4 Step 3: Python Editable Install (Optional, for Python development)
+### 3.4 Step 3: Supported Python Install Flows
 
-If you want to develop and test Python code against the in-tree build without reinstalling after every C++ change, use an **editable install**.
+If you want to use Python bindings or PTODSL, prefer the repository-root
+`ptoas` package contract instead of manually patching `PYTHONPATH`.
 
 ```bash
+# 1) Released or CI-built wheel: installs PTOAS + PTODSL together
+pip install /path/to/ptoas-*.whl
+
+# 2) Non-editable source install from the repository root
+cd $PTO_SOURCE_DIR
+pip install . --no-build-isolation
+
+# 3) Editable install for PTOAS / PTODSL developers
+cd $PTO_SOURCE_DIR
 pip install -e . --no-build-isolation
 ```
 
-> **Why `--no-build-isolation`?** Without this flag, pip uses a temporary virtual environment for the build, records its pybind11 path in `CMakeCache.txt`, then deletes the venv — breaking any subsequent `ninja` reconfigure.
+After installation, the following imports should work directly:
+
+```python
+import ptodsl
+from ptodsl import pto, scalar
+from mlir.dialects import pto as mlir_pto
+```
+
+> Notes:
+> - The `ptoas` wheel also installs PTODSL.
+> - `ptoas-bin-*.tar.gz` compiler-only tarballs provide CLI/toolchain bits, not a PTODSL-capable Python distribution.
+> - `--no-build-isolation` keeps pip from baking a temporary pybind11 path into `CMakeCache.txt`, which would break later `ninja` reconfigure runs after the temporary virtual environment is removed.
 
 If you previously ran `pip install -e .` without the flag and your build is now broken, fix the existing `CMakeCache.txt` with:
 
@@ -180,22 +201,29 @@ ptoas --version
 
 ### 4.2 Python API
 
-After configuring the environment variables, the PTO Dialect is loaded as part of `mlir.dialects`.
+In a supported `ptoas` install environment, both the PTO Dialect and PTODSL
+can be imported directly.
 
 ```python
 from mlir.ir import Context, Module, Location
 # [Key] Import pto from mlir.dialects — the standard pattern for out-of-tree bindings
 from mlir.dialects import pto
+from ptodsl import pto as jit_pto, scalar
 
 with Context() as ctx, Location.unknown():
     pto.register_dialect(ctx, load=True)
     module = Module.create()
     print("PTO Dialect registered successfully!")
+    print("PTODSL imported successfully!", jit_pto, scalar)
 ```
 
 ### 4.3 Running Tests
 
 ```bash
+# Recommended: enter a supported PTOAS / PTODSL install environment first
+cd $PTO_SOURCE_DIR
+pip install -e . --no-build-isolation
+
 # Run Python binding tests
 cd $PTO_SOURCE_DIR/test/samples/MatMul/
 python3 ./tmatmulk.py > ./tmatmulk.pto

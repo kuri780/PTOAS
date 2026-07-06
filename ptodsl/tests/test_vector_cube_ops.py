@@ -8,13 +8,8 @@
 
 import unittest
 import inspect
-from pathlib import Path
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
 
 import ptodsl._ops as _ops
 import ptodsl._pipe_namespace as _pipe_namespace

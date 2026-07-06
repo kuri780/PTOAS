@@ -24,6 +24,9 @@
 #     lib/*.dylib     - Required shared library dependencies
 #     share/ptoas/TileOps - TileLang template library
 #     tilelang_dsl/   - TileLang DSL Python package
+#
+# This compiler-oriented binary artifact intentionally does not bundle the
+# PTODSL Python package. PTODSL is provided only by the `ptoas` wheel.
 
 set -euo pipefail
 
@@ -259,6 +262,10 @@ fi
 rm -rf "${PTOAS_TILEOPS_DIST_DIR}" "${PTOAS_TILELANG_DSL_DIST_DIR}"
 cp -R "${PTOAS_TILEOPS_SRC_DIR}" "${PTOAS_TILEOPS_DIST_DIR}"
 cp -R "${PTOAS_TILELANG_DSL_SRC_DIR}" "${PTOAS_TILELANG_DSL_DIST_DIR}"
+if [[ -e "${PTOAS_DIST_DIR}/ptodsl" ]]; then
+  echo "Error: compiler-oriented ptoas dist must not bundle PTODSL" >&2
+  exit 1
+fi
 
 echo "Rewriting packaged install names..."
 rewrite_packaged_install_names

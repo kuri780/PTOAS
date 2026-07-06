@@ -23,8 +23,6 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 USER_GUIDE_ROOT = REPO_ROOT / "ptodsl" / "docs" / "user_guide"
-sys.path.insert(0, str(REPO_ROOT / "ptodsl"))
-
 from ptodsl import pto, scalar
 from ptodsl._bootstrap import make_context
 from ptodsl._runtime.launch import LaunchHandle, _marshal_launch_args

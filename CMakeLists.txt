@@ -245,6 +245,7 @@ if(PTO_ENABLE_PYTHON_BINDING)
   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/pto)
 
   add_subdirectory(python)
+  add_subdirectory(ptodsl)
   add_subdirectory(tilelang-dsl)
 endif()
 

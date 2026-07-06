@@ -21,19 +21,9 @@ This file mirrors the launchable shape used by ``softmax.py``:
 
 import argparse
 from pathlib import Path
-import sys
 import time
 
 import numpy as np
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate))
-            break
-    else:
-        raise RuntimeError("Unable to locate the PTODSL Python package root from gu.py")
 
 from ptodsl import pto
 
