@@ -268,7 +268,7 @@ def main():
 
     for op_name in (
         "pto.redux_add", "pto.syncthreads", "pto.store", "pto.load",
-        "pto.get_tid_x", "pto.get_laneid", "arith.shrui", "scf.if",
+        "pto.get_tid_x", "pto.get_laneid", "arith.select", "scf.if",
     ):
         expect(op_name in mlir, f"IR: expected '{op_name}' in helper body")
 
@@ -601,62 +601,48 @@ def main():
     )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Lowering verification — ptoas → bisheng (full AOT compilation)
+    # Lowering verification — ptoas VPTO LLVM IR emission
     #
     # Tests that the allreduce MLIR survives the complete ptoas pipeline:
-    #   MLIR (PTO dialect) → VPTO passes → LLVM IR → bisheng device codegen
+    #   MLIR (PTO dialect) → VPTO passes → LLVM IR
     #
     # KNOWN TOOLCHAIN ISSUES (bisheng, not allreduce):
     #   a) bisheng stack-smashing on SIMT code that stores to GM
     #   b) bisheng stack-smashing on cross-warp scratch-buffer code (≥ 128 lanes)
     #
-    # These are bisheng bugs — ptoas VPTO lowering succeeds; the crash is
-    # in the device LLVM→object step inside bisheng.  Verified by:
-    #   ptoas --emit-vpto-llvm-ir  → valid LLVM IR (no crash)
-    #   ptoas -o kernel.o          → bisheng crash during LLVM→object
+    # Keep this regression at --emit-vpto-llvm-ir so PTODSL CI does not require
+    # ASCEND_HOME_PATH or a bisheng installation.
     # ══════════════════════════════════════════════════════════════════════════
 
     import subprocess
     import tempfile
     from pathlib import Path
+    from ptodsl._runtime.toolchain import resolve_ptoas_binary
 
     def _ptoas_binary() -> Path:
-        for p in [
-            Path(__file__).resolve().parents[2] / "build" / "tools" / "ptoas" / "ptoas",
-        ]:
-            if p.is_file():
-                return p
-        raise RuntimeError(
-            "ptoas binary not found; run `source scripts/ptoas_env.sh` or build ptoas"
-        )
+        return resolve_ptoas_binary()
 
-    def _lower_and_check(compiled, case_label: str, expect_pass: bool = True) -> bool:
-        """Run ``ptoas`` lowering on *compiled* MLIR.  Returns True on success."""
+    def _emit_vpto_llvm_ir_and_check(compiled, case_label: str) -> bool:
+        """Run ``ptoas --emit-vpto-llvm-ir`` on *compiled* MLIR."""
         ptoas = _ptoas_binary()
         mlir_text = compiled.mlir_text()
         with tempfile.TemporaryDirectory() as tmpdir:
             mlir_path = Path(tmpdir) / "kernel.mlir"
-            obj_path = Path(tmpdir) / "kernel.o"
+            llvm_ir_path = Path(tmpdir) / "kernel.ll"
             mlir_path.write_text(mlir_text)
             result = subprocess.run(
                 [str(ptoas), "--pto-arch=a5", "--pto-backend=vpto",
-                 "--enable-tile-op-expand",
-                 str(mlir_path), "-o", str(obj_path)],
+                 "--enable-tile-op-expand", "--emit-vpto-llvm-ir",
+                 str(mlir_path), "-o", str(llvm_ir_path)],
                 capture_output=True, text=True,
             )
-            ok = result.returncode == 0 and obj_path.is_file()
+            ok = result.returncode == 0 and llvm_ir_path.is_file() and llvm_ir_path.stat().st_size > 0
             if ok:
                 return True
-            bisheng_crash = "stack smashing" in result.stderr or "exit code 134" in result.stderr
-            tag = "SKIP (bisheng bug)" if bisheng_crash else "FAIL"
-            if expect_pass and not bisheng_crash:
-                # Unexpected failure — report loudly
-                sys.stderr.write(
-                    f"\n  [{tag}] {case_label} (exit={result.returncode})\n"
-                    f"  STDERR: {result.stderr[:500]}\n"
-                )
-            else:
-                print(f"  [{tag}] {case_label}")
+            sys.stderr.write(
+                f"\n  [FAIL] {case_label} (exit={result.returncode})\n"
+                f"  STDERR: {result.stderr[:500]}\n"
+            )
             return False
 
     # ── Warp-reduce (≤ 32 lanes, NO scratch, NO GM store) ──
@@ -664,20 +650,19 @@ def main():
     # from the SIMT body without writing to GM.  They MUST lower cleanly
     # because they avoid both known bisheng issues.
     expect(
-        _lower_and_check(kernel_warp.compile(), "warp_sum_t32"),
+        _emit_vpto_llvm_ir_and_check(kernel_warp.compile(), "warp_sum_t32"),
         "lowering: warp_sum (32 lanes, hw redux, no GM store) must pass",
     )
     expect(
-        _lower_and_check(kernel_max_warp_hw.compile(), "warp_max_t32"),
+        _emit_vpto_llvm_ir_and_check(kernel_max_warp_hw.compile(), "warp_max_t32"),
         "lowering: warp_max (32 lanes, hw redux, no GM store) must pass",
     )
     expect(
-        _lower_and_check(kernel_min_warp_hw.compile(), "warp_min_t32"),
+        _emit_vpto_llvm_ir_and_check(kernel_min_warp_hw.compile(), "warp_min_t32"),
         "lowering: warp_min (32 lanes, hw redux, no GM store) must pass",
     )
 
-    # ── Cross-warp (128 lanes, UB scratch) — known bisheng crash ──
-    # ptoas VPTO lowering succeeds; bisheng crashes on the device LLVM IR.
+    # ── Cross-warp (128 lanes, UB scratch) ─────────────────────────────────
     @pto.jit(target="a5")
     def _kernel_cross_lowering(scratch_gm: pto.ptr(pto.f32, "gm")):
         zero_u64 = pto.const(0, dtype=pto.ui64)
@@ -685,7 +670,10 @@ def main():
         with pto.simt():
             x = pto.const(1.0, dtype=pto.f32)
             _result = pto.simt_allreduce_sum(x, scratch=ub_scratch, threads=128, scale=1)
-    _lower_and_check(_kernel_cross_lowering.compile(), "cross_sum_t128", expect_pass=False)
+    expect(
+        _emit_vpto_llvm_ir_and_check(_kernel_cross_lowering.compile(), "cross_sum_t128"),
+        "lowering: cross_sum (128 lanes, UB scratch) must emit VPTO LLVM IR",
+    )
 
     print("ptodsl_allreduce: PASS")
 

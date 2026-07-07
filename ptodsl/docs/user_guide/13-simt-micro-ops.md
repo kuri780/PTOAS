@@ -586,15 +586,15 @@ def simt_ops_sync_state_probe(dst: pto.ptr(pto.i32, "gm")):
 
 ## 13.5 SIMT allreduce
 
-`pto.simt_allreduce_sum`, `pto.simt_allreduce_max`, and
-`pto.simt_allreduce_min` reduce a scalar value across SIMT work-items.
+`pto.simt_allreduce_sum`, `pto.simt_allreduce_max`, and `pto.simt_allreduce_min` reduce a scalar value across SIMT work-items.
+
+These are Python-level SIMT collective helpers. They are expanded inline into existing PTO IR such as `pto.redux_*`, `pto.shuffle_bfly`, `pto.load`, `pto.store`, `pto.syncthreads`, and structured control flow; they do not lower to dedicated `pto.simt_allreduce_*` ops.
 
 #### `pto.simt_allreduce_sum(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
 #### `pto.simt_allreduce_max(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
 #### `pto.simt_allreduce_min(value, *, threads, scale=1, thread_offset=0, scratch=None) -> ScalarType`
 
-**Description**: Reduce `value` across `threads` work-items. The result is
-replicated to every participating work-item.
+**Description**: Reduce `value` across `threads` work-items. The result is replicated to every participating work-item.
 
 **Parameters**:
 

@@ -26,9 +26,10 @@ from . import scalar
 from ._control_flow import if_, for_
 from ._ops import const as _const, get_laneid, get_tid_x, redux_add, redux_max, redux_min, shuffle_bfly, syncthreads
 from ._surface_values import unwrap_surface_value
-from ._types import _resolve, float16 as _f16_dtype, float32 as _f32_dtype
+from ._types import _resolve, float16 as _f16_dtype, float32 as _f32_dtype, si32 as _si32_dtype, ui32 as _ui32_dtype
 
-from mlir.ir import F16Type, F32Type
+from mlir.dialects import pto as _pto
+from mlir.ir import F16Type, F32Type, IntegerType
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -38,12 +39,43 @@ def _is_pow2(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
+def _validate_scratch_buffer(scratch, *, value_type, reducer: str, dtype: str,
+                             threads: int, scale: int, thread_offset: int) -> None:
+    context = f"all_reduce {reducer}/{dtype}/t{threads}/s{scale}/o{thread_offset}"
+    raw_scratch = unwrap_surface_value(scratch)
+    try:
+        scratch_type = _pto.PtrType(raw_scratch.type)
+    except Exception as exc:
+        raise TypeError(f"{context} requires a UB scratch buffer pointer, got {raw_scratch.type}") from exc
+    if scratch_type.element_type != value_type:
+        raise TypeError(
+            f"{context} scratch element type mismatch: expected {value_type}, got {scratch_type.element_type}"
+        )
+    memory_space = getattr(scratch_type, "memory_space", None)
+    vec_attr = _pto.AddressSpaceAttr.get(_pto.AddressSpace.VEC)
+    memory_space_value = getattr(memory_space, "value", memory_space)
+    scratch_type_text = str(scratch_type)
+    if (
+        memory_space != vec_attr
+        and memory_space_value != _pto.AddressSpace.VEC
+        and ", ub>" not in scratch_type_text
+        and ", vec>" not in scratch_type_text
+    ):
+        raise TypeError(f"{context} requires a UB scratch buffer, got {scratch_type}")
+
+
 # ── reducer dispatch tables ────────────────────────────────────────────────────
 
 _REDUCER_IDENTITY = {
-    "sum": {"f32": 0.0, "f16": 0.0},
-    "max": {"f32": float("-inf"), "f16": float("-inf")},
-    "min": {"f32": float("inf"), "f16": float("inf")},
+    "sum": {"f32": 0.0, "f16": 0.0, "si32": 0, "ui32": 0},
+    "max": {
+        "f32": float("-inf"), "f16": float("-inf"),
+        "si32": -(2 ** 31), "ui32": 0,
+    },
+    "min": {
+        "f32": float("inf"), "f16": float("inf"),
+        "si32": 2 ** 31 - 1, "ui32": 2 ** 32 - 1,
+    },
 }
 
 _REDUCER_COMBINE = {
@@ -56,6 +88,11 @@ _REDUCER_REDUX = {
     "sum": redux_add,
     "max": redux_max,
     "min": redux_min,
+}
+
+_REDUCER_IDENTITY_DTYPE = {
+    "f32": _f32_dtype, "f16": _f16_dtype,
+    "si32": _si32_dtype, "ui32": _ui32_dtype,
 }
 
 
@@ -84,7 +121,7 @@ def _emit_warp_hw_reduce(x, *, threads: int, lane_in_warp, dtype: str, reducer: 
 
     c_identity = _const(
         _REDUCER_IDENTITY[reducer][dtype],
-        dtype=_resolve(_f32_dtype if dtype == "f32" else _f16_dtype),
+        dtype=_resolve(_REDUCER_IDENTITY_DTYPE[dtype]),
     )
     my_group = lane_in_warp // threads
 
@@ -126,7 +163,7 @@ def _emit_cross_warp_reduce(x, scratch, *,
     num_warps = threads // 32
     c_identity = _const(
         _REDUCER_IDENTITY[reducer][dtype],
-        dtype=_resolve(_f32_dtype if dtype == "f32" else _f16_dtype),
+        dtype=_resolve(_REDUCER_IDENTITY_DTYPE[dtype]),
     )
     combine = _REDUCER_COMBINE[reducer]
     redux_fn = _REDUCER_REDUX[reducer]
@@ -162,25 +199,19 @@ def _emit_cross_warp_reduce(x, scratch, *,
     with if_(is_leader_warp) as br:
         with br.then_:
             if scale == 1:
-                need_load = lid < num_warps
-                with if_(need_load) as inner_br:
-                    with inner_br.then_:
-                        tmp = scalar.load(scratch, scalar.index_cast(lid))
-                        inner_br.assign(loaded=tmp)
-                    with inner_br.else_:
-                        inner_br.assign(loaded=c_identity)
-                loaded = inner_br.loaded
+                loaded = scalar.select(
+                    lid < num_warps,
+                    scalar.load(scratch, scalar.index_cast(lid)),
+                    c_identity,
+                )
                 stage4_result = redux_fn(loaded)
             elif scale * num_warps <= 32:
                 total = scale * num_warps
-                need_load = lid < total
-                with if_(need_load) as inner_br:
-                    with inner_br.then_:
-                        tmp = scalar.load(scratch, scalar.index_cast(lid))
-                        inner_br.assign(loaded=tmp)
-                    with inner_br.else_:
-                        inner_br.assign(loaded=c_identity)
-                loaded = inner_br.loaded
+                loaded = scalar.select(
+                    lid < total,
+                    scalar.load(scratch, scalar.index_cast(lid)),
+                    c_identity,
+                )
                 stage4_result = _emit_butterfly(
                     loaded, threads=total, scale=scale, reducer=reducer,
                 )
@@ -306,6 +337,10 @@ def _simt_allreduce(value, *, threads, scale, thread_offset, scratch, reducer):
         dtype = "f32"
     elif raw_value.type == F16Type.get():
         dtype = "f16"
+    elif raw_value.type == IntegerType.get_signed(32):
+        dtype = "si32"
+    elif raw_value.type == IntegerType.get_unsigned(32):
+        dtype = "ui32"
     else:
         raise NotImplementedError(f"all_reduce: unsupported dtype {raw_value.type}")
 
@@ -320,6 +355,15 @@ def _simt_allreduce(value, *, threads, scale, thread_offset, scratch, reducer):
             f"all_reduce {reducer}/{dtype}/t{threads}/s{scale}/o{thread_offset} "
             "requires a UB scratch buffer"
         )
+    _validate_scratch_buffer(
+        scratch,
+        value_type=raw_value.type,
+        reducer=reducer,
+        dtype=dtype,
+        threads=threads,
+        scale=scale,
+        thread_offset=thread_offset,
+    )
 
     if threads <= 32:
         return _emit_ub_reduce(value, scratch, **args)
