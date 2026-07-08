@@ -111,6 +111,8 @@ jobs:
       LLVM_REPO: https://github.com/vpto-dev/llvm-project.git
       LLVM_REF: feature-vpto-llvm21
       PTO_INSTALL_DIR: ${{ github.workspace }}/install
+      PTO_WHEELHOUSE: ${{ github.workspace }}/.work/ptoas-wheelhouse
+      PTOAS_VENV: ${{ github.workspace }}/.work/ptoas-sim-venv
       VPTO_SIM_WORKSPACE: ${{ github.workspace }}/.work/vpto-sim-ci
       TILELANG_DSL_WORKSPACE: ${{ github.workspace }}/.work/tilelang-dsl-ci
       TILELANG_DSL_UT_WORKSPACE: ${{ github.workspace }}/.work/tilelang-dsl-ut-ci
@@ -212,7 +214,7 @@ jobs:
           set -euo pipefail
           echo "PTO_DSL_ST_BUILD_DIR=${GITHUB_WORKSPACE}/build-ptodsl" >> "${GITHUB_ENV}"
           echo "PTO_DSL_ST_INSTALL_DIR=${GITHUB_WORKSPACE}/install-ptodsl" >> "${GITHUB_ENV}"
-          echo "PTO_DSL_ST_PTOAS_BIN=${GITHUB_WORKSPACE}/build-ptodsl/tools/ptoas/ptoas" >> "${GITHUB_ENV}"
+          echo "PTO_DSL_ST_WHEELHOUSE=${GITHUB_WORKSPACE}/.work/ptodsl-wheelhouse" >> "${GITHUB_ENV}"
 
       - name: Resolve LLVM cache key
         id: llvm-cache-key
@@ -246,6 +248,9 @@ jobs:
           rm -rf "${GITHUB_WORKSPACE}/build-ptodsl"
           rm -rf "${PTO_INSTALL_DIR}"
           rm -rf "${PTO_DSL_ST_INSTALL_DIR}"
+          rm -rf "${PTO_DSL_ST_WHEELHOUSE}"
+          rm -rf "${PTO_WHEELHOUSE}"
+          rm -rf "${PTOAS_VENV}"
           rm -rf "${VPTO_SIM_WORKSPACE}"
           rm -rf "${TILELANG_DSL_WORKSPACE}"
           rm -rf "${PYPTO_WORKSPACE}"
@@ -307,18 +312,39 @@ jobs:
           path: ${{ env.LLVM_DIR }}
           key: ${{ steps.llvm-cache-key.outputs.key }}
 
-      - name: Build PTOAS
+      - name: Build PTOAS wheel
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "${PTO_INSTALL_DIR}"
+          rm -rf "${PTO_WHEELHOUSE}"
+          mkdir -p "${PTO_WHEELHOUSE}"
           # Pin system compilers for the same reason as LLVM above.
           export CC=gcc
           export CXX=g++
-          # LLVM_BUILD_DIR is the env var read by the build backend (_ptoas_build_backend.py).
+          # LLVM_BUILD_DIR / PTO_INSTALL_DIR are read by the build backend
+          # while producing the wheel payload and staging native runtime bits.
           LLVM_BUILD_DIR="${LLVM_DIR}" \
             PTO_INSTALL_DIR="${PTO_INSTALL_DIR}" \
-            python3 -m pip install . --no-build-isolation --no-deps --ignore-installed --prefix "${PTO_INSTALL_DIR}"
+            python3 -m pip wheel . --no-build-isolation --no-deps --wheel-dir "${PTO_WHEELHOUSE}"
+
+      - name: Create PTOAS simulator venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${PTOAS_VENV}"
+          python3 -m venv "${PTOAS_VENV}"
+          "${PTOAS_VENV}/bin/python" -m pip install --upgrade pip
+
+          readarray -t ptoas_wheels < <(find "${PTO_WHEELHOUSE}" -maxdepth 1 -type f -name 'ptoas-*.whl' | sort)
+          if [[ "${#ptoas_wheels[@]}" -ne 1 ]]; then
+            echo "ERROR: expected exactly one PTOAS wheel in ${PTO_WHEELHOUSE}, found ${#ptoas_wheels[@]}" >&2
+            printf '  %s\n' "${ptoas_wheels[@]}" >&2
+            exit 1
+          fi
+
+          "${PTOAS_VENV}/bin/pip" install numpy ml-dtypes "${ptoas_wheels[0]}"
+          PATH="${PTOAS_VENV}/bin:${PATH}" bash docker/test_wheel_imports.sh
 
       - name: Checkout PyPTO
         uses: actions/checkout@v4
@@ -663,23 +689,13 @@ jobs:
           probe_ptodsl_runtime_python "${PTODSL_PYTHON}"
 
           PTO_DSL_ST_LLVM_DIR="${RUNNER_TOOL_CACHE}/llvm-project/llvm/build-assert-${PYTHON_TAG}"
-          PTO_DSL_ST_MLIR_PYTHONPATH="${PTO_DSL_ST_LLVM_DIR}/tools/mlir/python_packages/mlir_core"
-          PTO_DSL_ST_PYTHON_SITE="$(
-            PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}" "${PTODSL_PYTHON}" - <<'PY'
-          import os
-          import sysconfig
-
-          prefix = os.environ["PTO_INSTALL_DIR"]
-          print(sysconfig.get_path("purelib", vars={"base": prefix, "platbase": prefix}))
-          PY
-          )"
-
+          PTO_DSL_ST_BIN_DIR="$(dirname "${PTODSL_PYTHON}")"
           echo "PTO_DSL_ST_BASE_PYTHON=${SELECTED_BASE_PYTHON}" >> "${GITHUB_ENV}"
           echo "PTO_DSL_ST_PYTHON_BIN=${PTODSL_PYTHON}" >> "${GITHUB_ENV}"
+          echo "PTO_DSL_ST_BIN_DIR=${PTO_DSL_ST_BIN_DIR}" >> "${GITHUB_ENV}"
+          echo "PTO_DSL_ST_PTOAS_BIN=${PTO_DSL_ST_BIN_DIR}/ptoas" >> "${GITHUB_ENV}"
           echo "PTO_DSL_ST_PYTHON_TAG=${PYTHON_TAG}" >> "${GITHUB_ENV}"
           echo "PTO_DSL_ST_LLVM_DIR=${PTO_DSL_ST_LLVM_DIR}" >> "${GITHUB_ENV}"
-          echo "PTO_DSL_ST_MLIR_PYTHONPATH=${PTO_DSL_ST_MLIR_PYTHONPATH}" >> "${GITHUB_ENV}"
-          echo "PTO_DSL_ST_PYTHON_SITE=${PTO_DSL_ST_PYTHON_SITE}" >> "${GITHUB_ENV}"
 
       - name: Run TileLang DSL CI
         shell: bash
@@ -769,44 +785,59 @@ jobs:
           path: ${{ env.PTO_DSL_ST_LLVM_DIR }}
           key: llvm-build-${{ steps.llvm-cache-key.outputs.sha }}-assert-${{ env.PTO_DSL_ST_PYTHON_TAG }}-v2
 
-      - name: Build PTODSL PTOAS
+      - name: Build PTODSL PTOAS wheel
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "${PTO_DSL_ST_BUILD_DIR}" "${PTO_DSL_ST_INSTALL_DIR}"
+          rm -rf "${PTO_DSL_ST_WHEELHOUSE}"
+          mkdir -p "${PTO_DSL_ST_WHEELHOUSE}"
           export CC=gcc
           export CXX=g++
           LLVM_BUILD_DIR="${PTO_DSL_ST_LLVM_DIR}" \
             PTO_BUILD_DIR="${PTO_DSL_ST_BUILD_DIR}" \
             PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}" \
-            "${PTO_DSL_ST_PYTHON_BIN}" -m pip install . --no-build-isolation --no-deps --ignore-installed --prefix "${PTO_DSL_ST_INSTALL_DIR}"
+            "${PTO_DSL_ST_PYTHON_BIN}" -m pip wheel . --no-build-isolation --no-deps --wheel-dir "${PTO_DSL_ST_WHEELHOUSE}"
+
+      - name: Install PTODSL PTOAS wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          readarray -t ptodsl_wheels < <(find "${PTO_DSL_ST_WHEELHOUSE}" -maxdepth 1 -type f -name 'ptoas-*.whl' | sort)
+          if [[ "${#ptodsl_wheels[@]}" -ne 1 ]]; then
+            echo "ERROR: expected exactly one PTOAS wheel in ${PTO_DSL_ST_WHEELHOUSE}, found ${#ptodsl_wheels[@]}" >&2
+            printf '  %s\n' "${ptodsl_wheels[@]}" >&2
+            exit 1
+          fi
+
+          "${PTO_DSL_ST_PYTHON_BIN}" -m pip install --force-reinstall "${ptodsl_wheels[0]}"
 
       - name: Probe PTODSL runtime Python
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${TILELANG_DSL_WORKSPACE}"
-          export LLVM_BUILD_DIR="${PTO_DSL_ST_LLVM_DIR}"
-          export MLIR_PYTHON_ROOT="${PTO_DSL_ST_MLIR_PYTHONPATH}"
-          export PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}"
-          export PTO_PYTHON_BUILD_ROOT="${PTO_DSL_ST_BUILD_DIR}/python"
-          export PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
-          export PTO_PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
-          export PTOAS_PYTHON_SITE="${PTO_DSL_ST_PYTHON_SITE}"
           export TORCH_DEVICE_BACKEND_AUTOLOAD=0
           source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 
           probe_ptodsl_python() {
-            PYTHONPATH="${PTO_DSL_ST_INSTALL_DIR}:${PTOAS_PYTHON_SITE}:${PTO_DSL_ST_MLIR_PYTHONPATH}:${PTO_DSL_ST_BUILD_DIR}/python:${PYTHONPATH:-}" \
-              "${PTO_DSL_ST_PYTHON_BIN}" - <<'PY'
+            "${PTO_DSL_ST_PYTHON_BIN}" - <<'PY'
           import sys
-          import numpy
-          import torch
-          import torch_npu  # noqa: F401
+          import mlir.ir  # noqa: F401
           from ptodsl import pto  # noqa: F401
           from mlir.dialects import pto as _pto  # noqa: F401
 
           print(sys.executable)
+          print("ptodsl/mlir import ok")
+          PY
+          }
+
+          probe_torch_npu_python() {
+            "${PTO_DSL_ST_PYTHON_BIN}" - <<'PY'
+          import numpy
+          import torch
+          import torch_npu  # noqa: F401
+
           print("torch", torch.__version__)
           print("torch_npu", getattr(torch_npu, "__version__", "unknown"))
           print("numpy", numpy.__version__)
@@ -816,11 +847,22 @@ jobs:
           PROBE_LOG="${TILELANG_DSL_WORKSPACE}/ptodsl-python-probe.log"
           : > "${PROBE_LOG}"
           echo "Probing PTODSL DSL ST Python: ${PTO_DSL_ST_PYTHON_BIN}" | tee -a "${PROBE_LOG}"
-          if ! probe_ptodsl_python >> "${PROBE_LOG}" 2>&1; then
-            cat "${PROBE_LOG}" >&2
-            echo "ERROR: selected PTODSL Python cannot import torch, torch_npu, ptodsl, and MLIR PTO bindings." >&2
+          echo "Probing PTODSL DSL ST ptoas: ${PTO_DSL_ST_PTOAS_BIN}" | tee -a "${PROBE_LOG}"
+          if [[ ! -x "${PTO_DSL_ST_PTOAS_BIN}" ]]; then
+            echo "ERROR: installed PTODSL ptoas entry is missing: ${PTO_DSL_ST_PTOAS_BIN}" | tee -a "${PROBE_LOG}" >&2
             exit 1
           fi
+          if ! probe_ptodsl_python >> "${PROBE_LOG}" 2>&1; then
+            cat "${PROBE_LOG}" >&2
+            echo "ERROR: selected PTODSL Python cannot import ptodsl and MLIR PTO bindings." >&2
+            exit 1
+          fi
+          if ! probe_torch_npu_python >> "${PROBE_LOG}" 2>&1; then
+            cat "${PROBE_LOG}" >&2
+            echo "ERROR: selected PTODSL Python cannot import torch, torch_npu, and numpy." >&2
+            exit 1
+          fi
+          "${PTO_DSL_ST_PTOAS_BIN}" --version >> "${PROBE_LOG}" 2>&1
 
           cat "${PROBE_LOG}"
 
@@ -830,13 +872,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${VPTO_SIM_WORKSPACE}"
-          export LLVM_BUILD_DIR="${PTO_DSL_ST_LLVM_DIR}"
-          export MLIR_PYTHON_ROOT="${PTO_DSL_ST_MLIR_PYTHONPATH}"
-          export PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}"
-          export PTO_PYTHON_BUILD_ROOT="${PTO_DSL_ST_BUILD_DIR}/python"
           export PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
           export PTO_PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
-          export PTOAS_PYTHON_SITE="${PTO_DSL_ST_PYTHON_SITE}"
+          export PATH="${PTO_DSL_ST_BIN_DIR}:${PATH}"
           export TORCH_DEVICE_BACKEND_AUTOLOAD=0
           source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 
@@ -852,13 +890,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${TILELANG_DSL_WORKSPACE}"
-          export LLVM_BUILD_DIR="${PTO_DSL_ST_LLVM_DIR}"
-          export MLIR_PYTHON_ROOT="${PTO_DSL_ST_MLIR_PYTHONPATH}"
-          export PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}"
-          export PTO_PYTHON_BUILD_ROOT="${PTO_DSL_ST_BUILD_DIR}/python"
           export PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
           export PTO_PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
-          export PTOAS_PYTHON_SITE="${PTO_DSL_ST_PYTHON_SITE}"
+          export PATH="${PTO_DSL_ST_BIN_DIR}:${PATH}"
           export TORCH_DEVICE_BACKEND_AUTOLOAD=0
           source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 
@@ -872,13 +906,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${TILELANG_DSL_WORKSPACE}"
-          export LLVM_BUILD_DIR="${PTO_DSL_ST_LLVM_DIR}"
-          export MLIR_PYTHON_ROOT="${PTO_DSL_ST_MLIR_PYTHONPATH}"
-          export PTO_INSTALL_DIR="${PTO_DSL_ST_INSTALL_DIR}"
-          export PTO_PYTHON_BUILD_ROOT="${PTO_DSL_ST_BUILD_DIR}/python"
           export PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
           export PTO_PYTHON_BIN="${PTO_DSL_ST_PYTHON_BIN}"
-          export PTOAS_PYTHON_SITE="${PTO_DSL_ST_PYTHON_SITE}"
+          export PATH="${PTO_DSL_ST_BIN_DIR}:${PATH}"
           export TORCH_DEVICE_BACKEND_AUTOLOAD=0
           source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 
@@ -904,8 +934,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${TILELANG_DSL_UT_WORKSPACE}"
-          cd tilelang-dsl
-          PYTHONPATH=python python3 -m unittest discover -s tests -p 'test_*.py' \
+          export PATH="${PTOAS_VENV}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${LLVM_DIR}/lib:${PTO_INSTALL_DIR}/lib:${GITHUB_WORKSPACE}/build/lib:${LD_LIBRARY_PATH:-}"
+          cd tilelang-dsl/python
+          python3 -m unittest discover -s ../tests -p 'test_*.py' \
             2>&1 | tee "${TILELANG_DSL_UT_WORKSPACE}/unittest.log"
 
       - name: Upload TileLang DSL unit test logs

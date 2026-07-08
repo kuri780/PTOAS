@@ -56,6 +56,31 @@ log() {
   echo "[sim_dsl] $*"
 }
 
+resolve_executable() {
+  local candidate="$1"
+  if [[ -z "${candidate}" ]]; then
+    return 1
+  fi
+  if [[ "${candidate}" == */* ]]; then
+    [[ -x "${candidate}" ]] || return 1
+    command -v -- "${candidate}"
+    return 0
+  fi
+  command -v -- "${candidate}"
+}
+
+prepend_path() {
+  local dir="$1"
+  if [[ -z "${dir}" || ! -d "${dir}" ]]; then
+    return 0
+  fi
+  if [[ ":${PATH}:" == *":${dir}:"* ]]; then
+    return 0
+  fi
+  PATH="${dir}:${PATH}"
+  export PATH
+}
+
 ensure_private_dir() {
   local dir="$1"
   umask 077
@@ -99,6 +124,14 @@ print_msprof_log() {
     fi
     log "full msprof log saved at ${log_file}"
   fi
+}
+
+python_can_import_ptodsl() {
+  local python_bin="$1"
+  "${python_bin}" - <<'PY' >/dev/null 2>&1
+import mlir.ir  # noqa: F401
+from ptodsl import pto  # noqa: F401
+PY
 }
 
 SOC_VERSION="Ascend950PR_9599"
@@ -181,16 +214,33 @@ chmod 700 "${RUNTIME_OUTPUT_DIR}"
 MSPROF_STDIO_LOG="${RUNTIME_OUTPUT_DIR}/msprof.stdout.log"
 EXAMPLE_EXIT_CODE_FILE="${RUNTIME_OUTPUT_DIR}/example.exitcode"
 EXAMPLE_LAUNCHER="${RUNTIME_OUTPUT_DIR}/run_example.sh"
-PYTHON_BIN="${PTO_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
+REQUESTED_PYTHON_BIN="${PTO_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
+REQUESTED_PTOAS_BIN="${PTOAS_BIN:-}"
+
+if ! RESOLVED_PYTHON_BIN="$(resolve_executable "${REQUESTED_PYTHON_BIN}")"; then
+  die "PYTHON_BIN is not executable or not found on PATH: ${REQUESTED_PYTHON_BIN}"
+fi
+if [[ -n "${REQUESTED_PTOAS_BIN}" ]]; then
+  if ! RESOLVED_PTOAS_BIN="$(resolve_executable "${REQUESTED_PTOAS_BIN}")"; then
+    die "PTOAS_BIN is not executable or not found on PATH: ${REQUESTED_PTOAS_BIN}"
+  fi
+fi
 
 source "${ASCEND_HOME_PATH}/bin/setenv.bash"
-source "${REPO_ROOT}/scripts/ptoas_env.sh"
+if [[ -n "${RESOLVED_PTOAS_BIN:-}" ]]; then
+  prepend_path "$(dirname -- "${RESOLVED_PTOAS_BIN}")"
+  export PTOAS_BIN="${RESOLVED_PTOAS_BIN}"
+fi
+if ! python_can_import_ptodsl "${RESOLVED_PYTHON_BIN}"; then
+  die "active Python environment cannot import ptodsl/mlir.ir; install the PTOAS wheel or use a preconfigured environment"
+fi
+if ! command -v ptoas >/dev/null 2>&1; then
+  die "ptoas is not available on PATH; install the PTOAS wheel or export PTOAS_BIN"
+fi
+log "using installed Python environment from ${RESOLVED_PYTHON_BIN}"
+log "using ptoas from $(command -v ptoas)"
 export LD_LIBRARY_PATH="${SIM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 ulimit -n 65535
-
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  die "PYTHON_BIN is not executable or not found on PATH: ${PYTHON_BIN}"
-fi
 
 cat > "${EXAMPLE_LAUNCHER}" <<'EOF'
 #!/usr/bin/env bash
@@ -201,7 +251,7 @@ printf '%s\n' "${status}" > "${PTOAS_SIM_DSL_EXIT_CODE_FILE}"
 exit "${status}"
 EOF
 chmod 700 "${EXAMPLE_LAUNCHER}"
-export PTOAS_SIM_DSL_PYTHON_BIN="${PYTHON_BIN}"
+export PTOAS_SIM_DSL_PYTHON_BIN="${RESOLVED_PYTHON_BIN}"
 export PTOAS_SIM_DSL_EXAMPLE_PATH="${EXAMPLE_PATH}"
 export PTOAS_SIM_DSL_EXIT_CODE_FILE="${EXAMPLE_EXIT_CODE_FILE}"
 
