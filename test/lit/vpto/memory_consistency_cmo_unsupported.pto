@@ -18,4 +18,4 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // CHECK: pto.cmo.cacheinvalid
 // CHECK-SAME: is not supported by the VPTO backend yet
-// CHECK: VPTO lowering still needs a confirmed DSB/DCCI intrinsic ABI
+// CHECK: high-level CMO/fence ops must be lowered to `pto.dcci` or `pto.dsb`

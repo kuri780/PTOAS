@@ -14,6 +14,7 @@
 #include "VPTOHostStubEmission.h"
 #include "TilelangDaemon.h"
 #include "PTO/Transforms/CppPostprocess.h"
+#include "mlir/AsmParser/AsmParserState.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -53,9 +54,13 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Program.h"
+#include <algorithm>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -430,18 +435,20 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
   return expandOpts;
 }
 
-static llvm::cl::opt<bool> enableOpFusion(
+static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
-    llvm::cl::desc("Enable A5 tile fusion on level2/level3. EmitC uses "
-                   "last-use annotation; VPTO uses fusion-region lifecycle."),
-    llvm::cl::init(false));
+    llvm::cl::desc("Control A5 tile fusion on level2/level3. Defaults to "
+                   "enabled on A5, disabled on A3. EmitC uses last-use "
+                   "annotation; VPTO uses fusion-region lifecycle."),
+    llvm::cl::init(llvm::cl::BOU_UNSET));
 
 static llvm::cl::opt<bool> enableShapeInference(
     "enable-shape-inference",
     llvm::cl::desc("Enable shape inference (ShapeConstraintSolver) for A5 tile "
-                  "fusion. Off by default: falls back to static/direct-bound "
-                  "iteration-domain inference."),
-    llvm::cl::init(false));
+                  "fusion. On by default: uses the ShapeConstraintSolver for "
+                  "iteration-domain inference; pass --enable-shape-inference=false "
+                  "to fall back to static/direct-bound inference."),
+    llvm::cl::init(true));
 
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
@@ -608,6 +615,607 @@ static bool hasUnexpandedTileOps(ModuleOp module) {
       found = true;
   });
   return found;
+}
+
+using FunctionBlockArgHintMap =
+    llvm::StringMap<llvm::SmallVector<llvm::SmallVector<std::string, 4>, 4>>;
+
+static bool isGeneratedValueName(llvm::StringRef name);
+static SmallVector<std::string, 4> getValueNameHints(Value value);
+
+static bool isCppIdentifierStart(char c) {
+  return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static bool isCppIdentifierChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static std::optional<std::string> getTextualNameFromSMRange(llvm::SMRange range) {
+  if (!range.Start.isValid() || !range.End.isValid())
+    return std::nullopt;
+  const char *begin = range.Start.getPointer();
+  const char *end = range.End.getPointer();
+  if (!begin || !end || end < begin)
+    return std::nullopt;
+  llvm::StringRef name(begin, static_cast<size_t>(end - begin));
+  if (name.empty())
+    return std::nullopt;
+  name = name.trim();
+  if (name.consume_front("%") && name.empty())
+    return std::nullopt;
+  return name.str();
+}
+
+static SmallVector<std::string, 4>
+expandTextualResultGroupHints(const AsmParserState::OperationDefinition &opDef,
+                              unsigned groupIndex) {
+  SmallVector<std::string, 4> hints;
+  if (groupIndex >= opDef.resultGroups.size())
+    return hints;
+  const auto &group = opDef.resultGroups[groupIndex];
+  std::optional<std::string> baseName =
+      getTextualNameFromSMRange(group.definition.loc);
+  if (!baseName)
+    return hints;
+
+  unsigned resultStart = group.startIndex;
+  unsigned resultEnd = groupIndex + 1 == opDef.resultGroups.size()
+                           ? opDef.op->getNumResults()
+                           : opDef.resultGroups[groupIndex + 1].startIndex;
+  if (resultStart >= resultEnd)
+    return hints;
+  if (resultEnd - resultStart == 1) {
+    hints.push_back(*baseName);
+    return hints;
+  }
+  for (unsigned idx = resultStart; idx < resultEnd; ++idx)
+    hints.push_back(*baseName + "#" + std::to_string(idx - resultStart));
+  return hints;
+}
+
+static std::string sanitizeCppIdentifier(llvm::StringRef name) {
+  std::string sanitized;
+  sanitized.reserve(name.size() + 4);
+
+  auto appendUnderscore = [&]() {
+    if (sanitized.empty() || sanitized.back() != '_')
+      sanitized.push_back('_');
+  };
+
+  for (char c : name) {
+    if (isCppIdentifierChar(c))
+      sanitized.push_back(c);
+    else
+      appendUnderscore();
+  }
+
+  while (!sanitized.empty() && sanitized.back() == '_')
+    sanitized.pop_back();
+
+  if (sanitized.empty())
+    return {};
+  if (!isCppIdentifierStart(sanitized.front()))
+    sanitized.insert(sanitized.begin(), '_');
+  return sanitized;
+}
+
+static void appendLocationNameHints(Location loc,
+                                    SmallVectorImpl<std::string> &hints) {
+  if (auto nameLoc = dyn_cast<NameLoc>(loc)) {
+    std::string sanitized = sanitizeCppIdentifier(nameLoc.getName().getValue());
+    if (!sanitized.empty())
+      hints.push_back(std::move(sanitized));
+    return;
+  }
+
+  if (auto fusedLoc = dyn_cast<FusedLoc>(loc)) {
+    if (Attribute metadata = fusedLoc.getMetadata()) {
+      if (auto strAttr = dyn_cast<StringAttr>(metadata)) {
+        std::string sanitized = sanitizeCppIdentifier(strAttr.getValue());
+        if (!sanitized.empty())
+          hints.push_back(std::move(sanitized));
+        return;
+      }
+      if (auto arrayAttr = dyn_cast<ArrayAttr>(metadata)) {
+        for (Attribute attr : arrayAttr) {
+          auto strAttr = dyn_cast<StringAttr>(attr);
+          if (!strAttr)
+            continue;
+          std::string sanitized = sanitizeCppIdentifier(strAttr.getValue());
+          if (!sanitized.empty())
+            hints.push_back(std::move(sanitized));
+        }
+        if (!hints.empty())
+          return;
+      }
+    }
+
+    // Only metadata explicitly attached by PTOAS name-hint recovery carries an
+    // ordered result-name list. Ordinary fused child locations are debug
+    // provenance, not result-indexed name hints.
+    return;
+  }
+
+  if (auto callSiteLoc = dyn_cast<CallSiteLoc>(loc)) {
+    appendLocationNameHints(callSiteLoc.getCallee(), hints);
+    if (hints.empty())
+      appendLocationNameHints(callSiteLoc.getCaller(), hints);
+  }
+}
+
+static bool hasLocationNameHints(Location loc) {
+  SmallVector<std::string, 4> hints;
+  appendLocationNameHints(loc, hints);
+  return !hints.empty();
+}
+
+// Read the *raw* (unsanitized) source SSA name hints carried in the Location
+// metadata. Unlike appendLocationNameHints, this preserves the original textual
+// form (e.g. "0", "24", "query_tile") so that issue #337's "pto: %N" provenance
+// comments can map a generated C++ variable back to its input .pto SSA name,
+// even for pure-digit names that would otherwise be sanitized to "_0".
+static void appendRawLocationProvenance(Location loc,
+                                        SmallVectorImpl<std::string> &hints) {
+  if (auto nameLoc = dyn_cast<NameLoc>(loc)) {
+    std::string raw = nameLoc.getName().getValue().str();
+    if (!raw.empty())
+      hints.push_back(std::move(raw));
+    return;
+  }
+
+  if (auto fusedLoc = dyn_cast<FusedLoc>(loc)) {
+    if (Attribute metadata = fusedLoc.getMetadata()) {
+      if (auto strAttr = dyn_cast<StringAttr>(metadata)) {
+        std::string raw = strAttr.getValue().str();
+        if (!raw.empty())
+          hints.push_back(std::move(raw));
+        return;
+      }
+      if (auto arrayAttr = dyn_cast<ArrayAttr>(metadata)) {
+        for (Attribute attr : arrayAttr) {
+          auto strAttr = dyn_cast<StringAttr>(attr);
+          if (!strAttr)
+            continue;
+          std::string raw = strAttr.getValue().str();
+          if (!raw.empty())
+            hints.push_back(std::move(raw));
+        }
+        if (!hints.empty())
+          return;
+      }
+    }
+
+    // Only metadata explicitly attached by PTOAS name-hint recovery carries an
+    // ordered result-name list. Ordinary fused child locations are debug
+    // provenance, not result-indexed name hints.
+    return;
+  }
+
+  if (auto callSiteLoc = dyn_cast<CallSiteLoc>(loc)) {
+    appendRawLocationProvenance(callSiteLoc.getCallee(), hints);
+    if (hints.empty())
+      appendRawLocationProvenance(callSiteLoc.getCaller(), hints);
+  }
+}
+
+// Recover the raw provenance (input .pto SSA name) for an op's results.
+// Returns one raw name per result when available, mirroring getResultNameHints
+// but without sanitization.
+static SmallVector<std::string, 4> getRawResultProvenance(Operation *op) {
+  SmallVector<std::string, 4> hints;
+  if (!op || op->getNumResults() == 0)
+    return hints;
+  appendRawLocationProvenance(op->getLoc(), hints);
+  if (hints.empty())
+    return hints;
+  hints.erase(std::remove_if(hints.begin(), hints.end(),
+                              [](const std::string &name) {
+                                return name.empty();
+                              }),
+              hints.end());
+  if (hints.empty())
+    return hints;
+  if (op->getNumResults() == 1) {
+    if (hints.size() > 1)
+      hints.resize(1);
+    return hints;
+  }
+  if (hints.size() > op->getNumResults())
+    hints.resize(op->getNumResults());
+  return hints;
+}
+
+static SmallVector<std::string, 4> getRawLocationProvenance(Location loc) {
+  SmallVector<std::string, 4> hints;
+  appendRawLocationProvenance(loc, hints);
+  hints.erase(std::remove_if(hints.begin(), hints.end(),
+                             [](const std::string &hint) {
+                               return hint.empty();
+                             }),
+              hints.end());
+  return hints;
+}
+
+static Location getIndexedRawProvenanceLoc(Location fallbackLoc, unsigned index) {
+  SmallVector<std::string, 4> hints = getRawLocationProvenance(fallbackLoc);
+  if (index >= hints.size())
+    return fallbackLoc;
+  return NameLoc::get(StringAttr::get(fallbackLoc.getContext(), hints[index]),
+                      fallbackLoc);
+}
+
+static Location attachLocationNameHints(Location baseLoc,
+                                        llvm::ArrayRef<std::string> hints,
+                                        MLIRContext *context) {
+  SmallVector<Attribute, 4> attrs;
+  attrs.reserve(hints.size());
+  for (llvm::StringRef hint : hints) {
+    if (!hint.empty())
+      attrs.push_back(StringAttr::get(context, hint));
+  }
+  if (attrs.empty())
+    return baseLoc;
+  if (attrs.size() == 1)
+    return NameLoc::get(cast<StringAttr>(attrs.front()), baseLoc);
+  return FusedLoc::get(ArrayRef<Location>{baseLoc}, ArrayAttr::get(context, attrs),
+                       context);
+}
+
+static void applyValueNameHints(Value value, llvm::ArrayRef<std::string> hints) {
+  if (!value || hints.empty() || hasLocationNameHints(value.getLoc()))
+    return;
+  value.setLoc(attachLocationNameHints(value.getLoc(), hints, value.getContext()));
+}
+
+static void applyOperationResultNameHints(Operation *op,
+                                          llvm::ArrayRef<std::string> hints) {
+  if (!op || op->getNumResults() == 0 || hints.empty() ||
+      hasLocationNameHints(op->getLoc()))
+    return;
+
+  SmallVector<std::string, 4> limitedHints;
+  limitedHints.reserve(std::min<size_t>(op->getNumResults(), hints.size()));
+  for (size_t i = 0, e = std::min<size_t>(op->getNumResults(), hints.size());
+       i < e; ++i)
+    limitedHints.push_back(hints[i]);
+  if (limitedHints.empty())
+    return;
+
+  op->setLoc(attachLocationNameHints(op->getLoc(), limitedHints, op->getContext()));
+}
+
+static void splitDerivedSingleResultProvenanceLocsInRegion(Region &region);
+
+static void splitDerivedSingleResultProvenanceLocsInBlock(Block &block) {
+  SmallVector<Operation *, 16> ops;
+  ops.reserve(block.getOperations().size());
+  for (Operation &op : block)
+    ops.push_back(&op);
+
+  for (size_t i = 0; i < ops.size();) {
+    Operation *op = ops[i];
+    if (op->getNumResults() != 1) {
+      ++i;
+      continue;
+    }
+
+    SmallVector<std::string, 4> hints = getRawLocationProvenance(op->getLoc());
+    if (hints.size() <= 1) {
+      ++i;
+      continue;
+    }
+
+    size_t runEnd = i + 1;
+    while (runEnd < ops.size() && ops[runEnd]->getNumResults() == 1 &&
+           ops[runEnd]->getLoc() == op->getLoc()) {
+      ++runEnd;
+    }
+
+    size_t runSize = runEnd - i;
+    if (runSize == hints.size()) {
+      Location sharedLoc = op->getLoc();
+      for (size_t j = 0; j < runSize; ++j)
+        ops[i + j]->setLoc(getIndexedRawProvenanceLoc(sharedLoc, j));
+    }
+
+    i = runEnd;
+  }
+
+  for (Operation &op : block) {
+    for (Region &region : op.getRegions())
+      splitDerivedSingleResultProvenanceLocsInRegion(region);
+  }
+}
+
+static void splitDerivedSingleResultProvenanceLocsInRegion(Region &region) {
+  for (Block &block : region)
+    splitDerivedSingleResultProvenanceLocsInBlock(block);
+}
+
+static void splitDerivedSingleResultProvenanceLocs(Operation *root) {
+  if (!root)
+    return;
+  for (Region &region : root->getRegions())
+    splitDerivedSingleResultProvenanceLocsInRegion(region);
+}
+
+static void narrowUnusedMultiResultProvenanceLocs(Operation *root) {
+  if (!root)
+    return;
+
+  root->walk([&](Operation *op) {
+    if (op->getNumResults() <= 1)
+      return;
+
+    SmallVector<std::string, 4> hints = getRawLocationProvenance(op->getLoc());
+    if (hints.size() != op->getNumResults())
+      return;
+
+    SmallVector<std::string, 4> liveHints;
+    liveHints.reserve(hints.size());
+    for (auto [index, result] : llvm::enumerate(op->getResults())) {
+      if (!result.use_empty())
+        liveHints.push_back(hints[index]);
+    }
+
+    if (liveHints.empty() || liveHints.size() == hints.size())
+      return;
+
+    op->setLoc(attachLocationNameHints(op->getLoc(), liveHints,
+                                       op->getContext()));
+  });
+}
+
+namespace {
+struct NarrowUnusedMultiResultProvenancePass
+    : public PassWrapper<NarrowUnusedMultiResultProvenancePass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      NarrowUnusedMultiResultProvenancePass)
+
+  void runOnOperation() override {
+    narrowUnusedMultiResultProvenanceLocs(getOperation());
+  }
+};
+} // namespace
+
+static std::unique_ptr<Pass> createNarrowUnusedMultiResultProvenancePass() {
+  return std::make_unique<NarrowUnusedMultiResultProvenancePass>();
+}
+
+static void collectNonEntryBlocksInSourceOrder(
+    Operation *op, SmallVectorImpl<Block *> &blocks) {
+  for (Region &region : op->getRegions()) {
+    bool isEntryBlock = true;
+    for (Block &block : region) {
+      if (!isEntryBlock && block.getNumArguments() != 0)
+        blocks.push_back(&block);
+      isEntryBlock = false;
+      for (Operation &nestedOp : block)
+        collectNonEntryBlocksInSourceOrder(&nestedOp, blocks);
+    }
+  }
+}
+
+void mlir::pto::applyTextualNameHintsToModule(ModuleOp module,
+                                              const AsmParserState &parserState) {
+  if (!module)
+    return;
+
+  for (const AsmParserState::BlockDefinition &blockDef : parserState.getBlockDefs()) {
+    if (!blockDef.block)
+      continue;
+    for (auto [argIndex, argDef] : llvm::enumerate(blockDef.arguments)) {
+      if (argIndex >= blockDef.block->getNumArguments())
+        break;
+      std::optional<std::string> hint = getTextualNameFromSMRange(argDef.loc);
+      if (!hint)
+        continue;
+      applyValueNameHints(blockDef.block->getArgument(argIndex),
+                          llvm::ArrayRef<std::string>{*hint});
+    }
+  }
+
+  for (const AsmParserState::OperationDefinition &opDef : parserState.getOpDefs()) {
+    if (!opDef.op || opDef.op->getNumResults() == 0)
+      continue;
+
+    SmallVector<std::string, 4> hints;
+    hints.reserve(opDef.op->getNumResults());
+    for (unsigned groupIndex = 0, e = opDef.resultGroups.size(); groupIndex < e;
+         ++groupIndex) {
+      SmallVector<std::string, 4> groupHints =
+          expandTextualResultGroupHints(opDef, groupIndex);
+      hints.append(groupHints.begin(), groupHints.end());
+    }
+    if (hints.empty())
+      continue;
+    applyOperationResultNameHints(opDef.op, hints);
+  }
+}
+
+static FunctionBlockArgHintMap collectFunctionBlockArgNameHints(ModuleOp module) {
+  FunctionBlockArgHintMap hintsByFunction;
+  for (func::FuncOp func : module.getOps<func::FuncOp>()) {
+    SmallVector<Block *, 8> nonEntryBlocks;
+    collectNonEntryBlocksInSourceOrder(func.getOperation(), nonEntryBlocks);
+    if (nonEntryBlocks.empty())
+      continue;
+
+    SmallVector<SmallVector<std::string, 4>, 4> blockHints;
+    blockHints.reserve(nonEntryBlocks.size());
+    for (Block *block : nonEntryBlocks) {
+      SmallVector<std::string, 4> argHints;
+      bool hasAllHints = block->getNumArguments() != 0;
+      for (BlockArgument arg : block->getArguments()) {
+        SmallVector<std::string, 4> hints = getValueNameHints(arg);
+        if (hints.empty()) {
+          hasAllHints = false;
+          break;
+        }
+        argHints.push_back(std::move(hints.front()));
+      }
+      if (hasAllHints)
+        blockHints.push_back(std::move(argHints));
+    }
+
+    if (!blockHints.empty())
+      hintsByFunction[func.getSymNameAttr()] = std::move(blockHints);
+  }
+  return hintsByFunction;
+}
+
+static void applyFunctionBlockArgNameHintsToEmitC(
+    ModuleOp module, const FunctionBlockArgHintMap &blockArgHints) {
+  for (emitc::FuncOp func : module.getOps<emitc::FuncOp>()) {
+    auto it = blockArgHints.find(func.getSymNameAttr());
+    if (it == blockArgHints.end() || it->second.empty())
+      continue;
+
+    SmallVector<Block *, 8> nonEntryBlocks;
+    collectNonEntryBlocksInSourceOrder(func.getOperation(), nonEntryBlocks);
+    if (nonEntryBlocks.size() != it->second.size())
+      continue;
+
+    bool shapeMatches = true;
+    for (auto [blockIndex, block] : llvm::enumerate(nonEntryBlocks)) {
+      if (block->getNumArguments() != it->second[blockIndex].size()) {
+        shapeMatches = false;
+        break;
+      }
+    }
+    if (!shapeMatches)
+      continue;
+
+    for (auto [blockIndex, block] : llvm::enumerate(nonEntryBlocks)) {
+      const auto &argHints = it->second[blockIndex];
+      for (auto [argIndex, arg] : llvm::enumerate(block->getArguments()))
+        applyValueNameHints(arg, llvm::ArrayRef<std::string>{argHints[argIndex]});
+    }
+  }
+}
+
+static SmallVector<std::string, 4> getValueNameHints(Value value) {
+  SmallVector<std::string, 4> hints;
+  if (!value)
+    return hints;
+  appendLocationNameHints(value.getLoc(), hints);
+  if (hints.size() > 1)
+    hints.resize(1);
+  return hints;
+}
+
+static std::string buildHintMarker(llvm::StringRef prefix,
+                                   llvm::ArrayRef<std::string> hints) {
+  auto encodeHintMarkerToken = [](llvm::StringRef token) {
+    auto hexDigit = [](unsigned value) -> char {
+      return value < 10 ? static_cast<char>('0' + value)
+                        : static_cast<char>('A' + (value - 10));
+    };
+
+    auto isSafeMarkerChar = [](unsigned char c) {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+    };
+
+    std::string encoded;
+    encoded.reserve(token.size());
+    for (unsigned char c : token.bytes()) {
+      if (isSafeMarkerChar(c)) {
+        encoded.push_back(static_cast<char>(c));
+        continue;
+      }
+      encoded.push_back('%');
+      encoded.push_back(hexDigit((c >> 4) & 0xF));
+      encoded.push_back(hexDigit(c & 0xF));
+    }
+    return encoded;
+  };
+
+  std::string marker = ("/* " + prefix + ":").str();
+  for (size_t i = 0; i < hints.size(); ++i) {
+    if (i != 0)
+      marker.push_back(',');
+    marker.append(encodeHintMarkerToken(hints[i]));
+  }
+  marker.append(" */\n");
+  return marker;
+}
+
+static SmallVector<std::string, 8>
+collectExpressionProvenance(emitc::ExpressionOp expr) {
+  SmallVector<std::string, 8> provenance;
+  auto appendUnique = [&](llvm::ArrayRef<std::string> names) {
+    for (const std::string &name : names) {
+      if (name.empty())
+        continue;
+      if (std::find(provenance.begin(), provenance.end(), name) !=
+          provenance.end())
+        continue;
+      provenance.push_back(name);
+    }
+  };
+
+  expr.walk<WalkOrder::PreOrder>([&](Operation *nested) {
+    if (nested == expr.getOperation())
+      return WalkResult::advance();
+    if (nested->getNumResults() == 0 || isa<emitc::VerbatimOp>(nested))
+      return WalkResult::advance();
+    appendUnique(getRawResultProvenance(nested));
+    return WalkResult::advance();
+  });
+  appendUnique(getRawResultProvenance(expr.getOperation()));
+  return provenance;
+}
+
+static void annotateEmitCProvenanceHints(ModuleOp module) {
+  struct ProvenanceMarker {
+    Operation *op = nullptr;
+    SmallVector<std::string, 8> names;
+  };
+
+  llvm::SmallVector<ProvenanceMarker, 32> opsToAnnotate;
+  module.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (op->getNumResults() == 0 || isa<emitc::VerbatimOp>(op))
+      return WalkResult::advance();
+
+    if (auto expr = dyn_cast<emitc::ExpressionOp>(op)) {
+      SmallVector<std::string, 8> provenance = collectExpressionProvenance(expr);
+      if (provenance.empty())
+        return WalkResult::skip();
+      opsToAnnotate.push_back(
+          ProvenanceMarker{op, SmallVector<std::string, 8>(provenance)});
+      return WalkResult::skip();
+    }
+
+    if (op->getParentOfType<emitc::ExpressionOp>())
+      return WalkResult::advance();
+    // Only carry raw provenance into the C++ post-pass. Semantic renaming is
+    // intentionally deferred until naming can happen inside the emitter's own
+    // symbol table instead of via post-hoc C++ text rewriting.
+    SmallVector<std::string, 4> provenance = getRawResultProvenance(op);
+    if (provenance.empty())
+      return WalkResult::advance();
+    opsToAnnotate.push_back(ProvenanceMarker{
+        op, SmallVector<std::string, 8>(provenance.begin(), provenance.end())});
+    return WalkResult::advance();
+  });
+
+  OpBuilder builder(module.getContext());
+  for (const ProvenanceMarker &marker : opsToAnnotate) {
+    // Emit a provenance marker carrying the raw input SSA name. This is
+    // consumed by the C++ post-processor to emit `// pto: %N` comments so a
+    // reader can map a generated variable back to its .pto source (issue #337
+    // point 1: locatability without strict number alignment).
+    if (!marker.names.empty()) {
+      builder.setInsertionPoint(marker.op);
+      builder.create<emitc::VerbatimOp>(
+          marker.op->getLoc(),
+          builder.getStringAttr(
+              buildHintMarker("PTOAS_PROVENANCE", marker.names)));
+    }
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1516,6 +2124,174 @@ static void rewriteHoistedGlobalTensorDecls(std::string &cpp) {
   cpp.swap(out);
 }
 
+static std::optional<llvm::SmallVector<std::string, 4>>
+parseNameHintMarker(llvm::StringRef markerBody) {
+  auto decodeHintMarkerToken = [](llvm::StringRef token) {
+    auto hexValue = [](char c) -> int {
+      if (c >= '0' && c <= '9')
+        return c - '0';
+      if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+      return -1;
+    };
+
+    std::string decoded;
+    decoded.reserve(token.size());
+    for (size_t i = 0; i < token.size();) {
+      if (token[i] == '%' && i + 2 < token.size()) {
+        int hi = hexValue(token[i + 1]);
+        int lo = hexValue(token[i + 2]);
+        if (hi >= 0 && lo >= 0) {
+          decoded.push_back(
+              static_cast<char>((static_cast<unsigned>(hi) << 4) | lo));
+          i += 3;
+          continue;
+        }
+      }
+      decoded.push_back(token[i]);
+      ++i;
+    }
+    return decoded;
+  };
+
+  llvm::SmallVector<std::string, 4> hints;
+  markerBody = markerBody.trim();
+  if (markerBody.empty())
+    return std::nullopt;
+
+  size_t start = 0;
+  while (start <= markerBody.size()) {
+    size_t comma = markerBody.find(',', start);
+    llvm::StringRef token = markerBody.slice(
+        start, comma == llvm::StringRef::npos ? markerBody.size() : comma);
+    token = token.trim();
+    if (!token.empty())
+      hints.push_back(decodeHintMarkerToken(token));
+    if (comma == llvm::StringRef::npos)
+      break;
+    start = comma + 1;
+  }
+
+  if (hints.empty())
+    return std::nullopt;
+  return hints;
+}
+
+static void stripHintMarkersWithPrefix(std::string &cpp,
+                                       llvm::StringRef markerPrefix) {
+  std::string out;
+  out.reserve(cpp.size());
+  size_t searchPos = 0;
+  while (searchPos < cpp.size()) {
+    size_t markerPos = cpp.find(markerPrefix.str(), searchPos);
+    if (markerPos == std::string::npos) {
+      out.append(cpp, searchPos, std::string::npos);
+      break;
+    }
+
+    out.append(cpp, searchPos, markerPos - searchPos);
+    size_t markerEnd = cpp.find("*/", markerPos + markerPrefix.size());
+    if (markerEnd == std::string::npos) {
+      out.append(cpp, markerPos, std::string::npos);
+      break;
+    }
+    markerEnd += 2;
+    while (markerEnd < cpp.size() &&
+           (cpp[markerEnd] == '\r' || cpp[markerEnd] == '\n'))
+      ++markerEnd;
+    searchPos = markerEnd;
+  }
+  cpp.swap(out);
+}
+
+static void stripAllHintMarkers(std::string &cpp) {
+  stripHintMarkersWithPrefix(cpp, "/* PTOAS_PROVENANCE:");
+}
+
+static std::string sanitizeCommentText(llvm::StringRef text) {
+  auto hexDigit = [](unsigned value) -> char {
+    return value < 10 ? static_cast<char>('0' + value)
+                      : static_cast<char>('A' + (value - 10));
+  };
+
+  std::string sanitized;
+  sanitized.reserve(text.size());
+  for (unsigned char c : text.bytes()) {
+    switch (c) {
+    case '\n':
+      sanitized.append("\\n");
+      break;
+    case '\r':
+      sanitized.append("\\r");
+      break;
+    case '\t':
+      sanitized.append("\\t");
+      break;
+    default:
+      if (std::iscntrl(c)) {
+        sanitized.push_back('\\');
+        sanitized.push_back('x');
+        sanitized.push_back(hexDigit((c >> 4) & 0xF));
+        sanitized.push_back(hexDigit(c & 0xF));
+      } else {
+        sanitized.push_back(static_cast<char>(c));
+      }
+      break;
+    }
+  }
+  return sanitized;
+}
+
+// Convert `/* PTOAS_PROVENANCE:rawname,... */` markers into standalone
+// `// pto: %rawname` comment lines in-place. This avoids guessing which later
+// generated declaration a marker should attach to after EmitC/Cpp emission,
+// hoisting, or inlining. The marker is consumed (removed) here.
+static void emitProvenanceComments(std::string &segment) {
+  static constexpr llvm::StringLiteral kProvenancePrefix =
+      "/* PTOAS_PROVENANCE:";
+  std::string out;
+  out.reserve(segment.size() + 128);
+  size_t i = 0;
+  while (i < segment.size()) {
+    size_t mp = segment.find(kProvenancePrefix.str(), i);
+    if (mp == std::string::npos) {
+      out.append(segment, i, std::string::npos);
+      break;
+    }
+    out.append(segment, i, mp - i);
+    size_t me = segment.find("*/", mp + kProvenancePrefix.size());
+    if (me == std::string::npos) {
+      out.append(segment, i, std::string::npos);
+      break;
+    }
+    auto names = parseNameHintMarker(
+        llvm::StringRef(segment).slice(mp + kProvenancePrefix.size(), me));
+    if (names && !names->empty()) {
+      out.append("// pto: ");
+      for (size_t idx = 0; idx < names->size(); ++idx) {
+        if (idx != 0)
+          out.append(", ");
+        out.push_back('%');
+        out.append(sanitizeCommentText((*names)[idx]));
+      }
+      out.push_back('\n');
+    }
+    me += 2;
+    while (me < segment.size() &&
+           (segment[me] == '\r' || segment[me] == '\n'))
+      ++me;
+    i = me;
+  }
+  segment.swap(out);
+}
+
+static void rewriteNameHintMarkers(std::string &cpp) {
+  emitProvenanceComments(cpp);
+  stripAllHintMarkers(cpp);
+}
+
 namespace {
 struct ConstantDeclCandidate {
   size_t declLine = 0;
@@ -1880,6 +2656,15 @@ int mlir::pto::compilePTOASModule(
   int argc = context.getArgc();
   char **argv = context.getArgv();
 
+  // Name-hint provenance: textual .pto inputs had their SSA/arg/block-arg names
+  // attached to op Locations by the driver right after parsing. Collect the
+  // block-arg hint map now, before lowering, so it can be reattached on the
+  // EmitC CFG side before final C++ emission.
+  FunctionBlockArgHintMap functionBlockArgHints;
+  if (module) {
+    functionBlockArgHints = collectFunctionBlockArgNameHints(*module);
+  }
+
   if (effectiveBackend != PTOBackend::VPTO &&
       (emitVPTO || emitVPTOLLVMDialect || ptoPrintSeamIR ||
        !ptoSeamIRFile.empty())) {
@@ -1907,18 +2692,23 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
 
-  if (enableOpFusion) {
-    if (arch != "a5") {
-      llvm::errs() << "Warning: --enable-op-fusion is ignored because "
-                      "--pto-arch=a5 is required.\n";
-    } else if (effectiveLevel == PTOBuildLevel::Level1) {
-      llvm::errs() << "Warning: --enable-op-fusion is ignored because "
-                      "--pto-level=level2 or level3 is required.\n";
-    }
+  const bool requestedEnableOpFusion = enableOpFusion == llvm::cl::BOU_TRUE;
+  const bool defaultEnableOpFusion =
+      enableOpFusion == llvm::cl::BOU_UNSET && arch == "a5";
+  const bool opFusionEnabled =
+      (requestedEnableOpFusion || defaultEnableOpFusion);
+
+  if (requestedEnableOpFusion && arch != "a5") {
+    llvm::errs() << "Error: --enable-op-fusion=true requires --pto-arch=a5.\n";
+    return 1;
+  }
+  if (requestedEnableOpFusion && effectiveLevel == PTOBuildLevel::Level1) {
+    llvm::errs() << "Warning: --enable-op-fusion=true is ignored because "
+                    "--pto-level=level2 or level3 is required.\n";
   }
 
   const bool enableA5FusionPath =
-      enableOpFusion && arch == "a5" &&
+      opFusionEnabled && arch == "a5" &&
       effectiveLevel != PTOBuildLevel::Level1;
   const bool enableA5EmitCFusionPath =
       enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
@@ -2144,6 +2934,8 @@ int mlir::pto::compilePTOASModule(
   // or an `arith.select` chain (dynamic slot). The multi-address cast
   // produced by PlanMemory survives as the alloc anchor.
   pm.addPass(pto::createPTOResolveBufferSelectPass());
+  if (effectiveBackend == PTOBackend::EmitC)
+    pm.addPass(createNarrowUnusedMultiResultProvenancePass());
 
   if (emitMlirIR) {
     if (failed(pm.run(*module))) {
@@ -2165,6 +2957,8 @@ int mlir::pto::compilePTOASModule(
   // materialized tile-native handles, so helper arguments are restored to the
   // tile_buf ABI before qk.as_ptr()-style bridges are cloned into callers.
   pm.addPass(pto::createPTOInlineBackendHelpersPass());
+  if (effectiveBackend == PTOBackend::EmitC)
+    pm.addPass(createNarrowUnusedMultiResultProvenancePass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
   pm.addPass(pto::createPTOMemoryConsistencyPass());
@@ -2177,8 +2971,10 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
 
-    if (ptoPrintSeamIR)
-      printSharedPreBackendSeamIR(*module);
+    if (ptoPrintSeamIR) {
+      module->print(llvm::errs());
+      llvm::errs() << "\n";
+    }
     if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
       return 1;
 
@@ -2198,6 +2994,9 @@ int mlir::pto::compilePTOASModule(
   if (failed(emitSharedPreBackendSeamIR(*module, ptoSeamIRFile)))
     return 1;
 
+  narrowUnusedMultiResultProvenanceLocs(module.get());
+  splitDerivedSingleResultProvenanceLocs(module.get());
+
   PassManager emitcPM(module->getContext());
   emitcPM.enableVerifier();
   if (arch == "a3") {
@@ -2216,6 +3015,8 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
 
+  applyFunctionBlockArgNameHintsToEmitC(*module, functionBlockArgHints);
+  splitDerivedSingleResultProvenanceLocs(module.get());
   dropEmptyEmitCExpressions(module.get());
   materializeControlFlowOperands(module.get());
   normalizeEmitCIntegerAttrsForCppEmission(module.get());
@@ -2223,6 +3024,7 @@ int mlir::pto::compilePTOASModule(
     llvm::errs() << "Error: Failed to order emitted functions for C++ emission.\n";
     return 1;
   }
+  annotateEmitCProvenanceHints(*module);
 
   // Emit C++ to string, then post-process, then write to output file.
   std::string cppOutput;
@@ -2247,6 +3049,7 @@ int mlir::pto::compilePTOASModule(
   rewriteMalformedVerbatimSemicolons(cppOutput);
   rewriteScalarConstantDecls(cppOutput);
   rewriteHoistedGlobalTensorDecls(cppOutput);
+  rewriteNameHintMarkers(cppOutput);
 
   result.kind = PTOASCompileResultKind::Text;
   result.textOutput = std::move(cppOutput);

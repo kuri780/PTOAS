@@ -38,11 +38,41 @@ def main():
         print('[ERROR] compare failed: mask_edge')
     else:
         print('[INFO] mask_edge: passed')
+    if not (_cmpeq("golden_v3_f8_and.bin","v3_f8_and.bin",np.uint8)):
+        failed.append('f8_and')
+        print('[ERROR] compare failed: f8_and')
+    else:
+        print('[INFO] f8_and: passed')
+    if not (_cmpeq("golden_v4_f8_xor.bin","v4_f8_xor.bin",np.uint8)):
+        failed.append('f8_xor')
+        print('[ERROR] compare failed: f8_xor')
+    else:
+        print('[INFO] f8_xor: passed')
+    if not (_cmpeq("golden_v5_f8_or.bin","v5_f8_or.bin",np.uint8)):
+        failed.append('f8_or')
+        print('[ERROR] compare failed: f8_or')
+    else:
+        print('[INFO] f8_or: passed')
+    if not (_cmpeq("golden_v3_hif8_and.bin","v3_hif8_and.bin",np.uint8)):
+        failed.append('hif8_and')
+        print('[ERROR] compare failed: hif8_and')
+    else:
+        print('[INFO] hif8_and: passed')
+    if not (_cmpeq("golden_v4_hif8_xor.bin","v4_hif8_xor.bin",np.uint8)):
+        failed.append('hif8_xor')
+        print('[ERROR] compare failed: hif8_xor')
+    else:
+        print('[INFO] hif8_xor: passed')
+    if not (_cmpeq("golden_v5_hif8_or.bin","v5_hif8_or.bin",np.uint8)):
+        failed.append('hif8_or')
+        print('[ERROR] compare failed: hif8_or')
+    else:
+        print('[INFO] hif8_or: passed')
     if failed:
         if strict: print(f"[ERROR] {len(failed)} variant(s) failed"); sys.exit(2)
         print(f"[WARN] {len(failed)} variant(s) failed (non-gating)")
         return
-    print("[INFO] compare passed (all 2 variants)")
+    print("[INFO] compare passed (all 8 variants)")
 
 if __name__=="__main__":
     main()

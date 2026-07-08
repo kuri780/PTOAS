@@ -1,0 +1,35 @@
+// RUN: ptoas %s | FileCheck %s
+
+module {
+  func.func @name_hints_cfg(%cond: i1, %lhs: i32, %rhs: i32) {
+    %0 = func.call @name_hints_cfg_helper(%cond, %lhs, %rhs) : (i1, i32, i32) -> i32
+    return
+  }
+
+  func.func private @name_hints_cfg_helper(%cond: i1, %lhs: i32, %rhs: i32) -> i32 {
+    cf.cond_br %cond, ^bb1, ^bb2
+
+  ^bb1:
+    %then = arith.addi %lhs, %rhs : i32 loc("branch.sum")
+    cf.br ^bb3(%then : i32)
+
+  ^bb2:
+    %else = arith.subi %lhs, %rhs : i32 loc("branch-sum")
+    cf.br ^bb3(%else : i32)
+
+  ^bb3(%merged: i32):
+    %out = arith.addi %merged, %rhs : i32 loc("result")
+    %ret = arith.addi %out, %out : i32
+    return %ret : i32
+  }
+}
+
+// CHECK-LABEL: AICORE int32_t name_hints_cfg_helper(
+// CHECK-NOT: PTOAS_NAME_HINTS
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK: label2:
+// CHECK-NEXT: // pto: %branch.sum
+// CHECK: label3:
+// CHECK-NEXT: // pto: %branch-sum
+// CHECK: label4:
+// CHECK-NEXT: // pto: %result

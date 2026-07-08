@@ -39,9 +39,9 @@ module {
   }
 }
 
-// CHECK-DAG: const int64_t [[ROW:v[0-9]+]] = 16;
-// CHECK-DAG: const int64_t [[FULL_COL:v[0-9]+]] = 256;
-// CHECK: Tile<TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DST:v[0-9]+]] = Tile<TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>([[ROW]], [[FULL_COL]]);
+// CHECK-DAG: const int64_t [[ROW:[_A-Za-z][_A-Za-z0-9]*]] = 16;
+// CHECK-DAG: const int64_t [[FULL_COL:[_A-Za-z][_A-Za-z0-9]*]] = 256;
+// CHECK: Tile<TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DST:[_A-Za-z][_A-Za-z0-9]*]] = Tile<TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>([[ROW]], [[FULL_COL]]);
 // CHECK: TROWEXPANDMUL([[DST]],
 // CHECK: [[DST]].SetValidShape([[ROW]], [[ROW]]);
-// CHECK: TFILLPAD({{v[0-9]+}}, [[DST]]);
+// CHECK: TFILLPAD({{[_A-Za-z][_A-Za-z0-9]*}}, [[DST]]);

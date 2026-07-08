@@ -22,9 +22,9 @@ module {
 }
 
 // CHECK-LABEL: AICORE void bias_tile_subview_emitc_pointer_type()
-// CHECK-DAG: const int64_t [[ONE:v[0-9]+]] = 1;
-// CHECK-DAG: const int64_t [[THIRTYTWO:v[0-9]+]] = 32;
-// CHECK: __gm__ float* [[BIAS_BASE:v[0-9]+]] = reinterpret_cast<__gm__ float*>({{v[0-9]+}});
-// CHECK: __gm__ float* [[BIAS_SUB:v[0-9]+]] = {{.*}}[[BIAS_BASE]]{{.*}}[[THIRTYTWO]] * [[ONE]]{{.*}};
+// CHECK-DAG: const int64_t [[ONE:[_A-Za-z][_A-Za-z0-9]*]] = 1;
+// CHECK-DAG: const int64_t [[THIRTYTWO:[_A-Za-z][_A-Za-z0-9]*]] = 32;
+// CHECK: __gm__ float* [[BIAS_BASE:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<__gm__ float*>({{[_A-Za-z][_A-Za-z0-9]*}});
+// CHECK: __gm__ float* [[BIAS_SUB:[_A-Za-z][_A-Za-z0-9]*]] = {{.*}}[[BIAS_BASE]]{{.*}}[[THIRTYTWO]] * [[ONE]]{{.*}};
 // CHECK: consume_bias([[BIAS_SUB]]);
 // CHECK-NOT: __gm__ float**

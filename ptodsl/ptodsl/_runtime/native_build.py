@@ -76,13 +76,34 @@ def _effective_insert_sync(*, mode: str, insert_sync: bool | None) -> bool:
     return mode != "explicit"
 
 
+def _effective_pto_level(*, mode: str) -> str | None:
+    return "level3" if mode == "explicit" else None
+
+
 def _source_ptoas_overrides(module_spec) -> dict:
     if getattr(module_spec, "jit_source", None) is None:
         return {}
-    overrides = {"backend": module_spec.backend}
-    if module_spec.mode == "explicit":
-        overrides["pto_level"] = "level3"
-    return overrides
+    return {"backend": module_spec.backend}
+
+
+def _compile_config_text(
+    *,
+    module_spec,
+    effective_insert_sync: bool,
+    effective_pto_level: str | None,
+    ptoas_overrides: dict,
+) -> str:
+    return "\n".join(
+        [
+            f"target_arch={module_spec.target_arch}",
+            f"kernel_kind={module_spec.kernel_kind}",
+            f"mode={module_spec.mode}",
+            f"insert_sync={effective_insert_sync}",
+            f"pto_level={effective_pto_level}",
+            f"backend={ptoas_overrides.get('backend')}",
+            "enable_tile_op_expand=True",
+        ]
+    )
 
 
 def _host_compile_flags() -> list[str]:
@@ -191,6 +212,18 @@ def build_native_library(
         ir_function_name=ir_function_name,
         kernel_signature=kernel_signature,
     )
+    effective_insert_sync = _effective_insert_sync(
+        mode=module_spec.mode,
+        insert_sync=module_spec.insert_sync,
+    )
+    effective_pto_level = _effective_pto_level(mode=module_spec.mode)
+    ptoas_overrides = _source_ptoas_overrides(module_spec)
+    compile_config_text = _compile_config_text(
+        module_spec=module_spec,
+        effective_insert_sync=effective_insert_sync,
+        effective_pto_level=effective_pto_level,
+        ptoas_overrides=ptoas_overrides,
+    )
     sim_mode = bool(os.environ.get("MSPROF_SIMULATOR_MODE"))
     link_config_text = "\n".join(runtime_library_flags(sim_mode=sim_mode))
 
@@ -198,6 +231,7 @@ def build_native_library(
         artifacts,
         mlir_text=mlir_text,
         launch_cpp_text=launch_cpp_text,
+        compile_config_text=compile_config_text,
         link_config_text=link_config_text,
     ):
         return artifacts.shared_library, launch_symbol
@@ -210,11 +244,9 @@ def build_native_library(
         artifacts.mlir_path,
         artifacts.kernel_object,
         target_arch=module_spec.target_arch,
-        insert_sync=_effective_insert_sync(
-            mode=module_spec.mode,
-            insert_sync=module_spec.insert_sync,
-        ),
-        **_source_ptoas_overrides(module_spec),
+        insert_sync=effective_insert_sync,
+        pto_level=effective_pto_level,
+        **ptoas_overrides,
     )
 
     launch_object = artifacts.cache_dir / "launch.o"
@@ -237,6 +269,7 @@ def build_native_library(
         launch_symbol=launch_symbol,
         mlir_digest=_content_digest(mlir_text),
         launch_cpp_digest=_content_digest(launch_cpp_text),
+        compile_config_digest=_content_digest(compile_config_text),
         link_config_digest=_content_digest(link_config_text),
     )
     return artifacts.shared_library, launch_symbol

@@ -23,7 +23,7 @@ module {
 }
 
 // CHECK-LABEL: local_array_1d
-// CHECK: int32_t [[A:v[0-9]+]][16];
-// CHECK: [[A]][{{v[0-9]+}}] = {{v[0-9]+}};
-// CHECK: int32_t [[R:v[0-9]+]] = [[A]][{{v[0-9]+}}];
-// CHECK: [[A]][{{v[0-9]+}}] = [[R]];
+// CHECK: int32_t [[A:[_A-Za-z][_A-Za-z0-9]*]][16];
+// CHECK: [[A]][{{[_A-Za-z][_A-Za-z0-9]*}}] = {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: int32_t [[R:[_A-Za-z][_A-Za-z0-9]*]] = [[A]][{{[_A-Za-z][_A-Za-z0-9]*}}];
+// CHECK: [[A]][{{[_A-Za-z][_A-Za-z0-9]*}}] = [[R]];

@@ -33,10 +33,10 @@ module {
 // IR-NOT: !pto.ptr
 
 // CPP-LABEL: AICORE void ptr_int_cast_kernel
-// CPP-SAME: (__gm__ uint64_t* [[SRC:v[0-9]+]], __gm__ uint32_t* [[DST:v[0-9]+]], int64_t [[IDX:v[0-9]+]])
-// CPP: int64_t [[ADDR:v[0-9]+]] = reinterpret_cast<int64_t>([[SRC]]);
-// CPP: __gm__ uint32_t* [[SRC32:v[0-9]+]] = reinterpret_cast<__gm__ uint32_t*>({{.*}}[[ADDR]]
-// CPP: uint32_t [[VAL:v[0-9]+]] = [[SRC32]][{{.*}}];
+// CPP-SAME: (__gm__ uint64_t* [[SRC:[_A-Za-z][_A-Za-z0-9]*]], __gm__ uint32_t* [[DST:[_A-Za-z][_A-Za-z0-9]*]], int64_t [[IDX:[_A-Za-z][_A-Za-z0-9]*]])
+// CPP: int64_t [[ADDR:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<int64_t>([[SRC]]);
+// CPP: __gm__ uint32_t* [[SRC32:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<__gm__ uint32_t*>({{.*}}[[ADDR]]
+// CPP: uint32_t [[VAL:[_A-Za-z][_A-Za-z0-9]*]] = [[SRC32]][{{.*}}];
 // CPP: [[DST]][[[IDX]]] = [[VAL]];
 
 // IR-LABEL: func.func @ptrtoint_addptr_multi_consumer
@@ -49,11 +49,11 @@ module {
 // IR-NOT: !pto.ptr
 
 // CPP-LABEL: AICORE void ptrtoint_addptr_multi_consumer
-// CPP-SAME: (__gm__ uint64_t* [[SRC64:v[0-9]+]], __gm__ uint64_t* [[DST64:v[0-9]+]], __gm__ int64_t* [[DSTADDR:v[0-9]+]], int64_t [[IDX2:v[0-9]+]])
-// CPP: const int64_t [[ZERO:v[0-9]+]] = 0;
-// CPP: const int64_t [[ELEM_BYTES:v[0-9]+]] = 8;
-// CPP: uint64_t [[A:v[0-9]+]] = [[SRC64]][[[IDX2]]];
-// CPP: int64_t [[ADDR2:v[0-9]+]] = reinterpret_cast<int64_t>([[SRC64]]);
-// CPP: int64_t [[BYTE_ADDR:v[0-9]+]] = {{.*}}[[ADDR2]]{{.*}}[[IDX2]]{{.*}}[[ELEM_BYTES]]
+// CPP-SAME: (__gm__ uint64_t* [[SRC64:[_A-Za-z][_A-Za-z0-9]*]], __gm__ uint64_t* [[DST64:[_A-Za-z][_A-Za-z0-9]*]], __gm__ int64_t* [[DSTADDR:[_A-Za-z][_A-Za-z0-9]*]], int64_t [[IDX2:[_A-Za-z][_A-Za-z0-9]*]])
+// CPP: const int64_t [[ZERO:[_A-Za-z][_A-Za-z0-9]*]] = 0;
+// CPP: const int64_t [[ELEM_BYTES:[_A-Za-z][_A-Za-z0-9]*]] = 8;
+// CPP: uint64_t [[A:[_A-Za-z][_A-Za-z0-9]*]] = [[SRC64]][[[IDX2]]];
+// CPP: int64_t [[ADDR2:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<int64_t>([[SRC64]]);
+// CPP: int64_t [[BYTE_ADDR:[_A-Za-z][_A-Za-z0-9]*]] = {{.*}}[[ADDR2]]{{.*}}[[IDX2]]{{.*}}[[ELEM_BYTES]]
 // CPP: [[DST64]][[[ZERO]]] = [[A]];
 // CPP: [[DSTADDR]][[[ZERO]]] = [[BYTE_ADDR]];

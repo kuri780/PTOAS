@@ -21,6 +21,7 @@
 #include <string>
 
 namespace mlir {
+class AsmParserState;
 class DialectRegistry;
 class MLIRContext;
 } // namespace mlir
@@ -123,6 +124,13 @@ int compilePTOASModule(OwningOpRef<ModuleOp> &module,
 void registerPTOASDialects(DialectRegistry &registry);
 void registerPTOASPassesAndCLOptions();
 void loadPTOASDialects(MLIRContext &context);
+
+// Attach textual-.pto SSA name hints (function args, block args, op results)
+// to the parsed module's Locations as debug metadata. Called by the driver
+// right after parsing a textual .pto input so the names survive lowering.
+// No-op for non-textual (PTOBC) inputs or modules without recoverable names.
+void applyTextualNameHintsToModule(ModuleOp module,
+                                   const AsmParserState &parserState);
 
 } // namespace mlir::pto
 

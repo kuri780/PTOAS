@@ -294,6 +294,8 @@ Within the vector execution scope, the hardware does not track UB address aliasi
 pto.mem_bar "VV_ALL"      // All prior vector ops complete before subsequent
 pto.mem_bar "VST_VLD"     // All prior vector stores visible before subsequent loads
 pto.mem_bar "VLD_VST"     // All prior vector loads complete before subsequent stores
+pto.dcci %gm "ENTIRE_DATA_CACHE", "CACHELINE_OUT" : !pto.ptr<i8, gm>
+pto.dsb "ALL"
 ```
 
 Without proper barriers, loads may see stale data or stores may be reordered incorrectly.
@@ -1451,6 +1453,7 @@ This section provides a categorized overview of all PTO micro Instruction operat
 |-----------|-------|-------------|
 | Intra-core Sync | 1 | `pto.set_flag`, `pto.wait_flag` |
 | Pipeline Buffer Sync | 1 | `pto.get_buf`, `pto.rls_buf` |
+| Memory Barrier / Cache Maintenance | 1 | `pto.mem_bar`, `pto.dsb`, `pto.dcci` |
 
 ### Scalar & Control Operations
 

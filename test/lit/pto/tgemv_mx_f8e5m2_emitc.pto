@@ -13,4 +13,4 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// A5: TGEMV_MX([[D0:v[0-9]+]], [[A0:v[0-9]+]], [[AS0:v[0-9]+]], [[B0:v[0-9]+]], [[BS0:v[0-9]+]]);
+// A5: TGEMV_MX([[D0:[_A-Za-z][_A-Za-z0-9]*]], [[A0:[_A-Za-z][_A-Za-z0-9]*]], [[AS0:[_A-Za-z][_A-Za-z0-9]*]], [[B0:[_A-Za-z][_A-Za-z0-9]*]], [[BS0:[_A-Za-z][_A-Za-z0-9]*]]);

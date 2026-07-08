@@ -77,6 +77,17 @@ static bool shouldEncodeViaGenericV0CompatibilityShim(mlir::Operation &op) {
   if (llvm::isa<mlir::pto::CmoCacheInvalidOp, mlir::pto::FenceBarrierAllOp>(
           &op))
     return true;
+  // The aiv_subblockid operand extends pipe transfer forms after the v0
+  // known-op schemas were fixed. Keep the legacy compact payloads unchanged
+  // and route only the new optional-operand forms through generic encoding.
+  if (auto push = llvm::dyn_cast<mlir::pto::TPushToAicOp>(&op))
+    return static_cast<bool>(push.getAivSubblockid());
+  if (auto pop = llvm::dyn_cast<mlir::pto::TPopFromAicOp>(&op))
+    return static_cast<bool>(pop.getAivSubblockid());
+  if (auto push = llvm::dyn_cast<mlir::pto::TPushOp>(&op))
+    return static_cast<bool>(push.getAivSubblockid());
+  if (auto pop = llvm::dyn_cast<mlir::pto::TPopOp>(&op))
+    return static_cast<bool>(pop.getAivSubblockid());
   return false;
 }
 

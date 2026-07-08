@@ -17,8 +17,6 @@ from typing import Optional
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
-
 from ptodsl import pto, scalar
 from ptodsl import _types as pto_types
 from ptodsl._bootstrap import make_context
@@ -145,6 +143,25 @@ def host_vec_copy_explicit(
     o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
     a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
     o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32)
+    part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
+    out = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
+    pto.tile.load(part, a_tile)
+    pto.tile.store(o_tile, out)
+
+
+@pto.jit(target="a5", mode="explicit")
+def host_vec_copy_explicit_addr(
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    O_ptr: pto.ptr(pto.f32, "gm"),
+    rows: pto.i32,
+    cols: pto.i32,
+    *,
+    BLOCK: pto.const_expr = 128,
+):
+    a_view = pto.make_tensor_view(A_ptr, shape=[rows, cols], strides=[cols, 1])
+    o_view = pto.make_tensor_view(O_ptr, shape=[rows, cols], strides=[cols, 1])
+    a_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, addr=0)
+    o_tile = pto.alloc_tile(shape=[1, BLOCK], dtype=pto.f32, addr=4096)
     part = pto.partition_view(a_view, offsets=[0, 0], sizes=[rows, cols])
     out = pto.partition_view(o_view, offsets=[0, 0], sizes=[rows, cols])
     pto.tile.load(part, a_tile)
@@ -670,11 +687,37 @@ def top_level_simd_probe():
     SUBKERNEL_OBSERVATIONS.append((frame.role, frame.symbol_name, session.subkernel_stack_depth))
 
 
+@pto.simd
+def explicit_vector_simd_probe():
+    pto.pipe_barrier(pto.Pipe.ALL)
+
+
+@pto.cube
+def explicit_vector_cube_probe():
+    pto.pipe_barrier(pto.Pipe.ALL)
+
+
 @pto.jit(target="a5")
 def shared_subkernel_lowering_probe(*, TRACE_TOKEN: pto.const_expr = 0):
     top_level_cube_probe()
     top_level_simd_probe()
     nested_simd_probe()
+
+
+@pto.jit(target="a5", kernel_kind="vector")
+def explicit_vector_calls_simd_probe(*, TRACE_TOKEN: pto.const_expr = 0):
+    explicit_vector_simd_probe()
+
+
+@pto.jit(target="a5", kernel_kind="vector")
+def explicit_vector_calls_cube_probe(*, TRACE_TOKEN: pto.const_expr = 0):
+    explicit_vector_cube_probe()
+
+
+@pto.jit(target="a5", kernel_kind="vector")
+def explicit_vector_inline_simd_probe(*, TRACE_TOKEN: pto.const_expr = 0):
+    with pto.simd():
+        pto.pipe_barrier(pto.Pipe.ALL)
 
 
 @pto.jit(target="a5", mode="explicit")
@@ -3463,6 +3506,10 @@ def main() -> None:
         and helper_cache_signature[4] is False,
         "@pto.jit(entry=False) handles should expose an explicit, stable cache-signature protocol",
     )
+    expect(
+        helper_cache_signature[7] == "vector" and helper_cache_signature[8] is False,
+        "default @pto.jit handles should keep vector as the effective kernel kind while recording that it was not explicit",
+    )
     expect_raises(
         RuntimeError,
         kernel_module_return_probe.compile,
@@ -3662,6 +3709,7 @@ def main() -> None:
     )
     native_build_variants = (
         ("pure-container", host_vec_copy.compile()),
+        ("explicit-level3-container", host_vec_copy_explicit_addr.compile()),
         ("same-backend-multi-child-container", kernel_module_compiled),
         ("mixed-backend-container", emitc_entry_calls_vpto_kernel_module_probe.compile()),
         ("source-auto", source_native_build_compiled),
@@ -3750,14 +3798,14 @@ def main() -> None:
             f"{label} native build should forward the effective insert_sync policy to ptoas",
         )
         expected_backend = compiled._module_spec.backend if compiled._module_spec.jit_source is not None else None
-        expected_pto_level = "level3" if compiled._module_spec.jit_source is not None and compiled._module_spec.mode == "explicit" else None
+        expected_pto_level = "level3" if compiled._module_spec.mode == "explicit" else None
         expect(
             observation["backend"] == expected_backend,
             f"{label} native build should only forward ptoas backend overrides for source-backed kernels",
         )
         expect(
             observation["pto_level"] == expected_pto_level,
-            f"{label} native build should only map explicit mode to ptoas level3 for source-backed kernels",
+            f"{label} native build should derive the PTOAS level from the authored mode",
         )
         expect(
             observation["mlir_text"] == compiled.mlir_text(),
@@ -3799,7 +3847,7 @@ def main() -> None:
         )
         expect(
             "--pto-level=level3" not in ptoas_cmd,
-            "native build should no longer reconstruct explicit mode through a global pto-level flag",
+            "native build should not pass a global pto-level flag by default",
         )
         expect(
             "--enable-insert-sync" not in ptoas_cmd,
@@ -3833,21 +3881,21 @@ def main() -> None:
                 kernel_object,
                 target_arch="a5",
                 backend="vpto",
-                pto_level="level3",
+                pto_level=native_build_runtime._effective_pto_level(mode="explicit"),
                 insert_sync=True,
             )
-        expect(len(ptoas_cmds) == 1, "native build should issue exactly one ptoas command with source-backed overrides")
-        source_ptoas_cmd = ptoas_cmds[0]
+        expect(len(ptoas_cmds) == 1, "native build should issue exactly one ptoas command with explicit-mode PTOAS policy")
+        explicit_ptoas_cmd = ptoas_cmds[0]
         expect(
-            "--pto-backend=vpto" in source_ptoas_cmd,
+            "--pto-backend=vpto" in explicit_ptoas_cmd,
             "source-backed native build should pass the decorator backend to ptoas",
         )
         expect(
-            "--pto-level=level3" in source_ptoas_cmd,
-            "source-backed explicit mode should pass --pto-level=level3 to ptoas",
+            "--pto-level=level3" in explicit_ptoas_cmd,
+            'native build should pass --pto-level=level3 for mode="explicit"',
         )
         expect(
-            "--enable-insert-sync" in source_ptoas_cmd,
+            "--enable-insert-sync" in explicit_ptoas_cmd,
             "source-backed native build should still pass explicit/effective insert-sync to ptoas",
         )
     expect("valid=?" not in default_text, "default alloc_tile() should keep full static valid-shape when valid_shape= is omitted")
@@ -4081,6 +4129,34 @@ def main() -> None:
     expect(
         shared_subkernel_text.count("pto.section.vector {") == 2 and "pto.section.cube {" in shared_subkernel_text,
         "outlined decorated helper bodies should still preserve their PTO unit sections",
+    )
+
+    explicit_vector_simd_text = explicit_vector_calls_simd_probe.compile(TRACE_TOKEN=1).mlir_text()
+    expect_parse_roundtrip_and_verify(
+        explicit_vector_simd_text,
+        "explicit vector jit calling simd subkernel specialization",
+    )
+    expect(
+        "pto.kernel_kind = #pto.kernel_kind<vector>" in explicit_vector_simd_text
+        and "pto.section.vector {" not in explicit_vector_simd_text,
+        "same-kind @pto.simd helpers inside explicit vector kernels should use function/kernel kind metadata without redundant sections",
+    )
+    expect_raises(
+        RuntimeError,
+        lambda: explicit_vector_calls_cube_probe.compile(TRACE_TOKEN=1).mlir_text(),
+        "@pto.cube cannot be lowered inside an explicit @pto.jit(kernel_kind='vector')",
+    )
+    explicit_vector_inline_simd_text = explicit_vector_inline_simd_probe.compile(
+        TRACE_TOKEN=1
+    ).mlir_text()
+    expect_parse_roundtrip_and_verify(
+        explicit_vector_inline_simd_text,
+        "explicit vector jit calling inline simd specialization",
+    )
+    expect(
+        "pto.kernel_kind = #pto.kernel_kind<vector>" in explicit_vector_inline_simd_text
+        and "pto.section.vector {" not in explicit_vector_inline_simd_text,
+        "same-kind inline pto.simd() scopes inside explicit vector kernels should avoid redundant sections",
     )
 
     INLINE_SUBKERNEL_SCOPE_OBSERVATIONS.clear()

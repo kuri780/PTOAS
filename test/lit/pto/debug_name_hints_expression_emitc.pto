@@ -1,0 +1,34 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms of conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details.
+
+// RUN: ptoas %s 2>&1 | FileCheck %s
+
+// Single-use value chains are commonly folded into one emitc.expression.
+// Provenance comments should still preserve the collapsed intermediate names
+// on the surviving expression root instead of dropping them after
+// FormExpressions inlines the chain.
+
+module {
+  func.func @expression_textual_chain(%lhs: i32, %rhs: i32) -> i32 {
+    %sum0 = arith.addi %lhs, %rhs : i32
+    %sum1 = arith.addi %sum0, %rhs : i32
+    %ret = arith.addi %sum1, %lhs : i32
+    return %ret : i32
+  }
+
+  func.func @expression_loc_chain(%lhs: i32, %rhs: i32) -> i32 {
+    %0 = arith.addi %lhs, %rhs : i32 loc("x")
+    %1 = arith.addi %0, %rhs : i32 loc("y")
+    %2 = arith.addi %1, %lhs : i32 loc("z")
+    return %2 : i32
+  }
+}
+
+// CHECK-LABEL: AICORE int32_t expression_textual_chain(
+// CHECK: // pto: %sum0, %sum1, %ret
+// CHECK-NEXT: return
+// CHECK-LABEL: AICORE int32_t expression_loc_chain(
+// CHECK: // pto: %x, %y, %z
+// CHECK-NEXT: return

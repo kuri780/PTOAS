@@ -14,5 +14,5 @@ module {
   }
 }
 
-// A5: TLOG([[VDST:v[0-9]+]], [[VSRC:v[0-9]+]]);
+// A5: TLOG([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TLOG<pto::LogAlgorithm::HIGH_PRECISION>([[VDST]], [[VSRC]]);

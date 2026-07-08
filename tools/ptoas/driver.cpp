@@ -12,8 +12,11 @@
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
 #include "VPTOHostStubEmission.h"
+#include "mlir/AsmParser/AsmParser.h"
+#include "mlir/AsmParser/AsmParserState.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/SymbolTable.h"
@@ -175,9 +178,31 @@ parseTextualModule(std::unique_ptr<llvm::MemoryBuffer> inputBuffer,
   mlir::pto::ScopedPTOParserTargetArch scopedParserArch(
       &context, arch == "a5" ? mlir::pto::PTOParserTargetArch::A5
                              : mlir::pto::PTOParserTargetArch::A3);
-  OwningOpRef<ModuleOp> module = parseSourceFile<ModuleOp>(sourceMgr, &context);
-  if (!module)
+  ParserConfig parserConfig(&context);
+  Block parsedBlock;
+  LocationAttr sourceFileLoc = UnknownLoc::get(&context);
+  if (const auto *sourceBuf = sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())) {
+    sourceFileLoc = FileLineColLoc::get(&context, sourceBuf->getBufferIdentifier(),
+                                        /*line=*/0, /*column=*/0);
+  }
+  AsmParserState parserState;
+  if (failed(parseAsmSourceFile(sourceMgr, &parsedBlock, parserConfig,
+                                &parserState))) {
     llvm::errs() << "Error: Failed to parse MLIR.\n";
+    return OwningOpRef<ModuleOp>();
+  }
+  // `parseSourceFile<ModuleOp>` internally uses the same helper to wrap the
+  // parsed top-level block. We spell it out here because the public wrapper
+  // does not expose `AsmParserState`, which we need for textual SSA-name
+  // recovery.
+  OwningOpRef<ModuleOp> module =
+      mlir::detail::constructContainerOpForParserIfNecessary<ModuleOp>(
+          &parsedBlock, &context, sourceFileLoc);
+  if (!module) {
+    llvm::errs() << "Error: Failed to build parsed module.\n";
+    return module;
+  }
+  mlir::pto::applyTextualNameHintsToModule(*module, parserState);
   return module;
 }
 
@@ -278,6 +303,12 @@ static bool isBackendPartitionedContainer(ModuleOp module) {
     return false;
   return llvm::all_of(body->getOperations(),
                       [](Operation &op) { return isa<ModuleOp>(op); });
+}
+
+static bool isUserVisibleIROutputRequested() {
+  return mlir::pto::emitMlirIR || mlir::pto::emitVPTO ||
+         mlir::pto::emitVPTOLLVMDialect || mlir::pto::ptoPrintSeamIR ||
+         !mlir::pto::ptoSeamIRFile.empty();
 }
 
 static SmallVector<StringRef> collectImportedPeerNames(ModuleOp module) {
@@ -937,12 +968,35 @@ LogicalResult EmitCBackendJob::run(PTOASContext &context) {
 }
 
 LogicalResult VPTOBackendJob::run(PTOASContext &context) {
+  OwningOpRef<ModuleOp> singleChildJobModule;
+  OwningOpRef<ModuleOp> *compileUnit = &module;
   ModuleOp op = module.get();
   op->setAttr("pto.backend", StringAttr::get(op.getContext(), "vpto"));
 
+  SmallVector<ModuleOp, 4> children(op.getOps<ModuleOp>());
+  // PTODSL emits a backend-partitioned outer container even when there is only
+  // one child module.  For object compilation, the actual VPTO compile unit is
+  // the normalized child job module with outer attributes/imports folded in.
+  // Keep user-visible IR output modes on the original container so dump flags
+  // still reflect the input module structure the user asked to inspect.
+  if (!isUserVisibleIROutputRequested() && children.size() == 1 &&
+      isBackendPartitionedContainer(op) &&
+      children.front()->hasAttr(mlir::pto::FunctionKernelKindAttr::name)) {
+    FailureOr<OwningOpRef<ModuleOp>> jobModuleOr =
+        buildBackendChildCompileUnit(op, children.front());
+    if (failed(jobModuleOr))
+      return failure();
+    singleChildJobModule = std::move(*jobModuleOr);
+    singleChildJobModule.get()->setAttr(
+        "pto.backend",
+        StringAttr::get(singleChildJobModule.get()->getContext(), "vpto"));
+    compileUnit = &singleChildJobModule;
+    op = singleChildJobModule.get();
+  }
+
   bool emitHostStub = hasPTOEntry(op);
   if (mlir::pto::compilePTOASModule(
-          module, context, mlir::pto::PTOBackend::VPTO, result,
+          *compileUnit, context, mlir::pto::PTOBackend::VPTO, result,
           emitHostStub) != 0)
     return failure();
   if (result.kind == mlir::pto::PTOASCompileResultKind::Text)
@@ -1036,10 +1090,7 @@ static LogicalResult resolveSingleBackend(
   }
 
   SmallVector<ModuleOp, 4> children(module.getOps<ModuleOp>());
-  bool debugIROutputRequested =
-      mlir::pto::emitMlirIR || mlir::pto::emitVPTO || mlir::pto::ptoPrintSeamIR ||
-      !mlir::pto::ptoSeamIRFile.empty();
-  if (!debugIROutputRequested && children.size() > 1) {
+  if (!isUserVisibleIROutputRequested() && children.size() > 1) {
     if (!isBackendPartitionedContainer(module)) {
       llvm::errs() << "Error: mixed pto.backend fatobj mode expects either a "
                       "single module or an outer module containing only child "

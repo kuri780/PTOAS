@@ -25,13 +25,7 @@ This matches the existing VPTO runtime predicate tests and avoids the ambiguity
 of inferring mask semantics through predicated vector stores.
 """
 
-from pathlib import Path
-import sys
-
 import numpy as np
-
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import auto_main, golden_output_case
 from ptodsl import pto
@@ -82,37 +76,38 @@ def predicate_pack_part_kernel(
         addr=1024,
         valid_shape=[ROWS, ROW_BYTES],
     )
+    src_ptr = pto.castptr(pto.ui64(0), pto.ptr(pto.ui8, "ub"))
+    dst_ptr = pto.castptr(pto.ui64(1024), pto.ptr(pto.ui8, "ub"))
 
     pto.tile.load(inp_part, src_tile)
     pto.tile.load(out_part, dst_tile)
     pto.set_flag("MTE2", "V", event_id=0)
     pto.wait_flag("MTE2", "V", event_id=0)
 
-    with pto.simd():
-        seed = pto.pset_b8(pto.MaskPattern.ALL)
-        src = pto.vlds(src_tile[0, 0:])
-        active_b8 = pto.vcmp(src, src, seed, pto.CmpMode.EQ)
-        active = pto.pbitcast(active_b8, pto.mask_b32)
+    seed = pto.pset_b8(pto.MaskPattern.ALL)
+    src = pto.vlds(src_ptr, 0, pto.vreg_type(256, pto.ui8))
+    active_b8 = pto.vcmp(src, src, seed, pto.CmpMode.EQ)
+    active = pto.pbitcast(active_b8, pto.mask_b32)
 
-        packed_lo_same = pto.ppack(active, "LOWER")
-        unpacked_lo_same = pto.punpack(packed_lo_same, "LOWER")
-        packed_lo_b16 = pto.ppack(active, "LOWER", to_type=pto.mask_b16)
-        unpacked_lo_b32 = pto.punpack(packed_lo_b16, "LOWER", to_type=pto.mask_b32)
+    packed_lo_same = pto.ppack(active, "LOWER")
+    unpacked_lo_same = pto.punpack(packed_lo_same, "LOWER")
+    packed_lo_b16 = pto.ppack(active, "LOWER", to_type=pto.mask_b16)
+    unpacked_lo_b32 = pto.punpack(packed_lo_b16, "LOWER", to_type=pto.mask_b32)
 
-        packed_hi_same = pto.ppack(active, "HIGHER")
-        unpacked_hi_same = pto.punpack(packed_hi_same, "HIGHER")
-        packed_hi_b16 = pto.ppack(active, "HIGHER", to_type=pto.mask_b16)
-        unpacked_hi_b32 = pto.punpack(packed_hi_b16, "HIGHER", to_type=pto.mask_b32)
+    packed_hi_same = pto.ppack(active, "HIGHER")
+    unpacked_hi_same = pto.punpack(packed_hi_same, "HIGHER")
+    packed_hi_b16 = pto.ppack(active, "HIGHER", to_type=pto.mask_b16)
+    unpacked_hi_b32 = pto.punpack(packed_hi_b16, "HIGHER", to_type=pto.mask_b32)
 
-        pto.psts(active, dst_tile.as_ptr(), 0, dist="NORM")
-        pto.psts(packed_lo_same, dst_tile.as_ptr(), ROW_BYTES, dist="NORM")
-        pto.psts(unpacked_lo_same, dst_tile.as_ptr(), ROW_BYTES * 2, dist="NORM")
-        pto.psts(packed_lo_b16, dst_tile.as_ptr(), ROW_BYTES * 3, dist="NORM")
-        pto.psts(unpacked_lo_b32, dst_tile.as_ptr(), ROW_BYTES * 4, dist="NORM")
-        pto.psts(packed_hi_same, dst_tile.as_ptr(), ROW_BYTES * 5, dist="NORM")
-        pto.psts(unpacked_hi_same, dst_tile.as_ptr(), ROW_BYTES * 6, dist="NORM")
-        pto.psts(packed_hi_b16, dst_tile.as_ptr(), ROW_BYTES * 7, dist="NORM")
-        pto.psts(unpacked_hi_b32, dst_tile.as_ptr(), ROW_BYTES * 8, dist="NORM")
+    pto.psts(active, dst_ptr, 0, dist="NORM")
+    pto.psts(packed_lo_same, dst_ptr, ROW_BYTES, dist="NORM")
+    pto.psts(unpacked_lo_same, dst_ptr, ROW_BYTES * 2, dist="NORM")
+    pto.psts(packed_lo_b16, dst_ptr, ROW_BYTES * 3, dist="NORM")
+    pto.psts(unpacked_lo_b32, dst_ptr, ROW_BYTES * 4, dist="NORM")
+    pto.psts(packed_hi_same, dst_ptr, ROW_BYTES * 5, dist="NORM")
+    pto.psts(unpacked_hi_same, dst_ptr, ROW_BYTES * 6, dist="NORM")
+    pto.psts(packed_hi_b16, dst_ptr, ROW_BYTES * 7, dist="NORM")
+    pto.psts(unpacked_hi_b32, dst_ptr, ROW_BYTES * 8, dist="NORM")
 
     pto.set_flag("V", "MTE3", event_id=0)
     pto.wait_flag("V", "MTE3", event_id=0)

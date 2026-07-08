@@ -1,0 +1,59 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms of conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details.
+
+// RUN: ptoas %s 2>&1 | FileCheck %s
+
+// Multi-result textual SSA names use the `%name:N =` MLIR syntax. The textual
+// hint parser must still consume that op so later op-result hints do not shift
+// onto the wrong operations, and the lowered EmitC temporaries must preserve
+// per-result provenance instead of collapsing every comment onto `%name#0`.
+
+module {
+  func.func @multi_result_hint_alignment(%pred: i1, %lhs: i32, %rhs: i32) -> i32 {
+    %pair:2 = scf.if %pred -> (i32, i32) {
+      scf.yield %lhs, %rhs : i32, i32
+    } else {
+      scf.yield %rhs, %lhs : i32, i32
+    } loc(fused["lhs", "rhs"])
+    %sum0 = func.call @add_helper(%pair#0, %pair#0) : (i32, i32) -> i32
+    %sum1 = func.call @add_helper(%pair#1, %pair#1) : (i32, i32) -> i32
+    %ret = arith.addi %sum0, %sum1 : i32
+    return %ret : i32
+  }
+
+  func.func private @add_helper(%a: i32, %b: i32) -> i32 {
+    %r = arith.addi %a, %b : i32
+    return %r : i32
+  }
+
+  func.func @partial_multi_result_hint_alignment(%pred: i1, %lhs: i32, %rhs: i32) -> i32 {
+    %pair:2 = scf.if %pred -> (i32, i32) {
+      scf.yield %lhs, %rhs : i32, i32
+    } else {
+      scf.yield %rhs, %lhs : i32, i32
+    }
+    %mix = arith.addi %pair#1, %pair#1 : i32
+    return %mix : i32
+  }
+}
+
+// CHECK-LABEL: AICORE int32_t partial_multi_result_hint_alignment(
+// CHECK-NOT: PTOAS_NAME_HINTS
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK-NOT: // pto: %pair#0
+// CHECK: // pto: %pair#1
+// CHECK-NEXT: int32_t [[PARTIAL:v[0-9]+]] = v1 ? v3 : v2;
+// CHECK: // pto: %mix
+// CHECK-NEXT: return (int32_t) ((uint32_t) [[PARTIAL]] + (uint32_t) [[PARTIAL]]);
+// CHECK-LABEL: AICORE int32_t multi_result_hint_alignment(
+// CHECK-NOT: PTOAS_NAME_HINTS
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK-NOT: // pto: %lhs
+// CHECK-NOT: // pto: %rhs
+// CHECK: // pto: %pair#0
+// CHECK-NEXT: int32_t [[PAIR0:v[0-9]+]] = v1 ? v2 : v3;
+// CHECK: // pto: %pair#1
+// CHECK-NEXT: int32_t [[PAIR1:v[0-9]+]] = v1 ? v3 : v2;
+// CHECK: return (int32_t) ((uint32_t) add_helper([[PAIR0]], [[PAIR0]]) + (uint32_t) add_helper([[PAIR1]], [[PAIR1]]));

@@ -21,4 +21,4 @@ module {
 
 // A3: pto.tpow ins({{.*}}, {{.*}} : memref<1x16xi32
 // A3-NOT: , {{.*}} : memref<1x16xi32{{[^,]*}}, memref<1x16xi32{{[^,]*}}, memref<1x16xi32
-// A3: TPOW([[VDST:v[0-9]+]], [[VBASE:v[0-9]+]], [[VEXP:v[0-9]+]]);
+// A3: TPOW([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VBASE:[_A-Za-z][_A-Za-z0-9]*]], [[VEXP:[_A-Za-z][_A-Za-z0-9]*]]);

@@ -24,5 +24,5 @@ module {
   }
 }
 
-// A5: TPOW([[VDST:v[0-9]+]], [[VBASE:v[0-9]+]], [[VEXP:v[0-9]+]], [[VTMP:v[0-9]+]]);
+// A5: TPOW([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VBASE:[_A-Za-z][_A-Za-z0-9]*]], [[VEXP:[_A-Za-z][_A-Za-z0-9]*]], [[VTMP:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TPOW<pto::PowAlgorithm::HIGH_PRECISION>([[VDST]], [[VBASE]], [[VEXP]], [[VTMP]]);

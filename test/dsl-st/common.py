@@ -17,20 +17,6 @@ import sys
 
 import numpy as np
 
-
-def bootstrap_ptodsl() -> None:
-    if __package__ not in {None, ""}:
-        return
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate / "ptodsl"))
-            return
-    raise RuntimeError("Unable to locate the PTODSL Python package root from test/dsl-st")
-
-
-bootstrap_ptodsl()
-
 _DEVICE = "npu:0"
 
 

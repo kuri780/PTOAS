@@ -18,20 +18,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from typing import List, Optional, Tuple
-
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        package_root = candidate / "ptodsl" / "ptodsl" / "__init__.py"
-        if package_root.exists():
-            sys.path.insert(0, str(candidate / "ptodsl"))
-            break
-    else:
-        raise RuntimeError("Unable to locate the PTODSL Python package root")
 
 from ptodsl import pto
 

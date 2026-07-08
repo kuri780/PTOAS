@@ -34,13 +34,13 @@ module {
   }
 }
 
-// CHECK-LABEL: AICORE void cube_kernel(__gm__ float* {{v[0-9]+}}, __gm__ float* {{v[0-9]+}})
-// CHECK: int64_t {{v[0-9]+}} = get_block_idx();
-// CHECK: __gm__ float* {{v[0-9]+}} = {{v[0-9]+}} + {{v[0-9]+}};
-// CHECK: auto {{v[0-9]+}} = TPipe<0, Direction::DIR_C2V, 1024, 8, 8, false>(
+// CHECK-LABEL: AICORE void cube_kernel(__gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}}, __gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}})
+// CHECK: int64_t {{[_A-Za-z][_A-Za-z0-9]*}} = get_block_idx();
+// CHECK: __gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}} = {{[_A-Za-z][_A-Za-z0-9]*}} + {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: auto {{[_A-Za-z][_A-Za-z0-9]*}} = TPipe<0, Direction::DIR_C2V, 1024, 8, 8, false>(
 
-// CHECK-LABEL: AICORE void vector_kernel(__gm__ float* {{v[0-9]+}}, __gm__ float* {{v[0-9]+}})
-// CHECK: int64_t {{v[0-9]+}} = get_block_idx();
-// CHECK: __gm__ float* {{v[0-9]+}} = {{v[0-9]+}} + {{v[0-9]+}};
-// CHECK: auto {{v[0-9]+}} = TPipe<0, Direction::DIR_C2V, 1024, 8, 8, false>(
+// CHECK-LABEL: AICORE void vector_kernel(__gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}}, __gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}})
+// CHECK: int64_t {{[_A-Za-z][_A-Za-z0-9]*}} = get_block_idx();
+// CHECK: __gm__ float* {{[_A-Za-z][_A-Za-z0-9]*}} = {{[_A-Za-z][_A-Za-z0-9]*}} + {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: auto {{[_A-Za-z][_A-Za-z0-9]*}} = TPipe<0, Direction::DIR_C2V, 1024, 8, 8, false>(
 // CHECK-NOT: pto.addptr

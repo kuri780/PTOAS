@@ -23,9 +23,9 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// A5: TMATMUL_MX([[D0:v[0-9]+]], [[A0:v[0-9]+]], [[AS0:v[0-9]+]], [[B0:v[0-9]+]], [[BS0:v[0-9]+]]);
-// A5: TMATMUL_MX<pto::AccPhase::Partial>([[D1:v[0-9]+]], [[A1:v[0-9]+]], [[AS1:v[0-9]+]], [[B1:v[0-9]+]], [[BS1:v[0-9]+]]);
-// A5: TMATMUL_MX<pto::AccPhase::Final>([[D2:v[0-9]+]], [[A2:v[0-9]+]], [[AS2:v[0-9]+]], [[B2:v[0-9]+]], [[BS2:v[0-9]+]]);
-// A5: TMATMUL_MX([[D3:v[0-9]+]], [[C3:v[0-9]+]], [[A3:v[0-9]+]], [[AS3:v[0-9]+]], [[B3:v[0-9]+]], [[BS3:v[0-9]+]]);
-// A5: TMATMUL_MX<pto::AccPhase::Partial>([[D4:v[0-9]+]], [[C4:v[0-9]+]], [[A4:v[0-9]+]], [[AS4:v[0-9]+]], [[B4:v[0-9]+]], [[BS4:v[0-9]+]]);
-// A5: TMATMUL_MX<pto::AccPhase::Final>([[D5:v[0-9]+]], [[C5:v[0-9]+]], [[A5:v[0-9]+]], [[AS5:v[0-9]+]], [[B5:v[0-9]+]], [[BS5:v[0-9]+]]);
+// A5: TMATMUL_MX([[D0:[_A-Za-z][_A-Za-z0-9]*]], [[A0:[_A-Za-z][_A-Za-z0-9]*]], [[AS0:[_A-Za-z][_A-Za-z0-9]*]], [[B0:[_A-Za-z][_A-Za-z0-9]*]], [[BS0:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX<pto::AccPhase::Partial>([[D1:[_A-Za-z][_A-Za-z0-9]*]], [[A1:[_A-Za-z][_A-Za-z0-9]*]], [[AS1:[_A-Za-z][_A-Za-z0-9]*]], [[B1:[_A-Za-z][_A-Za-z0-9]*]], [[BS1:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX<pto::AccPhase::Final>([[D2:[_A-Za-z][_A-Za-z0-9]*]], [[A2:[_A-Za-z][_A-Za-z0-9]*]], [[AS2:[_A-Za-z][_A-Za-z0-9]*]], [[B2:[_A-Za-z][_A-Za-z0-9]*]], [[BS2:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX([[D3:[_A-Za-z][_A-Za-z0-9]*]], [[C3:[_A-Za-z][_A-Za-z0-9]*]], [[A3:[_A-Za-z][_A-Za-z0-9]*]], [[AS3:[_A-Za-z][_A-Za-z0-9]*]], [[B3:[_A-Za-z][_A-Za-z0-9]*]], [[BS3:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX<pto::AccPhase::Partial>([[D4:[_A-Za-z][_A-Za-z0-9]*]], [[C4:[_A-Za-z][_A-Za-z0-9]*]], [[A4:[_A-Za-z][_A-Za-z0-9]*]], [[AS4:[_A-Za-z][_A-Za-z0-9]*]], [[B4:[_A-Za-z][_A-Za-z0-9]*]], [[BS4:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX<pto::AccPhase::Final>([[D5:[_A-Za-z][_A-Za-z0-9]*]], [[C5:[_A-Za-z][_A-Za-z0-9]*]], [[A5:[_A-Za-z][_A-Za-z0-9]*]], [[AS5:[_A-Za-z][_A-Za-z0-9]*]], [[B5:[_A-Za-z][_A-Za-z0-9]*]], [[BS5:[_A-Za-z][_A-Za-z0-9]*]]);

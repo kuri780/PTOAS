@@ -45,5 +45,5 @@ module {
 }
 
 // CHECK-LABEL: __global__ AICORE void tgetval_level3_index_cast_regression() {
-// CHECK: int32_t [[ROW:v[0-9]+]] = [[IDX:v[0-9]+]].GetValue(
+// CHECK: int32_t [[ROW:[_A-Za-z][_A-Za-z0-9]*]] = [[IDX:[_A-Za-z][_A-Za-z0-9]*]].GetValue(
 // CHECK: TINSERT(

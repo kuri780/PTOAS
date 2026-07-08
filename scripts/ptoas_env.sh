@@ -134,7 +134,13 @@ echo "[ptoas_env] PTO_ISA_PATH=${PTO_ISA_PATH}"
 echo "[ptoas_env] ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
 echo "[ptoas_env] PATH/PYTHONPATH/LD_LIBRARY_PATH updated"
 
-if [[ "${PTOAS_ENV_SKIP_SMOKE_TEST:-${CI:-0}}" != "1" ]]; then
+_ptoas_env_skip_smoke="${PTOAS_ENV_SKIP_SMOKE_TEST:-0}"
+if [[ -z "${PTOAS_ENV_SKIP_SMOKE_TEST:-}" &&
+	("${CI:-}" == "1" || "${CI:-}" == "true") ]]; then
+	_ptoas_env_skip_smoke=1
+fi
+
+if [[ "${_ptoas_env_skip_smoke}" != "1" ]]; then
 	_ptoas_run_legacy_smoke_test
 fi
 
@@ -142,3 +148,4 @@ unset -f _ptoas_prepend_path
 unset -f _ptoas_run_legacy_smoke_test
 unset _PTOAS_ENV_SCRIPT_DIR
 unset _PTOAS_REPO_DIR
+unset _ptoas_env_skip_smoke

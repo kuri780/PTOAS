@@ -1,0 +1,32 @@
+// RUN: ptoas %s | FileCheck %s
+
+module {
+  func.func @textual_name_hints_cfg(%cond: i1, %lhs: i32, %rhs: i32) {
+    %0 = func.call @textual_name_hints_cfg_helper(%cond, %lhs, %rhs) : (i1, i32, i32) -> i32
+    return
+  }
+
+  func.func private @textual_name_hints_cfg_helper(%cond: i1, %lhs: i32, %rhs: i32) -> i32 {
+    cf.cond_br %cond, ^bb1, ^bb2
+
+  ^bb1:
+    %then_value = arith.addi %lhs, %rhs : i32
+    cf.br ^bb3(%then_value : i32)
+
+  ^bb2:
+    %else_value = arith.subi %lhs, %rhs : i32
+    cf.br ^bb3(%else_value : i32)
+
+  ^bb3(%merged_value: i32):
+    %result_value = arith.addi %merged_value, %rhs : i32
+    return %result_value : i32
+  }
+}
+
+// CHECK-NOT: PTOAS_NAME_HINTS
+// CHECK-NOT: PTOAS_PARAM_HINTS
+// CHECK-LABEL: AICORE int32_t textual_name_hints_cfg_helper(
+// CHECK: // pto: %then_value
+// CHECK: // pto: %else_value
+// CHECK-NOT: // pto: %merged_value
+// CHECK: // pto: %0

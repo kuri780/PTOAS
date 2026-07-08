@@ -208,8 +208,10 @@ def my_kernel(
   barriers by hand, and work with raw pointers — useful when you need to
   hand-tune instruction schedules or overlap DMA with compute.
 
-`mode` only affects what you can write inside the function body. It doesn't
-change how you compile or launch the kernel.
+For native launch builds, `mode` also selects the default PTOAS build policy:
+`mode="auto"` keeps the PTOAS default build level and enables sync insertion,
+while `mode="explicit"` uses `--pto-level=level3` and leaves synchronization
+under user control by default.
 
 #### `backend`: VPTO vs EmitC
 

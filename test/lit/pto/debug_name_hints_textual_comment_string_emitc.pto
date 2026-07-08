@@ -1,0 +1,20 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms of conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details.
+
+// RUN: ptoas %s | FileCheck %s
+
+module {
+  func.func @http_loc_hint(%lhs: i32, %rhs: i32) -> i32 {
+    %sum = arith.addi %lhs, %rhs : i32 loc("http://sum")
+    %kept = arith.addi %sum, %rhs : i32
+    %ret = arith.addi %kept, %sum : i32
+    return %ret : i32
+  }
+}
+
+// CHECK-LABEL: AICORE int32_t http_loc_hint(
+// CHECK-NOT: PTOAS_NAME_HINTS
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK: // pto: %http://sum

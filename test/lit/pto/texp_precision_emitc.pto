@@ -14,5 +14,5 @@ module {
   }
 }
 
-// A5: TEXP([[VDST:v[0-9]+]], [[VSRC:v[0-9]+]]);
+// A5: TEXP([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TEXP<pto::ExpAlgorithm::HIGH_PRECISION>([[VDST]], [[VSRC]]);

@@ -340,12 +340,9 @@ jobs:
           uv pip install "${wheels[0]}"
 
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            DYLD_PRINT_LIBRARIES=1 python -c "import mlir.ir; print('mlir.ir imported successfully')"
-            DYLD_PRINT_LIBRARIES=1 python -c "from mlir.dialects import pto; print('pto dialect imported successfully')"
-          else
-            python -c "import mlir.ir; print('mlir.ir imported successfully')"
-            python -c "from mlir.dialects import pto; print('pto dialect imported successfully')"
+            export DYLD_PRINT_LIBRARIES=1
           fi
+          bash "$GITHUB_WORKSPACE/docker/test_wheel_imports.sh"
 
       - name: Upload ptoas binary artifact
         if: matrix.python == '3.11'

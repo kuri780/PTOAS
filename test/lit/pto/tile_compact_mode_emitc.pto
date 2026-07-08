@@ -28,6 +28,6 @@ module {
 // A3-DAG: memref.alloc() : memref<1x16xf16, strided<[16, 1]>, #pto.address_space<vec>>
 // A3-DAG: memref.alloc() : memref<1x16xf16, strided<[16, 1]>, #pto.address_space<vec>>
 // A3-DAG: memref.alloc() : memref<1x16xf16, strided<[17, 1]>, #pto.address_space<vec>>
-// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DEFAULT:v[0-9]+]];
-// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Normal> [[COMPACT:v[0-9]+]];
-// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::RowPlusOne> [[ROWP1:v[0-9]+]];
+// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[DEFAULT:[_A-Za-z][_A-Za-z0-9]*]];
+// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Normal> [[COMPACT:[_A-Za-z][_A-Za-z0-9]*]];
+// A3: Tile<TileType::Vec, half, 1, 16, BLayout::RowMajor, 1, 16, SLayout::NoneBox, 512, PadValue::Null, CompactMode::RowPlusOne> [[ROWP1:[_A-Za-z][_A-Za-z0-9]*]];

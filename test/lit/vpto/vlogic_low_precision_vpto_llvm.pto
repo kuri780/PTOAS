@@ -1,0 +1,87 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vand_lowp_direct(%lhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                              %rhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                              %dst_ptr: !pto.ptr<f8E4M3FN, ub>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    pto.vecscope {
+      %mask = pto.pset_b8 "PAT_ALL" : !pto.mask<b8>
+      %lhs = pto.vlds %lhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %rhs = pto.vlds %rhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %out = pto.vand %lhs, %rhs, %mask : !pto.vreg<256xf8E4M3FN>, !pto.vreg<256xf8E4M3FN>, !pto.mask<b8> -> !pto.vreg<256xf8E4M3FN>
+      pto.vsts %out, %dst_ptr[%c0], %mask : !pto.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.mask<b8>
+    }
+    return
+  }
+
+  func.func @vor_lowp_direct(%lhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                             %rhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                             %dst_ptr: !pto.ptr<f8E4M3FN, ub>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    pto.vecscope {
+      %mask = pto.pset_b8 "PAT_ALL" : !pto.mask<b8>
+      %lhs = pto.vlds %lhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %rhs = pto.vlds %rhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %out = pto.vor %lhs, %rhs, %mask : !pto.vreg<256xf8E4M3FN>, !pto.vreg<256xf8E4M3FN>, !pto.mask<b8> -> !pto.vreg<256xf8E4M3FN>
+      pto.vsts %out, %dst_ptr[%c0], %mask : !pto.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.mask<b8>
+    }
+    return
+  }
+
+  func.func @vxor_lowp_direct(%lhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                              %rhs_ptr: !pto.ptr<f8E4M3FN, ub>,
+                              %dst_ptr: !pto.ptr<f8E4M3FN, ub>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    pto.vecscope {
+      %mask = pto.pset_b8 "PAT_ALL" : !pto.mask<b8>
+      %lhs = pto.vlds %lhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %rhs = pto.vlds %rhs_ptr[%c0] : !pto.ptr<f8E4M3FN, ub> -> !pto.vreg<256xf8E4M3FN>
+      %out = pto.vxor %lhs, %rhs, %mask : !pto.vreg<256xf8E4M3FN>, !pto.vreg<256xf8E4M3FN>, !pto.mask<b8> -> !pto.vreg<256xf8E4M3FN>
+      pto.vsts %out, %dst_ptr[%c0], %mask : !pto.vreg<256xf8E4M3FN>, !pto.ptr<f8E4M3FN, ub>, !pto.mask<b8>
+    }
+    return
+  }
+
+  func.func @vlogic_lowp_payload(%lhs_ptr: !pto.ptr<!pto.hif8, ub>,
+                                 %rhs_ptr: !pto.ptr<!pto.hif8, ub>,
+                                 %dst_ptr: !pto.ptr<!pto.hif8, ub>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    pto.vecscope {
+      %mask = pto.pset_b8 "PAT_ALL" : !pto.mask<b8>
+      %lhs = pto.vlds %lhs_ptr[%c0] : !pto.ptr<!pto.hif8, ub> -> !pto.vreg<256x!pto.hif8>
+      %rhs = pto.vlds %rhs_ptr[%c0] : !pto.ptr<!pto.hif8, ub> -> !pto.vreg<256x!pto.hif8>
+      %and = pto.vand %lhs, %rhs, %mask : !pto.vreg<256x!pto.hif8>, !pto.vreg<256x!pto.hif8>, !pto.mask<b8> -> !pto.vreg<256x!pto.hif8>
+      %or = pto.vor %and, %rhs, %mask : !pto.vreg<256x!pto.hif8>, !pto.vreg<256x!pto.hif8>, !pto.mask<b8> -> !pto.vreg<256x!pto.hif8>
+      %xor = pto.vxor %or, %lhs, %mask : !pto.vreg<256x!pto.hif8>, !pto.vreg<256x!pto.hif8>, !pto.mask<b8> -> !pto.vreg<256x!pto.hif8>
+      pto.vsts %xor, %dst_ptr[%c0], %mask : !pto.vreg<256x!pto.hif8>, !pto.ptr<!pto.hif8, ub>, !pto.mask<b8>
+    }
+    return
+  }
+}
+
+// CHECK-DAG: declare <256 x float8e4m3> @llvm.hivm.vand.x.v256fp8e4m3(<256 x float8e4m3>, <256 x float8e4m3>, <256 x i1>)
+// CHECK-DAG: declare <256 x float8e4m3> @llvm.hivm.vor.x.v256fp8e4m3(<256 x float8e4m3>, <256 x float8e4m3>, <256 x i1>)
+// CHECK-DAG: declare <256 x float8e4m3> @llvm.hivm.vxor.x.v256fp8e4m3(<256 x float8e4m3>, <256 x float8e4m3>, <256 x i1>)
+// CHECK-DAG: declare <256 x i8> @llvm.hivm.vand.v256u8.x(<256 x i8>, <256 x i8>, <256 x i1>)
+// CHECK-DAG: declare <256 x i8> @llvm.hivm.vor.v256u8.x(<256 x i8>, <256 x i8>, <256 x i1>)
+// CHECK-DAG: declare <256 x i8> @llvm.hivm.vxor.v256u8.x(<256 x i8>, <256 x i8>, <256 x i1>)
+// CHECK-LABEL: define void @vand_lowp_direct_mix_aiv
+// CHECK: call <256 x float8e4m3> @llvm.hivm.vand.x.v256fp8e4m3
+// CHECK-LABEL: define void @vor_lowp_direct_mix_aiv
+// CHECK: call <256 x float8e4m3> @llvm.hivm.vor.x.v256fp8e4m3
+// CHECK-LABEL: define void @vxor_lowp_direct_mix_aiv
+// CHECK: call <256 x float8e4m3> @llvm.hivm.vxor.x.v256fp8e4m3
+// CHECK-LABEL: define void @vlogic_lowp_payload_mix_aiv
+// CHECK: call <256 x i8> @llvm.hivm.vand.v256u8.x
+// CHECK: call <256 x i8> @llvm.hivm.vor.v256u8.x
+// CHECK: call <256 x i8> @llvm.hivm.vxor.v256u8.x
+// CHECK: bitcast <256 x i8> {{.*}} to <256 x hifloat8>

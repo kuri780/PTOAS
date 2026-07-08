@@ -83,6 +83,9 @@ def convert_scale_b_format(scale, block_size=16, c0_size_mx=2):
 def main():
     meta = load_case_meta()
     out_name = single_output(meta)
+    if len(meta.inputs) != 4:
+        raise ValueError(f"expected 4 input buffers, got {meta.inputs}")
+    a_name, b_name, a_scale_name, b_scale_name = meta.inputs
     generator = rng()
 
     m = 128
@@ -96,20 +99,20 @@ def main():
     b_scale = generator.integers(127, 130, size=(k_aligned // 32, n), dtype=np.uint8)
 
     buffers = default_buffers(meta)
-    buffers["v1"] = a_bits
-    buffers["v2"] = b_bits
+    buffers[a_name] = a_bits
+    buffers[b_name] = b_bits
 
     packed_a_scale = convert_scale_a_format(a_scale).astype(np.uint8).reshape(-1)
-    v3 = np.zeros(meta.elem_counts["v3"], dtype=np.uint8)
-    v3[: packed_a_scale.size] = packed_a_scale
-    buffers["v3"] = v3
+    a_scale_buffer = np.zeros(meta.elem_counts[a_scale_name], dtype=meta.np_types[a_scale_name])
+    a_scale_buffer[: packed_a_scale.size] = packed_a_scale
+    buffers[a_scale_name] = a_scale_buffer
 
     packed_b_scale = convert_scale_b_format(b_scale).astype(np.uint8).reshape(-1)
-    v4 = np.zeros(meta.elem_counts["v4"], dtype=np.uint8)
-    v4[: packed_b_scale.size] = packed_b_scale
-    buffers["v4"] = v4
+    b_scale_buffer = np.zeros(meta.elem_counts[b_scale_name], dtype=meta.np_types[b_scale_name])
+    b_scale_buffer[: packed_b_scale.size] = packed_b_scale
+    buffers[b_scale_name] = b_scale_buffer
 
-    buffers[out_name] = np.zeros(meta.elem_counts[out_name], dtype=np.float32)
+    buffers[out_name] = np.zeros(meta.elem_counts[out_name], dtype=meta.np_types[out_name])
     write_buffers(meta, buffers)
 
     a = decode_e4m3fn(a_bits).reshape(m, k)

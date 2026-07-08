@@ -67,6 +67,7 @@ def write_manifest(
     launch_symbol: str,
     mlir_digest: str,
     launch_cpp_digest: str,
+    compile_config_digest: str,
     link_config_digest: str,
 ) -> None:
     artifacts.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -76,6 +77,7 @@ def write_manifest(
         "shared_library": str(artifacts.shared_library),
         "mlir_digest": mlir_digest,
         "launch_cpp_digest": launch_cpp_digest,
+        "compile_config_digest": compile_config_digest,
         "link_config_digest": link_config_digest,
     }
     artifacts.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -90,6 +92,7 @@ def is_native_build_current(
     *,
     mlir_text: str,
     launch_cpp_text: str,
+    compile_config_text: str,
     link_config_text: str,
 ) -> bool:
     required = (
@@ -110,6 +113,7 @@ def is_native_build_current(
     return (
         manifest.get("mlir_digest") == _content_digest(mlir_text)
         and manifest.get("launch_cpp_digest") == _content_digest(launch_cpp_text)
+        and manifest.get("compile_config_digest") == _content_digest(compile_config_text)
         and manifest.get("link_config_digest") == _content_digest(link_config_text)
     )
 

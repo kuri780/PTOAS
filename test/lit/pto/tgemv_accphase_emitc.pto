@@ -23,12 +23,12 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// A5: TGEMV([[D0:v[0-9]+]], [[L0:v[0-9]+]], [[R0:v[0-9]+]]);
+// A5: TGEMV([[D0:[_A-Za-z][_A-Za-z0-9]*]], [[L0:[_A-Za-z][_A-Za-z0-9]*]], [[R0:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TGEMV<pto::AccPhase::Partial>([[D0]], [[L0]], [[R0]]);
 // A5: TGEMV<pto::AccPhase::Final>([[D0]], [[L0]], [[R0]]);
-// A5: TGEMV_ACC([[D1:v[0-9]+]], [[CIN:v[0-9]+]], [[L1:v[0-9]+]], [[R1:v[0-9]+]]);
+// A5: TGEMV_ACC([[D1:[_A-Za-z][_A-Za-z0-9]*]], [[CIN:[_A-Za-z][_A-Za-z0-9]*]], [[L1:[_A-Za-z][_A-Za-z0-9]*]], [[R1:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TGEMV_ACC<pto::AccPhase::Partial>([[D1]], [[CIN]], [[L1]], [[R1]]);
 // A5: TGEMV_ACC<pto::AccPhase::Final>([[D1]], [[CIN]], [[L1]], [[R1]]);
-// A5: TGEMV_BIAS([[D2:v[0-9]+]], [[L2:v[0-9]+]], [[R2:v[0-9]+]], [[B2:v[0-9]+]]);
+// A5: TGEMV_BIAS([[D2:[_A-Za-z][_A-Za-z0-9]*]], [[L2:[_A-Za-z][_A-Za-z0-9]*]], [[R2:[_A-Za-z][_A-Za-z0-9]*]], [[B2:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TGEMV_BIAS<pto::AccPhase::Partial>([[D2]], [[L2]], [[R2]], [[B2]]);
 // A5: TGEMV_BIAS<pto::AccPhase::Final>([[D2]], [[L2]], [[R2]], [[B2]]);

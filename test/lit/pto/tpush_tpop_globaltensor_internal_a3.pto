@@ -20,7 +20,7 @@ module {
 }
 
 // CHECK-LABEL: AICORE void cube_globaltensor_internal(
-// CHECK: __gm__ float* [[GM_DATA:v[0-9]+]] = PTOAS__GLOBAL_TENSOR_DATA(
+// CHECK: __gm__ float* [[GM_DATA:[_A-Za-z][_A-Za-z0-9]*]] = PTOAS__GLOBAL_TENSOR_DATA(
 // CHECK: TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>([[GM_DATA]], {{.*}}, {{.*}});
 // CHECK: TALLOC<TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>(
 // CHECK: TPUSH<TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>(

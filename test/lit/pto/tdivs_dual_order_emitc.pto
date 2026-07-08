@@ -16,5 +16,5 @@ module {
   }
 }
 
-// A3: TDIVS([[VDST:v[0-9]+]], [[VSRC:v[0-9]+]], [[VSCALAR:v[0-9]+]]);
+// A3: TDIVS([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC:[_A-Za-z][_A-Za-z0-9]*]], [[VSCALAR:[_A-Za-z][_A-Za-z0-9]*]]);
 // A3: TDIVS([[VDST]], [[VSCALAR]], [[VSRC]]);

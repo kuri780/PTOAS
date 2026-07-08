@@ -15,5 +15,5 @@ module {
   }
 }
 
-// A5: TCOLEXPANDDIV([[VDST:v[0-9]+]], [[VSRC0:v[0-9]+]], [[VSRC1:v[0-9]+]]);
+// A5: TCOLEXPANDDIV([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC0:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC1:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TCOLEXPANDDIV<pto::DivAlgorithm::HIGH_PRECISION>([[VDST]], [[VSRC0]], [[VSRC1]]);

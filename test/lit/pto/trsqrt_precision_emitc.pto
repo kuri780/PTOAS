@@ -23,5 +23,5 @@ module {
   }
 }
 
-// A5: TRSQRT([[VDST0:v[0-9]+]], [[VSRC0:v[0-9]+]]);
-// A5: TRSQRT<pto::RsqrtAlgorithm::HIGH_PRECISION>([[VDST1:v[0-9]+]], [[VSRC1:v[0-9]+]], [[VTMP:v[0-9]+]]);
+// A5: TRSQRT([[VDST0:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC0:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TRSQRT<pto::RsqrtAlgorithm::HIGH_PRECISION>([[VDST1:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC1:[_A-Za-z][_A-Za-z0-9]*]], [[VTMP:[_A-Za-z][_A-Za-z0-9]*]]);

@@ -26,5 +26,5 @@ module {
 // A3: outs([[DST0:%.*]] : memref<1x64xf16
 // A3: pto.tsort32 ins([[SRC]], [[IDX]], [[TMP:%.*]] : memref<1x32xf16{{.*}}memref<1x32xui32{{.*}}memref<1x64xf16
 // A3: outs([[DST1:%.*]] : memref<1x64xf16
-// A3: TSORT32([[VDST0:v[0-9]+]], [[VSRC:v[0-9]+]], [[VIDX:v[0-9]+]]);
-// A3: TSORT32([[VDST1:v[0-9]+]], [[VSRC]], [[VIDX]], [[VTMP:v[0-9]+]]);
+// A3: TSORT32([[VDST0:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC:[_A-Za-z][_A-Za-z0-9]*]], [[VIDX:[_A-Za-z][_A-Za-z0-9]*]]);
+// A3: TSORT32([[VDST1:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC]], [[VIDX]], [[VTMP:[_A-Za-z][_A-Za-z0-9]*]]);

@@ -1,0 +1,17 @@
+// RUN: not ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @vector_kernel(%gm_slot_buffer: !pto.ptr<f32>, %v2c_consumer_buf: i32)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 2, slot_size = 1024}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       v2c_consumer_buf = %v2c_consumer_buf : i32)
+
+    %aiv_subblockid = pto.get_subblock_idx
+    %vec_tile = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tpush_to_aic(%vec_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0, split = 0} aiv_subblockid(%aiv_subblockid)
+    return
+  }
+}
+
+// CHECK: expects 'aiv_subblockid' only when 'split' is 1 or 2

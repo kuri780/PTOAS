@@ -18,22 +18,9 @@ adds the minimum wrapper needed to make it usable as a compile/test target:
 """
 
 import argparse
-from pathlib import Path
-import sys
 import time
 
 import numpy as np
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate))
-            break
-    else:
-        raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from tilelang_codegen.py"
-        )
 
 from ptodsl import pto
 

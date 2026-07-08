@@ -49,12 +49,12 @@ module {
 }
 
 // CHECK-LABEL: AICORE void preload_and_loop_set_wait
-// CHECK: TLOAD([[PRE:v[0-9]+]],
+// CHECK: TLOAD([[PRE:[_A-Za-z][_A-Za-z0-9]*]],
 // CHECK: set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID[[PRE_EID:[0-9]+]]);
 // CHECK-NEXT: wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID[[PRE_EID]]);
-// CHECK: TSTORE({{v[0-9]+}}, [[PRE]]);
+// CHECK: TSTORE({{[_A-Za-z][_A-Za-z0-9]*}}, [[PRE]]);
 // CHECK: for (
-// CHECK: TLOAD([[LOOP:v[0-9]+]],
+// CHECK: TLOAD([[LOOP:[_A-Za-z][_A-Za-z0-9]*]],
 // CHECK: set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID[[LOOP_EID:[0-9]+]]);
 // CHECK-NEXT: wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID[[LOOP_EID]]);
-// CHECK: TSTORE({{v[0-9]+}}, [[LOOP]]);
+// CHECK: TSTORE({{[_A-Za-z][_A-Za-z0-9]*}}, [[LOOP]]);

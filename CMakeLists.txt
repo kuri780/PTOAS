@@ -78,7 +78,7 @@ endfunction()
 
 ptoas_preseed_compilers_from_llvm_cache()
 
-project(ptoas VERSION 0.49)
+project(ptoas VERSION 0.50)
 
 option(PTOAS_VALIDATE_CMAKE4_FETCHCONTENT_COMPAT
        "Validate CMake 4 compatibility for legacy FetchContent users" OFF)
@@ -245,6 +245,7 @@ if(PTO_ENABLE_PYTHON_BINDING)
   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python/pto)
 
   add_subdirectory(python)
+  add_subdirectory(ptodsl)
   add_subdirectory(tilelang-dsl)
 endif()
 

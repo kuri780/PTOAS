@@ -10,6 +10,36 @@
 
 如果你要验证的是 parser、verifier、pass dump、IR rewrite 之类“只看编译输出”的行为，优先放到 `test/lit`，不要放这里。
 
+## 环境前提
+
+`test/dsl-st/` 现在假设 `ptodsl` 已经通过支持的 `ptoas` 安装合同进入当前
+Python 环境，而不是在运行时自己修 `PYTHONPATH` 或 `sys.path`。
+
+推荐准备方式：
+
+```bash
+cd $PTOAS_REPO_ROOT
+pip install -e . --no-build-isolation
+source scripts/ptoas_env.sh
+```
+
+如果你在验证 release/CI wheel，也可以直接：
+
+```bash
+pip install /path/to/ptoas-*.whl
+```
+
+快速自检：
+
+```bash
+python3 -c "import ptodsl; from ptodsl import pto, scalar; print(ptodsl.__file__)"
+```
+
+注意：
+
+- `ptoas-bin-*.tar.gz` 只是 compiler-only artifact，不能替代上面的 Python 安装。
+- 如果 `import ptodsl` 失败，应先修复安装环境，而不是给测试脚本补 `sys.path`。
+
 ## 推荐写法
 
 当前目录下推荐使用 [common.py](/home/zhangzhendong/ptoas-workspace/PTOAS/test/dsl-st/common.py) 里的两个 helper：

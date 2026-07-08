@@ -18,9 +18,15 @@ module {
 }
 
 // CHECK-LABEL: AICORE void eventid_array_no_cse() {
-// CHECK: PTOAS_EventIdArray<4> [[ARR0:v[0-9]+]];
-// CHECK: PTOAS_EventIdArray<4> [[ARR0_VAL:v[0-9]+]] = [[ARR0]];
-// CHECK: PTOAS_EventIdArray<4> [[ARR1:v[0-9]+]];
-// CHECK: PTOAS_EventIdArray<4> [[ARR1_VAL:v[0-9]+]] = [[ARR1]];
-// CHECK: [[ARR0_VAL]][{{v[0-9]+}}] = {{v[0-9]+}};
-// CHECK: [[ARR1_VAL]][{{v[0-9]+}}] = {{v[0-9]+}};
+// CHECK: PTOAS_EventIdArray<4> [[ARR0_STORAGE:[_A-Za-z][_A-Za-z0-9]*]]
+// CHECK: PTOAS_EventIdArray<4> [[ARR0:[_A-Za-z][_A-Za-z0-9]*]] = [[ARR0_STORAGE]];
+// CHECK: PTOAS_EventIdArray<4> [[ARR1_STORAGE:[_A-Za-z][_A-Za-z0-9]*]]
+// CHECK: PTOAS_EventIdArray<4> [[ARR1:[_A-Za-z][_A-Za-z0-9]*]] = [[ARR1_STORAGE]];
+// CHECK: [[ARR0]][{{[_A-Za-z][_A-Za-z0-9]*}}] = {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: [[ARR1]][{{[_A-Za-z][_A-Za-z0-9]*}}] = {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: int64_t [[EID0_SRC:[_A-Za-z][_A-Za-z0-9]*]] = [[ARR0]][{{[_A-Za-z][_A-Za-z0-9]*}}];
+// CHECK: int64_t [[EID1_SRC:[_A-Za-z][_A-Za-z0-9]*]] = [[ARR1]][{{[_A-Za-z][_A-Za-z0-9]*}}];
+// CHECK: event_t [[EID0:[_A-Za-z][_A-Za-z0-9]*]] = (event_t) [[EID0_SRC]];
+// CHECK: set_flag(PIPE_MTE2, PIPE_MTE3, [[EID0]]);
+// CHECK: event_t [[EID1:[_A-Za-z][_A-Za-z0-9]*]] = (event_t) [[EID1_SRC]];
+// CHECK: wait_flag(PIPE_MTE2, PIPE_MTE3, [[EID1]]);

@@ -6,10 +6,13 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Guards FusionPlan's conservative dynamic-shape behavior: dynamic valid-shape
-// tile ops must not receive pto.fusion.* metadata.
+// Guards FusionPlan's conservative dynamic-shape behavior when shape inference
+// is explicitly disabled: dynamic valid-shape tile ops must not receive
+// pto.fusion.* metadata.  (With --enable-shape-inference on by default, the
+// ShapeConstraintSolver proves these same-SSA dynamic shapes equivalent and
+// fuses them; this test pins the conservative fallback path.)
 //
-// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-shape-inference=false --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s
 
 module {
   func.func @fusion_plan_dynamic_shape_negative(

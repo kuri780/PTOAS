@@ -341,6 +341,15 @@ def illegal_inline_subkernel_placement_error(role: str, outer_role: str | None) 
     )
 
 
+def subkernel_kernel_kind_mismatch_error(role: str, kernel_kind: str) -> RuntimeError:
+    """Return one diagnostic for mixing explicit @pto.jit kernel kind with the opposite subkernel kind."""
+    return RuntimeError(
+        f"@pto.{role} cannot be lowered inside an explicit @pto.jit(kernel_kind={kernel_kind!r}) "
+        "module. Remove the explicit kernel_kind so PTOAS can split cube/vector sections, "
+        "or keep subkernel scopes in the same physical kind."
+    )
+
+
 def inline_subkernel_value_escape_error(role: str, type_text: str) -> RuntimeError:
     """Return one diagnostic for outlined inline-scope values escaping their helper boundary."""
     return RuntimeError(
@@ -503,6 +512,7 @@ __all__ = [
     "subkernel_host_tensor_boundary_error",
     "subkernel_illegal_annotation_error",
     "subkernel_illegal_parameter_kind_error",
+    "subkernel_kernel_kind_mismatch_error",
     "subkernel_missing_annotation_error",
     "subkernel_signature_boundary_error",
     "tile_row_alignment_error",

@@ -62,20 +62,6 @@ instead of forcing authors to spell ``pto.const(...)`` or ``index_cast(...)``
 at every use site.
 """
 
-from pathlib import Path
-import sys
-
-if __package__ in {None, ""}:
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "ptodsl" / "__init__.py").exists():
-            sys.path.insert(0, str(candidate))
-            break
-    else:
-        raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from flash_attention_sketch.py"
-        )
-
 from ptodsl import pto, scalar
 
 

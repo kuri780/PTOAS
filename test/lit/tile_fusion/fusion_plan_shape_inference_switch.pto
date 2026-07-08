@@ -16,12 +16,12 @@
 // --enable-shape-inference) can prove the two SSA values are equivalent, so the
 // ops fuse into a single pto.fusion_region.
 //
-// Before:  --enable-op-fusion (shape inference off, default)
+// Before:  --enable-op-fusion --enable-shape-inference=false
 //          -> ops NOT fused: no pto.fusion.group_id, no pto.fusion_region.
-// Expected: --enable-op-fusion --enable-shape-inference
+// Expected: --enable-op-fusion (shape inference on by default)
 //          -> ops fused: pto.fusion.group_id = 0, wrapped in pto.fusion_region.
 //
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck --check-prefix=NOFUSE %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-shape-inference=false --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck --check-prefix=NOFUSE %s
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-shape-inference --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck --check-prefix=FUSE %s
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-shape-inference --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck --check-prefix=REGION %s
 

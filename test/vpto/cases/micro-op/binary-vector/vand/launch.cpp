@@ -38,14 +38,34 @@ extern "C" __global__ [aicore] void vand_deep_merged_kernel(
     __gm__ uint16_t * arg2,
     __gm__ uint16_t * arg3,
     __gm__ uint16_t * arg4,
-    __gm__ uint16_t * arg5);
+    __gm__ uint16_t * arg5,
+    __gm__ float8_e4m3_t * arg6,
+    __gm__ float8_e4m3_t * arg7,
+    __gm__ float8_e4m3_t * arg8,
+    __gm__ float8_e4m3_t * arg9,
+    __gm__ float8_e4m3_t * arg10,
+    __gm__ hifloat8_t * arg11,
+    __gm__ hifloat8_t * arg12,
+    __gm__ hifloat8_t * arg13,
+    __gm__ hifloat8_t * arg14,
+    __gm__ hifloat8_t * arg15);
 
-void LaunchVandDeepMerged(uint16_t * p0, uint16_t * p1, uint16_t * p2, uint16_t * p3, uint16_t * p4, uint16_t * p5, void *stream) {
+void LaunchVandDeepMerged(uint16_t * p0, uint16_t * p1, uint16_t * p2, uint16_t * p3, uint16_t * p4, uint16_t * p5, uint8_t * p6, uint8_t * p7, uint8_t * p8, uint8_t * p9, uint8_t * p10, uint8_t * p11, uint8_t * p12, uint8_t * p13, uint8_t * p14, uint8_t * p15, void *stream) {
   vand_deep_merged_kernel<<<1, nullptr, stream>>>(
       (__gm__ uint16_t *)p0,
       (__gm__ uint16_t *)p1,
       (__gm__ uint16_t *)p2,
       (__gm__ uint16_t *)p3,
       (__gm__ uint16_t *)p4,
-      (__gm__ uint16_t *)p5);
+      (__gm__ uint16_t *)p5,
+      (__gm__ float8_e4m3_t *)p6,
+      (__gm__ float8_e4m3_t *)p7,
+      (__gm__ float8_e4m3_t *)p8,
+      (__gm__ float8_e4m3_t *)p9,
+      (__gm__ float8_e4m3_t *)p10,
+      (__gm__ hifloat8_t *)p11,
+      (__gm__ hifloat8_t *)p12,
+      (__gm__ hifloat8_t *)p13,
+      (__gm__ hifloat8_t *)p14,
+      (__gm__ hifloat8_t *)p15);
 }

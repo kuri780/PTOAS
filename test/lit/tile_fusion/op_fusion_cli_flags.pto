@@ -6,13 +6,14 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Guards --enable-op-fusion CLI visibility and warning behavior on the
+// Guards --enable-op-fusion CLI visibility and tri-state behavior on the
 // EmitC mainline frontend-fusion gate.
 //
 // RUN: ptoas --help-hidden 2>&1 | FileCheck %s --check-prefix=HELP
-// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion %s -o /dev/null 2>&1 | FileCheck %s --allow-empty --check-prefix=LEVEL2
-// RUN: ptoas --pto-arch=a5 --pto-level=level1 --enable-op-fusion %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LEVEL1
-// RUN: ptoas --pto-arch=a3 --enable-op-fusion %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=A3
+// RUN: ptoas --pto-arch=a5 --pto-level=level2 %s -o /dev/null 2>&1 | FileCheck %s --allow-empty --check-prefix=DEFAULT-A5
+// RUN: ptoas --pto-arch=a5 --pto-level=level2 --enable-op-fusion=false %s -o /dev/null 2>&1 | FileCheck %s --allow-empty --check-prefix=DISABLE-A5
+// RUN: ptoas --pto-arch=a5 --pto-level=level1 --enable-op-fusion=true %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=LEVEL1
+// RUN: not ptoas --pto-arch=a3 --enable-op-fusion=true %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=A3
 
 module {
   func.func @fusion_cli_flags() {
@@ -22,8 +23,12 @@ module {
 
 // HELP: --enable-op-fusion
 
-// LEVEL2-NOT: Warning: --enable-op-fusion is ignored
+// DEFAULT-A5-NOT: Warning:
+// DEFAULT-A5-NOT: Error:
 
-// LEVEL1: Warning: --enable-op-fusion is ignored because --pto-level=level2 or level3 is required.
+// DISABLE-A5-NOT: Warning:
+// DISABLE-A5-NOT: Error:
 
-// A3: Warning: --enable-op-fusion is ignored because --pto-arch=a5 is required.
+// LEVEL1: Warning: --enable-op-fusion=true is ignored because --pto-level=level2 or level3 is required.
+
+// A3: Error: --enable-op-fusion=true requires --pto-arch=a5.

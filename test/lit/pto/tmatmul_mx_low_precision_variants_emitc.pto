@@ -30,6 +30,6 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// A5: TMATMUL_MX([[D0:v[0-9]+]], [[A0:v[0-9]+]], [[AS0:v[0-9]+]], [[B0:v[0-9]+]], [[BS0:v[0-9]+]]);
-// A5: TMATMUL_MX([[D1:v[0-9]+]], [[A1:v[0-9]+]], [[AS1:v[0-9]+]], [[B1:v[0-9]+]], [[BS1:v[0-9]+]]);
-// A5: TMATMUL_MX([[D2:v[0-9]+]], [[A2:v[0-9]+]], [[AS2:v[0-9]+]], [[B2:v[0-9]+]], [[BS2:v[0-9]+]], [[BIAS2:v[0-9]+]]);
+// A5: TMATMUL_MX([[D0:[_A-Za-z][_A-Za-z0-9]*]], [[A0:[_A-Za-z][_A-Za-z0-9]*]], [[AS0:[_A-Za-z][_A-Za-z0-9]*]], [[B0:[_A-Za-z][_A-Za-z0-9]*]], [[BS0:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX([[D1:[_A-Za-z][_A-Za-z0-9]*]], [[A1:[_A-Za-z][_A-Za-z0-9]*]], [[AS1:[_A-Za-z][_A-Za-z0-9]*]], [[B1:[_A-Za-z][_A-Za-z0-9]*]], [[BS1:[_A-Za-z][_A-Za-z0-9]*]]);
+// A5: TMATMUL_MX([[D2:[_A-Za-z][_A-Za-z0-9]*]], [[A2:[_A-Za-z][_A-Za-z0-9]*]], [[AS2:[_A-Za-z][_A-Za-z0-9]*]], [[B2:[_A-Za-z][_A-Za-z0-9]*]], [[BS2:[_A-Za-z][_A-Za-z0-9]*]], [[BIAS2:[_A-Za-z][_A-Za-z0-9]*]]);

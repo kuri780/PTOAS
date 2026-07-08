@@ -39,17 +39,17 @@ module {
 }
 
 // A3-LABEL: AICORE void issue157_subview_remote_offset_i8
-// A3-SAME: (__gm__ int8_t* [[SUB_SRC:v[0-9]+]], int64_t [[SUB_OFF:v[0-9]+]])
-// A3-DAG: const int64_t [[SUB_ONE:v[0-9]+]] = 1;
-// A3-DAG: const int64_t [[SUB_ZERO:v[0-9]+]] = 0;
+// A3-SAME: (__gm__ int8_t* [[SUB_SRC:[_A-Za-z][_A-Za-z0-9]*]], int64_t [[SUB_OFF:[_A-Za-z][_A-Za-z0-9]*]])
+// A3-DAG: const int64_t [[SUB_ONE:[_A-Za-z][_A-Za-z0-9]*]] = 1;
+// A3-DAG: const int64_t [[SUB_ZERO:[_A-Za-z][_A-Za-z0-9]*]] = 0;
 // A3-NOT: unsigned
 // A3: GlobalTensor<int8_t,
 // A3: ({{.*}}[[SUB_SRC]] + ([[SUB_ZERO]] + [[SUB_OFF]] * [[SUB_ONE]])
 
 // A3-LABEL: AICORE void issue157_partition_remote_offset_i8
-// A3-SAME: (__gm__ int8_t* [[PART_SRC:v[0-9]+]], int64_t [[PART_OFF:v[0-9]+]])
-// A3-DAG: const int64_t [[PART_ONE:v[0-9]+]] = 1;
-// A3-DAG: const int64_t [[PART_ZERO:v[0-9]+]] = 0;
+// A3-SAME: (__gm__ int8_t* [[PART_SRC:[_A-Za-z][_A-Za-z0-9]*]], int64_t [[PART_OFF:[_A-Za-z][_A-Za-z0-9]*]])
+// A3-DAG: const int64_t [[PART_ONE:[_A-Za-z][_A-Za-z0-9]*]] = 1;
+// A3-DAG: const int64_t [[PART_ZERO:[_A-Za-z][_A-Za-z0-9]*]] = 0;
 // A3-NOT: unsigned
 // A3: GlobalTensor<int8_t,
 // A3: ({{.*}}[[PART_SRC]] + ([[PART_ZERO]] + [[PART_OFF]] * [[PART_ONE]])

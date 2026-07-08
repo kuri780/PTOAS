@@ -17,4 +17,4 @@ module {
 }
 
 // A3-LABEL: AICORE void cube_kernel(
-// A3: auto {{v[0-9]+}} = TPipe<0, Direction::DIR_C2V, 1024, 2, 1, false>(
+// A3: auto {{[_A-Za-z][_A-Za-z0-9]*}} = TPipe<0, Direction::DIR_C2V, 1024, 2, 1, false>(

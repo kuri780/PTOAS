@@ -12,7 +12,7 @@ module {
 }
 
 // CHECK-LABEL: AICORE void tprefetch_async_emitc(
-// CHECK: pto::PrefetchAsyncContext [[CTX:v[0-9]+]] = pto::PrefetchAsyncContext(
-// CHECK: pto::comm::AsyncEvent [[EVT:v[0-9]+]] = TPREFETCH_ASYNC(
-// CHECK: pto::comm::AsyncSession [[SESSION:v[0-9]+]] = [[CTX]].session;
-// CHECK: bool [[DONE:v[0-9]+]] = [[EVT]].Wait([[SESSION]]);
+// CHECK: pto::PrefetchAsyncContext [[CTX:[_A-Za-z][_A-Za-z0-9]*]] = pto::PrefetchAsyncContext(
+// CHECK: pto::comm::AsyncEvent [[EVT:[_A-Za-z][_A-Za-z0-9]*]] = TPREFETCH_ASYNC(
+// CHECK: pto::comm::AsyncSession [[SESSION:[_A-Za-z][_A-Za-z0-9]*]] = [[CTX]].session;
+// CHECK: bool [[DONE:[_A-Za-z][_A-Za-z0-9]*]] = [[EVT]].Wait([[SESSION]]);

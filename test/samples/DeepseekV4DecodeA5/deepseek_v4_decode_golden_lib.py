@@ -10,10 +10,12 @@
 import numpy as np
 
 from validation_runtime import (
+    default_buffers,
     float32_to_bf16,
     load_case_meta,
     load_int32_assignments,
     rng,
+    single_output,
     write_buffers,
     write_golden,
 )
@@ -58,10 +60,10 @@ def _make_fp32_input(meta, name: str, generator, expected: int) -> np.ndarray:
 
 
 def build_case(meta, generator, ints):
-    if meta.outputs != ["v1"]:
-        raise ValueError(f"unexpected outputs: {meta.outputs}")
-    if meta.read_order != ["v1", "v2", "v3"]:
-        raise ValueError(f"unexpected read order: {meta.read_order}")
+    out_name = single_output(meta)
+    if len(meta.inputs) != 2:
+        raise ValueError(f"expected 2 non-output buffers, got {meta.inputs}")
+    rope_even_name, rope_odd_name = meta.inputs
     if len(ints) < 2:
         raise ValueError(f"expected block_idx/block_num int32 params, got {ints}")
 
@@ -73,15 +75,14 @@ def build_case(meta, generator, ints):
 
     output_elems = OUTPUT_ROWS * OUTPUT_COLS
     input_elems = INPUT_ROWS * INPUT_COLS
-    buffers = {
-        "v1": _make_bf16_zeros(meta, "v1", output_elems),
-        "v2": _make_fp32_input(meta, "v2", generator, input_elems),
-        "v3": _make_fp32_input(meta, "v3", generator, input_elems),
-    }
+    buffers = default_buffers(meta)
+    buffers[out_name] = _make_bf16_zeros(meta, out_name, output_elems)
+    buffers[rope_even_name] = _make_fp32_input(meta, rope_even_name, generator, input_elems)
+    buffers[rope_odd_name] = _make_fp32_input(meta, rope_odd_name, generator, input_elems)
 
-    out = np.array(buffers["v1"], copy=True).reshape(OUTPUT_ROWS, OUTPUT_COLS)
-    rope_even = np.asarray(buffers["v2"], dtype=np.float32).reshape(INPUT_ROWS, INPUT_COLS)
-    rope_odd = np.asarray(buffers["v3"], dtype=np.float32).reshape(INPUT_ROWS, INPUT_COLS)
+    out = np.array(buffers[out_name], copy=True).reshape(OUTPUT_ROWS, OUTPUT_COLS)
+    rope_even = np.asarray(buffers[rope_even_name], dtype=np.float32).reshape(INPUT_ROWS, INPUT_COLS)
+    rope_odd = np.asarray(buffers[rope_odd_name], dtype=np.float32).reshape(INPUT_ROWS, INPUT_COLS)
 
     group_idx = block_idx // BLOCK_GROUP
     lane_idx = block_idx % BLOCK_GROUP
@@ -99,7 +100,7 @@ def build_case(meta, generator, ints):
             col0 = OUTPUT_COL_BASE + hh * OUTPUT_COL_STRIDE
             out[dst_row, col0:col0 + INPUT_COLS] = tile_bf16[hh]
 
-    return buffers, {"v1": out.reshape(-1)}
+    return buffers, {out_name: out.reshape(-1)}
 
 
 def run_case(case_name: str):

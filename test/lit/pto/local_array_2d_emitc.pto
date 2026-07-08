@@ -23,7 +23,7 @@ module {
 }
 
 // CHECK-LABEL: local_array_2d
-// CHECK: float [[M:v[0-9]+]][8][8];
-// CHECK: [[M]][{{v[0-9]+}}][{{v[0-9]+}}] = {{v[0-9]+}};
-// CHECK: float [[R:v[0-9]+]] = [[M]][{{v[0-9]+}}][{{v[0-9]+}}];
-// CHECK: [[M]][{{v[0-9]+}}][{{v[0-9]+}}] = [[R]];
+// CHECK: float [[M:[_A-Za-z][_A-Za-z0-9]*]][8][8];
+// CHECK: [[M]][{{[_A-Za-z][_A-Za-z0-9]*}}][{{[_A-Za-z][_A-Za-z0-9]*}}] = {{[_A-Za-z][_A-Za-z0-9]*}};
+// CHECK: float [[R:[_A-Za-z][_A-Za-z0-9]*]] = [[M]][{{[_A-Za-z][_A-Za-z0-9]*}}][{{[_A-Za-z][_A-Za-z0-9]*}}];
+// CHECK: [[M]][{{[_A-Za-z][_A-Za-z0-9]*}}][{{[_A-Za-z][_A-Za-z0-9]*}}] = [[R]];

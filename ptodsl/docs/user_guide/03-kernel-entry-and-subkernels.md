@@ -50,8 +50,10 @@ The **`backend`** parameter selects the compilation target:
   rejected at decoration time with an actionable diagnostic.
 
 The **`mode`** parameter selects the programming model within the kernel body
-(see Section 3.4). `mode` only affects what you can write inside the function —
-it doesn't change how you compile or launch the kernel.
+(see Section 3.4). For native launch builds, `mode="auto"` keeps PTOAS default
+build level and enables sync insertion by default, while `mode="explicit"` uses
+`--pto-level=level3` and disables sync insertion by default. This matches the
+manual-address, user-managed staging contract of explicit kernels.
 
 `@pto.jit` owns compilation (tracing + lowering), caching, and — for
 `entry=True` — runtime launch binding. The compute-unit decorators

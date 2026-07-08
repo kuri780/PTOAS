@@ -8,12 +8,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 from pathlib import Path
-import sys
-
-
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 
 from common import run_discovered_cases
 

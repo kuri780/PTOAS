@@ -359,27 +359,32 @@ EmitC backend 当前支持：
 
 ### 7.2 VPTO
 
-VPTO backend 当前没有确认的 DSB 和 DCCI intrinsic ABI。
+VPTO backend 当前已经支持低层 `pto.dsb` 和 `pto.dcci` 到 HIVM intrinsic 的 lowering。
 
-因此，VPTO lowering 中现在提供的是 fail-fast stub：
+本 PR 暴露的 `pto.cmo.cacheinvalid` 和 `pto.fence.barrier_all` 是较高层的
+signal/payload 一致性契约 IR。当前还没有在 VPTO pipeline 中把这两类高层 op 自动降成
+低层 `pto.dcci` 和 `pto.dsb`，因此它们进入 VPTO LLVM lowering 时仍然 fail-fast：
 
 - `pto.cmo.cacheinvalid`
 - `pto.fence.barrier_all`
 
 如果这些 op 进入 VPTO LLVM lowering，PTOAS 会报错，提示 VPTO backend 尚不支持这些
-memory-consistency op，需要确认 DSB/DCCI intrinsic ABI 后再接真实 lowering。
+high-level memory-consistency op。后续需要补一层 VPTO memory-consistency lowering，
+把明确的 CMO 和 fence 语义转换为 `pto.dcci` 与 `pto.dsb`。
 
 ## 8. 当前限制
 
 - `cmo.cacheinvalid` 支持 whole-cache 和 single-cache-line 粒度，但还没有连续 range 形式。
 - MemoryConsistency pass 当前不证明 single-line CMO 是否覆盖 payload，地址正确性由 PyPTO 或用户保证。
 - `TWait` 和 `TTest` acquire 侧当前只覆盖 `load_scalar`。
-- VPTO 暂不支持 CMO 和 GM fence 的真实 lowering。
+- VPTO 暂不支持 high-level `cmo.cacheinvalid` 和 `fence.barrier_all` 的真实 lowering；
+  低层 `pto.dcci` 和 `pto.dsb` 已有 VPTO lowering。
 - 对复杂 CFG 的分析仍是保守近似，不做完整 path-sensitive 数据流。
 
 ## 9. 后续工作
 
-1. 和 VPTO/Bisheng 对齐 DSB 和 DCCI intrinsic ABI，并补齐 VPTO lowering。
+1. 在 VPTO pipeline 中把 high-level `cmo.cacheinvalid` 与 `fence.barrier_all` 降到
+   low-level `pto.dcci` 与 `pto.dsb`。
 2. 将多条 single-line `cacheinvalid` 优化成精确 GM address range CMO。
 3. 如果后续确认 release writeback 需要不同 destination 或更精确语义，再决定是否引入新的 CMO op。
 4. 扩展 acquire 侧 consumer 范围，从 `load_scalar` 扩展到更多 cacheable GM read。

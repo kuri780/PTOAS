@@ -51,11 +51,11 @@ module {
   }
 }
 
-// A3: TSTORE([[DST0:v[0-9]+]], [[VEC:v[0-9]+]]);
+// A3: TSTORE([[DST0:[_A-Za-z][_A-Za-z0-9]*]], [[VEC:[_A-Za-z][_A-Za-z0-9]*]]);
 // A3: TSTORE<STPhase::Final>([[DST0]], [[VEC]]);
 // A3: TSTORE<{{.*}}AtomicType::AtomicAdd>([[DST0]], [[VEC]]);
 // A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd>([[DST0]], [[VEC]]);
-// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1:v[0-9]+]], [[ACC:v[0-9]+]]);
+// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1:[_A-Za-z][_A-Za-z0-9]*]], [[ACC:[_A-Za-z][_A-Za-z0-9]*]]);
 // A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]]);
-// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]], [[PRE:v[0-9]+]]);
+// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]], [[PRE:[_A-Za-z][_A-Za-z0-9]*]]);
 // A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]], [[PRE]]);

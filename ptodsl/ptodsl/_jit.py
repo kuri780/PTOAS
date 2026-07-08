@@ -34,6 +34,15 @@ from mlir.ir import InsertionPoint
 _MODULE_ATTRS = ("pto.target_arch",)
 _SUPPORTED_FRONTEND_OPTION_KEYS = {"ast_rewrite", "rewrite_part", "dump_rewritten_source"}
 _SUPPORTED_REWRITE_PARTS = {"control_flow"}
+_DEFAULT_KERNEL_KIND = "vector"
+
+
+class _DefaultKernelKindSentinel:
+    def __repr__(self) -> str:
+        return repr(_DEFAULT_KERNEL_KIND)
+
+
+_DEFAULT_KERNEL_KIND_SENTINEL = _DefaultKernelKindSentinel()
 
 
 def _normalize_mode(mode: str, *, fn=None) -> str:
@@ -164,7 +173,7 @@ def jit(
     name=None,
     *,
     target: str = "a5",
-    kernel_kind: str = "vector",
+    kernel_kind: str = _DEFAULT_KERNEL_KIND_SENTINEL,
     backend: str = "vpto",
     entry: bool = True,
     mode: str = "auto",
@@ -180,10 +189,10 @@ def jit(
     ----------
     name:        IR function name (defaults to the Python function name).
     target:      Target architecture string, e.g. ``"a5"``.
-    kernel_kind: authored default physical kind, used for native build selection
-                 and VPTO authoring intent. PTODSL now expresses physical regions
-                 through ``pto.section.vector/cube`` instead of child-module
-                 ``pto.kernel_kind`` attributes.
+    kernel_kind: optional authored physical kind, used for native build selection
+                 and explicit single-kind VPTO authoring intent. When omitted,
+                 PTODSL keeps the historical vector default while allowing
+                 subkernel sections to express mixed cube/vector regions.
     backend:     ``"vpto"`` or ``"emitc"`` – records the intended backend.
     entry:       ``True`` for launchable kernel entries, ``False`` for helpers.
     mode:        ``"auto"`` or ``"explicit"`` – feeds child compile policy.
@@ -238,12 +247,15 @@ def jit(
             source_file = inspect.getsourcefile(fn) or inspect.getfile(fn)
         except (OSError, TypeError):
             source_file = None
+        kernel_kind_explicit = kernel_kind is not _DEFAULT_KERNEL_KIND_SENTINEL
+        effective_kernel_kind = kernel_kind if kernel_kind_explicit else _DEFAULT_KERNEL_KIND
         compiler = KernelCompiler(
             fn.__name__,
             KernelModuleSpec(
                 function_name=fn_name,
                 target_arch=target,
-                kernel_kind=kernel_kind,
+                kernel_kind=effective_kernel_kind,
+                kernel_kind_explicit=kernel_kind_explicit,
                 backend=normalized_backend,
                 entry=entry,
                 mode=normalized_mode,
@@ -307,6 +319,10 @@ class KernelHandle(ModuleArtifact):
             self._compiler._kernel_identity,
             module_spec.function_name,
             module_spec.entry,
+            module_spec.backend,
+            module_spec.mode,
+            module_spec.kernel_kind,
+            module_spec.kernel_kind_explicit,
         )
 
     def _build_default_module(self):

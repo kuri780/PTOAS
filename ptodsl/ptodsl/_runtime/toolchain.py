@@ -15,6 +15,18 @@ from pathlib import Path
 
 
 def resolve_ptoas_binary() -> Path:
+    env_override = os.environ.get("PTOAS_BIN")
+    if env_override:
+        candidate = Path(env_override)
+        if candidate.is_file():
+            return candidate
+        from_path = shutil.which(env_override)
+        if from_path:
+            return Path(from_path)
+        raise FileNotFoundError(
+            f"PTOAS_BIN is set but does not resolve to an existing executable: {env_override}"
+        )
+
     repo_root = Path(__file__).resolve().parents[4]
     candidates = [
         repo_root / "build" / "tools" / "ptoas" / "ptoas",

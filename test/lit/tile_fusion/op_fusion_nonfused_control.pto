@@ -7,13 +7,15 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // Guards the non-fused control surface for frontend fusion:
-// - no flag keeps the baseline unfused
-// - A3 with the flag warns and stays unfused
-// - level1 with the flag warns and stays unfused
+// - A5 level2 defaults to fused unless explicitly disabled
+// - A5 level2 with --enable-op-fusion=false stays unfused
+// - A3 with --enable-op-fusion=true is rejected
+// - level1 with --enable-op-fusion=true warns and stays unfused
 //
-// RUN: ptoas --pto-arch=a5 --pto-level=level2 --emit-pto-ir %s -o - | FileCheck %s --check-prefix=NOFUSE
-// RUN: ptoas --pto-arch=a3 --enable-op-fusion --emit-pto-ir %s -o - 2>&1 | FileCheck %s --check-prefix=A3
-// RUN: ptoas --pto-arch=a5 --pto-level=level1 --enable-op-fusion --emit-pto-ir %s -o - 2>&1 | FileCheck %s --check-prefix=LEVEL1
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --emit-pto-ir %s -o - | FileCheck %s --check-prefix=DEFAULTA5
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion=false --emit-pto-ir %s -o - | FileCheck %s --check-prefix=NOFUSE
+// RUN: not ptoas --pto-arch=a3 --enable-op-fusion=true --emit-pto-ir %s -o - 2>&1 | FileCheck %s --check-prefix=A3
+// RUN: ptoas --pto-arch=a5 --pto-level=level1 --enable-op-fusion=true --emit-pto-ir %s -o - 2>&1 | FileCheck %s --check-prefix=LEVEL1
 
 module {
   func.func @fusion_nonfused_control(
@@ -36,13 +38,11 @@ module {
 // NOFUSE-NEXT: pto.tadd ins(
 // NOFUSE: return
 
-// A3: Warning: --enable-op-fusion is ignored because --pto-arch=a5 is required.
-// A3-LABEL: func.func @fusion_nonfused_control(
-// A3-NOT: pto.fusion_region
-// A3: pto.tadd ins(
-// A3-NEXT: pto.tadd ins(
+// DEFAULTA5-LABEL: func.func @fusion_nonfused_control(
+// DEFAULTA5: pto.fusion_region
 
-// LEVEL1: Warning: --enable-op-fusion is ignored because --pto-level=level2 or level3 is required.
+// A3: Error: --enable-op-fusion=true requires --pto-arch=a5.
+// LEVEL1: Warning: --enable-op-fusion=true is ignored because --pto-level=level2 or level3 is required.
 // LEVEL1-LABEL: func.func @fusion_nonfused_control(
 // LEVEL1-NOT: pto.fusion_region
 // LEVEL1: pto.tadd ins(

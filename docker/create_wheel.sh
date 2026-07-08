@@ -21,6 +21,7 @@ WHEEL_STAGING_DIR="${PTO_WHEEL_STAGING_DIR:-${PTO_SOURCE_DIR}/build/wheel-stagin
 WHEEL_DIST_DIR="${PTO_WHEEL_DIST_DIR:-${PTO_SOURCE_DIR}/build/wheel-dist}"
 PYTHON_BIN="${PYTHON:-python3}"
 PTOAS_PYTHON_PACKAGE_VERSION="${PTOAS_PYTHON_PACKAGE_VERSION:-${PTOAS_VERSION:-}}"
+PTODSL_INSTALL_DIR="${PTO_INSTALL_DIR}/ptodsl"
 
 if [[ -z "${PTOAS_PYTHON_PACKAGE_VERSION}" ]]; then
   PTOAS_PYTHON_PACKAGE_VERSION="$("${PYTHON_BIN}" "${PTO_SOURCE_DIR}/.github/scripts/compute_ptoas_version.py" \
@@ -51,8 +52,16 @@ cp -R "${PTO_INSTALL_DIR}/tilelang_dsl" "${WHEEL_STAGING_DIR}/tilelang_dsl"
 cp -R "${PTO_INSTALL_DIR}/share/ptoas/TileOps" "${WHEEL_STAGING_DIR}/TileOps"
 
 echo "Copying ptodsl package..."
+if [[ ! -d "${PTODSL_INSTALL_DIR}" ]]; then
+  echo "Error: ptodsl package directory not found at ${PTODSL_INSTALL_DIR}" >&2
+  exit 1
+fi
+if [[ ! -f "${PTODSL_INSTALL_DIR}/__init__.py" ]]; then
+  echo "Error: ptodsl package is missing ${PTODSL_INSTALL_DIR}/__init__.py" >&2
+  exit 1
+fi
 rm -rf "${WHEEL_STAGING_DIR}/ptodsl"
-cp -R "${PTO_SOURCE_DIR}/ptodsl/ptodsl" "${WHEEL_STAGING_DIR}/ptodsl"
+cp -R "${PTODSL_INSTALL_DIR}" "${WHEEL_STAGING_DIR}/ptodsl"
 
 echo "Removing packaging residue..."
 find "${WHEEL_STAGING_DIR}" \( -name '*.egg-info' -o -name '*.dist-info' \) -prune -exec rm -rf {} +
@@ -108,6 +117,7 @@ wheel = "\n".join([
 ]).encode("utf-8")
 
 record_rows = []
+has_ptodsl_init = False
 
 def hash_bytes(data: bytes) -> str:
     digest = hashlib.sha256(data).digest()
@@ -121,6 +131,8 @@ with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         data = path.read_bytes()
         zf.writestr(rel, data)
         record_rows.append((rel, hash_bytes(data), str(len(data))))
+        if rel == "ptodsl/__init__.py":
+            has_ptodsl_init = True
 
     for rel, data in [
         (f"{dist_info}/METADATA", metadata),
@@ -138,6 +150,13 @@ with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     writer.writerow((record_rel, "", ""))
     record_bytes = buf.getvalue().encode("utf-8")
     zf.writestr(record_rel, record_bytes)
+
+if not has_ptodsl_init:
+    raise SystemExit("Wheel staging payload is missing ptodsl/__init__.py")
+
+with zipfile.ZipFile(wheel_path) as zf:
+    if "ptodsl/__init__.py" not in zf.namelist():
+        raise SystemExit("Built wheel is missing ptodsl/__init__.py")
 
 print(f"Wheel created at {wheel_path}")
 PY

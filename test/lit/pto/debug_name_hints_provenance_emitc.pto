@@ -1,0 +1,50 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms of conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details.
+
+// RUN: ptoas %s 2>&1 | FileCheck %s
+
+// Issue #337 point 1: locatability. A textual .pto input that uses pure-digit
+// SSA names (%0, %1, ...) is compiled to C++. The output annotates each
+// recoverable generated local with a `// pto: %<name>` comment mapping it back
+// to its source SSA value, so a reader profiling the cpp can find the
+// responsible .pto line even though CSE/renumbering breaks strict %N == vN
+// alignment. The pure-digit name %0 is sanitized to _0 (best-effort retention
+// of the number) and additionally carries the provenance comment.
+
+module {
+  func.func @provenance_caller(%arg0: i32, %arg1: i32) {
+    %0 = func.call @provenance_helper(%arg0, %arg1) : (i32, i32) -> i32
+    return
+  }
+
+  func.func @provenance_escape(%lhs: i32, %rhs: i32) {
+    %sum = arith.addi %lhs, %rhs : i32 loc("a*/b")
+    %next = arith.addi %sum, %rhs : i32
+    %last = arith.addi %next, %sum : i32
+    func.call @sink_i32(%last) : (i32) -> ()
+    return
+  }
+
+  func.func private @provenance_helper(%lhs: i32, %rhs: i32) -> i32 {
+    %sum = arith.addi %lhs, %rhs : i32 loc("scaled_sum")
+    %scaled = arith.muli %sum, %lhs : i32 loc("scaled_out")
+    return %scaled : i32
+  }
+
+  func.func private @sink_i32(%v: i32) {
+    return
+  }
+}
+
+// CHECK-LABEL: AICORE int32_t provenance_helper(
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK-LABEL: AICORE void provenance_caller(
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK: // pto: %0
+// CHECK-NEXT: int32_t [[R:v[0-9]+]] = provenance_helper(
+// CHECK-LABEL: AICORE void provenance_escape(
+// CHECK-NOT: PTOAS_PROVENANCE
+// CHECK: // pto: %a*/b
+// CHECK-NEXT: int32_t [[ESCAPED:v[0-9]+]] = (

@@ -14,5 +14,5 @@ module {
   }
 }
 
-// A5: TRECIP([[VDST:v[0-9]+]], [[VSRC:v[0-9]+]]);
+// A5: TRECIP([[VDST:[_A-Za-z][_A-Za-z0-9]*]], [[VSRC:[_A-Za-z][_A-Za-z0-9]*]]);
 // A5: TRECIP<pto::RecipAlgorithm::HIGH_PRECISION>([[VDST]], [[VSRC]]);

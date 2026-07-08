@@ -145,6 +145,59 @@ static Value getSourceEmitCVariable(Value value) {
   return {};
 }
 
+static void appendRawLocationNameHints(Location loc,
+                                       SmallVectorImpl<std::string> &hints) {
+  if (auto nameLoc = dyn_cast<NameLoc>(loc)) {
+    std::string raw = nameLoc.getName().getValue().str();
+    if (!raw.empty())
+      hints.push_back(std::move(raw));
+    return;
+  }
+
+  if (auto fusedLoc = dyn_cast<FusedLoc>(loc)) {
+    if (Attribute metadata = fusedLoc.getMetadata()) {
+      if (auto strAttr = dyn_cast<StringAttr>(metadata)) {
+        std::string raw = strAttr.getValue().str();
+        if (!raw.empty())
+          hints.push_back(std::move(raw));
+        return;
+      }
+      if (auto arrayAttr = dyn_cast<ArrayAttr>(metadata)) {
+        for (Attribute attr : arrayAttr) {
+          auto strAttr = dyn_cast<StringAttr>(attr);
+          if (!strAttr)
+            continue;
+          std::string raw = strAttr.getValue().str();
+          if (!raw.empty())
+            hints.push_back(std::move(raw));
+        }
+        if (!hints.empty())
+          return;
+      }
+    }
+
+    // Only metadata explicitly attached by PTOAS name-hint recovery carries an
+    // ordered result-name list. Ordinary fused child locations are debug
+    // provenance, not result-indexed name hints.
+    return;
+  }
+
+  if (auto callSiteLoc = dyn_cast<CallSiteLoc>(loc)) {
+    appendRawLocationNameHints(callSiteLoc.getCallee(), hints);
+    if (hints.empty())
+      appendRawLocationNameHints(callSiteLoc.getCaller(), hints);
+  }
+}
+
+static Location getIndexedNameHintLoc(Location fallbackLoc, unsigned index) {
+  SmallVector<std::string, 4> hints;
+  appendRawLocationNameHints(fallbackLoc, hints);
+  if (index >= hints.size() || hints[index].empty())
+    return fallbackLoc;
+  return NameLoc::get(StringAttr::get(fallbackLoc.getContext(), hints[index]),
+                      fallbackLoc);
+}
+
 [[maybe_unused]] static constexpr llvm::StringLiteral kLoweredSetValidShapeAttrName =
     "__pto.lowered_set_validshape";
 [[maybe_unused]] static constexpr llvm::StringLiteral kLoweredSetValidShapeConfigAttrName =
@@ -6429,16 +6482,18 @@ struct PTOGetValidShapeToEmitC
     auto resultTy = getTypeConverter()->convertType(rewriter.getIndexType());
     if (!resultTy)
       return failure();
+    Location rowLoc = getIndexedNameHintLoc(op.getLoc(), 0);
+    Location colLoc = getIndexedNameHintLoc(op.getLoc(), 1);
 
     Value row = rewriter
                     .create<emitc::CallOpaqueOp>(
-                        op.getLoc(), resultTy,
+                        rowLoc, resultTy,
                         "PTOAS__TILE_GET_VALID_ROW", ArrayAttr{},
                         ArrayAttr{}, ValueRange{src})
                     .getResult(0);
     Value col = rewriter
                     .create<emitc::CallOpaqueOp>(
-                        op.getLoc(), resultTy,
+                        colLoc, resultTy,
                         "PTOAS__TILE_GET_VALID_COL", ArrayAttr{},
                         ArrayAttr{}, ValueRange{src})
                     .getResult(0);
@@ -7863,9 +7918,15 @@ struct PTOTPushToEmitC : public OpConversionPattern<mlir::pto::TPushOp> {
 
     std::string callee =
         "TPUSH<" + *pipeTok + ", " + *tileTok + ", " + *splitTok + ">";
+    SmallVector<Value> callOperands{peelUnrealized(adaptor.getPipeHandle()),
+                                    convertedTile};
+    if (Value aivSubblockId = adaptor.getAivSubblockid()) {
+      Value aivSubblockIdI32 = rewriter.create<emitc::CastOp>(
+          op.getLoc(), rewriter.getI32Type(), peelUnrealized(aivSubblockId));
+      callOperands.push_back(aivSubblockIdI32);
+    }
     rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{},
-        ValueRange{peelUnrealized(adaptor.getPipeHandle()), convertedTile});
+        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{}, callOperands);
     return success();
   }
 
@@ -7893,9 +7954,15 @@ struct PTOTPopToEmitC : public OpConversionPattern<mlir::pto::TPopOp> {
 
     std::string callee =
         "TPOP<" + *pipeTok + ", " + *tileTok + ", " + *splitTok + ">";
+    SmallVector<Value> callOperands{peelUnrealized(adaptor.getPipeHandle()),
+                                    convertedTile};
+    if (Value aivSubblockId = adaptor.getAivSubblockid()) {
+      Value aivSubblockIdI32 = rewriter.create<emitc::CastOp>(
+          op.getLoc(), rewriter.getI32Type(), peelUnrealized(aivSubblockId));
+      callOperands.push_back(aivSubblockIdI32);
+    }
     rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
-        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{},
-        ValueRange{peelUnrealized(adaptor.getPipeHandle()), convertedTile});
+        op, TypeRange{}, callee, ArrayAttr{}, ArrayAttr{}, callOperands);
     return success();
   }
 

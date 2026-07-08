@@ -49,9 +49,34 @@ def gen_mask_edge(out, rng):
     v3.reshape(-1).tofile(out/"v3_mask_edge.bin")
     g.reshape(-1).tofile(out/"golden_v3_mask_edge.bin")
 
+# ---- lowp ----
+def gen_lowp(out, rng):
+    f8_v1=rng.integers(0,256,size=256,dtype=np.uint8)
+    f8_v2=rng.integers(0,256,size=256,dtype=np.uint8)
+    hif8_v1=rng.integers(0,256,size=256,dtype=np.uint8)
+    hif8_v2=rng.integers(0,256,size=256,dtype=np.uint8)
+    zeros=np.zeros(256,dtype=np.uint8)
+    f8_v1.tofile(out/"v1_f8.bin")
+    f8_v2.tofile(out/"v2_f8.bin")
+    zeros.tofile(out/"v3_f8_and.bin")
+    zeros.tofile(out/"v4_f8_xor.bin")
+    zeros.tofile(out/"v5_f8_or.bin")
+    hif8_v1.tofile(out/"v1_hif8.bin")
+    hif8_v2.tofile(out/"v2_hif8.bin")
+    zeros.tofile(out/"v3_hif8_and.bin")
+    zeros.tofile(out/"v4_hif8_xor.bin")
+    zeros.tofile(out/"v5_hif8_or.bin")
+    np.bitwise_and(f8_v1,f8_v2).tofile(out/"golden_v3_f8_and.bin")
+    np.bitwise_xor(f8_v1,f8_v2).tofile(out/"golden_v4_f8_xor.bin")
+    np.bitwise_or(f8_v1,f8_v2).tofile(out/"golden_v5_f8_or.bin")
+    np.bitwise_and(hif8_v1,hif8_v2).tofile(out/"golden_v3_hif8_and.bin")
+    np.bitwise_xor(hif8_v1,hif8_v2).tofile(out/"golden_v4_hif8_xor.bin")
+    np.bitwise_or(hif8_v1,hif8_v2).tofile(out/"golden_v5_hif8_or.bin")
+
 GENERATORS = [
     gen_f32,
     gen_mask_edge,
+    gen_lowp,
 ]
 
 def main():

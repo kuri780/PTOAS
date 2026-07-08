@@ -4038,6 +4038,8 @@ static std::optional<uint64_t> getStaticByteSize(Type ty) {
 }
 
 static std::optional<pto::AddressSpace> getPTOMemorySpaceEnum(Type ty) {
+  if (auto ptr = dyn_cast<pto::PtrType>(ty))
+    return ptr.getMemorySpace().getAddressSpace();
   if (auto tb = dyn_cast<pto::TileBufType>(ty)) {
     if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(tb.getMemorySpace()))
       return as.getAddressSpace();
@@ -8185,6 +8187,105 @@ static void printLegacyOrAttrMemBar(OpAsmPrinter &p, MemBarAttr kind,
                                     ArrayRef<NamedAttribute> attrs) {
   p << ' ' << '"' << stringifyMemBarKind(kind.getKind()) << '"';
   p.printOptionalAttrDict(attrs, {"kind"});
+}
+
+static ParseResult parseLegacyOrAttrDsbMem(OpAsmParser &parser,
+                                           DsbMemAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDsbMem(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dsb memory token: " << token;
+    attr = DsbMemAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto dsbMemAttr = dyn_cast<DsbMemAttr>(parsed);
+  if (!dsbMemAttr)
+    return parser.emitError(loc, "expected dsb_mem attribute");
+  attr = dsbMemAttr;
+  return success();
+}
+
+static void printLegacyOrAttrDsbMem(OpAsmPrinter &printer, Operation *op,
+                                    DsbMemAttr mem) {
+  (void)op;
+  printer << ' ' << '"' << stringifyDsbMem(mem.getKind()) << '"';
+}
+
+static ParseResult parseLegacyOrAttrDcciCacheLine(OpAsmParser &parser,
+                                                  DcciCacheLineAttr &attr) {
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDcciCacheLine(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dcci cache token: " << token;
+    attr = DcciCacheLineAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto cacheAttr = dyn_cast<DcciCacheLineAttr>(parsed);
+  if (!cacheAttr)
+    return parser.emitError(loc, "expected dcci_cache_line attribute");
+  attr = cacheAttr;
+  return success();
+}
+
+static void printLegacyOrAttrDcciCacheLine(OpAsmPrinter &printer, Operation *op,
+                                           DcciCacheLineAttr cache) {
+  (void)op;
+  printer << ' ' << '"' << stringifyDcciCacheLine(cache.getKind()) << '"';
+}
+
+static ParseResult parseOptionalDcciDst(OpAsmParser &parser,
+                                        DcciDstAttr &attr) {
+  if (failed(parser.parseOptionalComma()))
+    return success();
+
+  auto loc = parser.getCurrentLocation();
+  std::string token;
+  if (succeeded(parser.parseOptionalString(&token))) {
+    auto kind = symbolizeDcciDst(token);
+    if (!kind)
+      return parser.emitError(loc) << "invalid dcci dst token: " << token;
+    attr = DcciDstAttr::get(parser.getContext(), *kind);
+    return success();
+  }
+
+  Attribute parsed;
+  if (failed(parser.parseAttribute(parsed)))
+    return failure();
+  auto dstAttr = dyn_cast<DcciDstAttr>(parsed);
+  if (!dstAttr)
+    return parser.emitError(loc, "expected dcci_dst attribute");
+  attr = dstAttr;
+  return success();
+}
+
+static void printOptionalDcciDst(OpAsmPrinter &printer, Operation *op,
+                                 DcciDstAttr dst) {
+  (void)op;
+  if (!dst)
+    return;
+  printer << ", \"" << stringifyDcciDst(dst.getKind()) << '"';
+}
+
+LogicalResult DcciOp::verify() {
+  auto space = getPTOMemorySpaceEnum(getPtr().getType());
+  if (!space)
+    return emitOpError("expects ptr to have a PTO memory space");
+  if (*space != pto::AddressSpace::GM && *space != pto::AddressSpace::VEC)
+    return emitOpError("expects ptr memory space to be gm or ub/vec");
+
+  return success();
 }
 
 static ParseResult parseLegacyOrAttrPipe(OpAsmParser &parser, PipeAttr &attr) {
@@ -15175,6 +15276,32 @@ static LogicalResult verifyFrontendSplitOp(Operation *op,
   return verifySplitAttr(op, split);
 }
 
+static LogicalResult verifyAivSubblockIdOperand(Operation *op,
+                                                Value aivSubblockId,
+                                                int64_t split,
+                                                Type pipeEntryType) {
+  if (!aivSubblockId)
+    return success();
+
+  if (split == 0) {
+    return op->emitOpError(
+        "expects 'aiv_subblockid' only when 'split' is 1 or 2");
+  }
+
+  if (isa<TensorViewType>(pipeEntryType)) {
+    return op->emitOpError(
+        "does not support 'aiv_subblockid' for !pto.tensor_view pipe entries");
+  }
+
+  auto addrSpace = getPTOMemorySpaceEnum(pipeEntryType);
+  if (!addrSpace || *addrSpace != AddressSpace::VEC) {
+    return op->emitOpError(
+        "expects 'aiv_subblockid' only on AIV-side vector tile pipe entries");
+  }
+
+  return success();
+}
+
 static FailureOr<int8_t> lookupFrontendInitDirMaskById(Operation *op,
                                                        func::FuncOp funcOp,
                                                        int32_t id) {
@@ -15841,13 +15968,19 @@ LogicalResult TPushToAicOp::verify() {
   if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
                                            /*expectC2V=*/false)))
     return failure();
-  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
-                                              getTile().getType());
+  if (failed(verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                                  getTile().getType())))
+    return failure();
+  return verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                    getSplit(), getTile().getType());
 }
 
 LogicalResult TPopFromAicOp::verify() {
-  return verifyFrontendPopOp(*this, FunctionKernelKind::Vector, "vector",
-                             /*expectC2V=*/true);
+  if (failed(verifyFrontendPopOp(*this, FunctionKernelKind::Vector, "vector",
+                                 /*expectC2V=*/true)))
+    return failure();
+  return verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                    getSplit(), getTile().getType());
 }
 
 LogicalResult TPopFromAivOp::verify() {
@@ -15936,6 +16069,9 @@ LogicalResult TPushOp::verify() {
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
     return failure();
+  if (failed(verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                        getSplit(), getTile().getType())))
+    return failure();
   if (failed(verifyTensorEntryMatchesInternalPipeInit(
           getOperation(), getPipeHandle(), getTile().getType())))
     return failure();
@@ -15962,6 +16098,9 @@ LogicalResult TPopOp::verify() {
   if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
+    return failure();
+  if (failed(verifyAivSubblockIdOperand(getOperation(), getAivSubblockid(),
+                                        getSplit(), getTile().getType())))
     return failure();
   if (failed(verifyTensorEntryMatchesInternalPipeInit(
           getOperation(), getPipeHandle(), getTile().getType())))
@@ -16496,6 +16635,9 @@ void TPushOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   addEffect(effects, &getTileMutable(), MemoryEffects::Read::get());
+  auto aivSubblockId = getAivSubblockidMutable();
+  if (!aivSubblockId.empty())
+    addEffect(effects, &*aivSubblockId.begin(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
 }
@@ -16513,6 +16655,9 @@ void TPopOp::getEffects(
         &effects) {
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
+  auto aivSubblockId = getAivSubblockidMutable();
+  if (!aivSubblockId.empty())
+    addEffect(effects, &*aivSubblockId.begin(), MemoryEffects::Read::get());
   addEffect(effects, &getTileMutable(), MemoryEffects::Write::get());
 }
 

@@ -35,6 +35,8 @@ Environment:
                         Keep the private staging directory after a successful sync.
   PTOAS_MSPROF_LOG_MODE=quiet|verbose
                         Override the default simulator log rendering mode.
+  PYTHON_BIN             Python executable used for the PTODSL example.
+                        Defaults to python3.
 
 Examples:
   scripts/sim_dsl.sh ptodsl/examples/jit/tadd_launch.py
@@ -177,11 +179,31 @@ ensure_private_dir "${PRIVATE_ROOT}"
 RUNTIME_OUTPUT_DIR="$(mktemp -d "${PRIVATE_ROOT}/${EXAMPLE_STEM}.XXXXXX")"
 chmod 700 "${RUNTIME_OUTPUT_DIR}"
 MSPROF_STDIO_LOG="${RUNTIME_OUTPUT_DIR}/msprof.stdout.log"
+EXAMPLE_EXIT_CODE_FILE="${RUNTIME_OUTPUT_DIR}/example.exitcode"
+EXAMPLE_LAUNCHER="${RUNTIME_OUTPUT_DIR}/run_example.sh"
+PYTHON_BIN="${PTO_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
 
 source "${ASCEND_HOME_PATH}/bin/setenv.bash"
 source "${REPO_ROOT}/scripts/ptoas_env.sh"
 export LD_LIBRARY_PATH="${SIM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 ulimit -n 65535
+
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  die "PYTHON_BIN is not executable or not found on PATH: ${PYTHON_BIN}"
+fi
+
+cat > "${EXAMPLE_LAUNCHER}" <<'EOF'
+#!/usr/bin/env bash
+set +e
+"${PTOAS_SIM_DSL_PYTHON_BIN}" "${PTOAS_SIM_DSL_EXAMPLE_PATH}" "$@"
+status=$?
+printf '%s\n' "${status}" > "${PTOAS_SIM_DSL_EXIT_CODE_FILE}"
+exit "${status}"
+EOF
+chmod 700 "${EXAMPLE_LAUNCHER}"
+export PTOAS_SIM_DSL_PYTHON_BIN="${PYTHON_BIN}"
+export PTOAS_SIM_DSL_EXAMPLE_PATH="${EXAMPLE_PATH}"
+export PTOAS_SIM_DSL_EXIT_CODE_FILE="${EXAMPLE_EXIT_CODE_FILE}"
 
 # msprof rejects group/other-writable working directories, so always launch
 # from a private directory and use an absolute path for the example script.
@@ -196,10 +218,29 @@ set +e
 msprof op simulator \
   --soc-version="${SOC_VERSION}" \
   --output="${RUNTIME_OUTPUT_DIR}" \
-  python3 "${EXAMPLE_PATH}" "${EXAMPLE_ARGS[@]}" \
+  "${EXAMPLE_LAUNCHER}" "${EXAMPLE_ARGS[@]}" \
   > "${MSPROF_STDIO_LOG}" 2>&1
-STATUS=$?
+MSPROF_STATUS=$?
 set -e
+
+EXAMPLE_STATUS=0
+if [[ -f "${EXAMPLE_EXIT_CODE_FILE}" ]]; then
+  EXAMPLE_STATUS="$(< "${EXAMPLE_EXIT_CODE_FILE}")"
+  if [[ ! "${EXAMPLE_STATUS}" =~ ^[0-9]+$ ]]; then
+    log "invalid example exit code recorded in ${EXAMPLE_EXIT_CODE_FILE}: ${EXAMPLE_STATUS}"
+    EXAMPLE_STATUS=1
+  fi
+else
+  log "example exit code file was not produced: ${EXAMPLE_EXIT_CODE_FILE}"
+  EXAMPLE_STATUS=1
+fi
+
+STATUS=0
+if [[ ${MSPROF_STATUS} -ne 0 ]]; then
+  STATUS=${MSPROF_STATUS}
+elif [[ ${EXAMPLE_STATUS} -ne 0 ]]; then
+  STATUS=${EXAMPLE_STATUS}
+fi
 
 print_msprof_log "${MSPROF_STDIO_LOG}" "${MSPROF_LOG_MODE}" "${STATUS}"
 

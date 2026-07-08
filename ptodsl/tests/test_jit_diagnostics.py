@@ -8,11 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 from pathlib import Path
-import sys
 from tempfile import TemporaryDirectory
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ptodsl"))
 
 from ptodsl import pto, scalar
 from ptodsl._ast_rewrite import PTODSLAstRewriteError

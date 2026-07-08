@@ -6,22 +6,22 @@
 //
 // CHECK-LABEL: AICORE void loop_if_else_loop_carried_sync()
 // CHECK: set_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID1);
-// CHECK: TMOV({{v[0-9]+}}, {{v[0-9]+}});
-// CHECK: TMOV({{v[0-9]+}}, {{v[0-9]+}});
+// CHECK: TMOV({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
+// CHECK: TMOV({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // CHECK: set_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
 // CHECK: wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID0);
-// CHECK: TMATMUL({{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}});
+// CHECK: TMATMUL({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // CHECK: set_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
 // CHECK: wait_flag(PIPE_M, PIPE_FIX, EVENT_ID0);
-// CHECK: TMOV({{v[0-9]+}}, {{v[0-9]+}});
+// CHECK: TMOV({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // CHECK: set_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
 // CHECK: wait_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID0);
-// CHECK: for (int64_t [[IV:[ij][0-9]+]] =
+// CHECK: for (int64_t [[IV:[_A-Za-z][_A-Za-z0-9]*]] =
 // CHECK: wait_flag(PIPE_FIX, PIPE_MTE1, EVENT_ID1);
-// CHECK: TMOV({{v[0-9]+}}, {{v[0-9]+}});
+// CHECK: TMOV({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // CHECK: set_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
 // CHECK: wait_flag(PIPE_MTE1, PIPE_M, EVENT_ID1);
-// CHECK: TMATMUL({{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}});
+// CHECK: TMATMUL({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // CHECK: set_flag(PIPE_M, PIPE_MTE1, EVENT_ID0);
 // CHECK: set_flag(PIPE_M, PIPE_FIX, EVENT_ID1);
 // CHECK: wait_flag(PIPE_M, PIPE_FIX, EVENT_ID1);

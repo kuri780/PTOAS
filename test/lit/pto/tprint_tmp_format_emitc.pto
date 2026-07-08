@@ -38,5 +38,4 @@ module attributes {pto.target_arch = "a5"} {
   }
 }
 
-// CHECK: TPRINT<pto::PrintFormat::Width10_Precision6>(
-// CHECK-SAME: {{v[0-9]+}}, {{v[0-9]+}}
+// CHECK: TPRINT<pto::PrintFormat::Width10_Precision6>({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});

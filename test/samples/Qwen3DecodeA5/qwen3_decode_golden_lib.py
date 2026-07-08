@@ -8,6 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 import numpy as np
+from dataclasses import replace
 
 from validation_runtime import (
     bf16_to_float32,
@@ -565,10 +566,39 @@ BUILDERS = {
 }
 
 
+def _build_legacy_name_map(meta):
+    ordered = list(meta.read_order)
+    return {f'v{idx}': name for idx, name in enumerate(ordered, start=1)}
+
+
+def _with_legacy_meta_aliases(meta, legacy_to_actual):
+    elem_counts = dict(meta.elem_counts)
+    np_types = dict(meta.np_types)
+    for legacy, actual in legacy_to_actual.items():
+        if legacy in elem_counts:
+            continue
+        if actual not in elem_counts or actual not in np_types:
+            continue
+        elem_counts[legacy] = elem_counts[actual]
+        np_types[legacy] = np_types[actual]
+    return replace(meta, elem_counts=elem_counts, np_types=np_types)
+
+
+def _rewrite_legacy_buffer_names(entries, legacy_to_actual):
+    rewritten = {}
+    for name, value in entries.items():
+        rewritten[legacy_to_actual.get(name, name)] = value
+    return rewritten
+
+
 def run_case(case_name: str):
     meta = load_case_meta()
+    legacy_to_actual = _build_legacy_name_map(meta)
+    meta = _with_legacy_meta_aliases(meta, legacy_to_actual)
     generator = rng()
     ints = load_integer_assignments()
     buffers, golden = BUILDERS[case_name](meta, generator, ints)
+    buffers = _rewrite_legacy_buffer_names(buffers, legacy_to_actual)
+    golden = _rewrite_legacy_buffer_names(golden, legacy_to_actual)
     write_buffers(meta, buffers)
     write_golden(meta, golden)

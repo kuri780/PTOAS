@@ -1,0 +1,63 @@
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+
+module {
+  func.func @cube_kernel(%gm_slot_buffer: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %v2c_local = pto.reserve_buffer {
+      name = "v2c_fifo",
+      size = 4096,
+      location = #pto.address_space<mat>,
+      auto = true
+    } -> i32
+    %c2v_import = pto.import_reserved_buffer {
+      name = "c2v_fifo",
+      peer_func = @vector_kernel
+    } -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       c2v_consumer_buf = %c2v_import : i32,
+       v2c_consumer_buf = %v2c_local : i32)
+
+    %acc_tile = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tpush_to_aiv(%acc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>) {id = 0, split = 1}
+
+    %mat_tile = pto.tpop_from_aiv {id = 0, split = 1}
+      -> !pto.tile_buf<loc=mat, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tfree_from_aiv {id = 0, split = 1}
+    return
+  }
+
+  func.func @vector_kernel(%gm_slot_buffer: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c2v_local = pto.reserve_buffer {
+      name = "c2v_fifo",
+      size = 4096,
+      location = #pto.address_space<vec>,
+      auto = true
+    } -> i32
+    %v2c_import = pto.import_reserved_buffer {
+      name = "v2c_fifo",
+      peer_func = @cube_kernel
+    } -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       c2v_consumer_buf = %c2v_local : i32,
+       v2c_consumer_buf = %v2c_import : i32)
+
+    %aiv_subblockid = pto.get_subblock_idx
+    %vec_tile = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tpush_to_aic(%vec_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0, split = 1} aiv_subblockid(%aiv_subblockid)
+
+    %recv_tile = pto.tpop_from_aic {id = 0, split = 1} aiv_subblockid(%aiv_subblockid)
+      -> !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=16, v_row=8, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tfree_from_aic {id = 0, split = 1}
+    return
+  }
+}
+
+// A3-LABEL: AICORE void vector_kernel(__gm__ float*
+// A3: int64_t [[SID:[_A-Za-z][_A-Za-z0-9]*]] = get_subblockid();
+// A3: int32_t [[PUSH_SID:[_A-Za-z][_A-Za-z0-9]*]] = (int32_t) [[SID]];
+// A3: TPUSH<{{.*}}TileSplitAxis::TILE_UP_DOWN>({{.*}}, {{.*}}, [[PUSH_SID]]);
+// A3: int32_t [[POP_SID:[_A-Za-z][_A-Za-z0-9]*]] = (int32_t) [[SID]];
+// A3: TPOP<{{.*}}TileSplitAxis::TILE_UP_DOWN>({{.*}}, {{.*}}, [[POP_SID]]);
