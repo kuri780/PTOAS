@@ -2512,8 +2512,8 @@ struct PTOViewToMemrefPass
         Value rhs = op->getOperand(1);
         Value dst = op->getOperand(kThirdOperandIndex);
 
-        rewriter.replaceOpWithNewOp<pto::TMatmulOp>(
-            op, TypeRange{}, lhs, rhs, dst, op.getAccPhaseAttr());
+        replaceOpWithClonedAttrs<pto::TMatmulOp>(
+            rewriter, op, TypeRange{}, lhs, rhs, dst, op.getAccPhaseAttr());
       }
 
       // --- TMatmulAccOp [Acc, Lhs, Rhs, Dst] ---
@@ -2677,8 +2677,8 @@ struct PTOViewToMemrefPass
       for (auto op : movs) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
-        rewriter.replaceOpWithNewOp<pto::TMovOp>(
-            op, TypeRange{}, op.getSrc(), op.getDst(), op.getFp(),
+        replaceOpWithClonedAttrs<pto::TMovOp>(
+            rewriter, op, TypeRange{}, op.getSrc(), op.getDst(), op.getFp(),
             op.getPreQuantScalar(), op.getAccToVecModeAttr(),
             op.getReluPreModeAttr());
       }
@@ -3028,7 +3028,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColExpandOp>(
+        replaceOpWithClonedAttrs<pto::TColExpandOp>(
+            rewriter,
             op,
             TypeRange{},
             src,
@@ -3053,7 +3054,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColMaxOp>(
+        replaceOpWithClonedAttrs<pto::TColMaxOp>(
+            rewriter,
             op,
             TypeRange{},
             src,
@@ -3078,7 +3080,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColMinOp>(
+        replaceOpWithClonedAttrs<pto::TColMinOp>(
+            rewriter,
             op,
             TypeRange{},
             src,
@@ -3107,7 +3110,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColExpandMulOp>(
+        replaceOpWithClonedAttrs<pto::TColExpandMulOp>(
+            rewriter,
             op,
             TypeRange{},
             src0,
@@ -3137,7 +3141,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColExpandMaxOp>(
+        replaceOpWithClonedAttrs<pto::TColExpandMaxOp>(
+            rewriter,
             op,
             TypeRange{},
             src0,
@@ -3167,7 +3172,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TColExpandMinOp>(
+        replaceOpWithClonedAttrs<pto::TColExpandMinOp>(
+            rewriter,
             op,
             TypeRange{},
             src0,
@@ -3762,7 +3768,8 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TLReluOp>(
+        replaceOpWithClonedAttrs<pto::TLReluOp>(
+            rewriter,
             op,
             TypeRange{},
             src,

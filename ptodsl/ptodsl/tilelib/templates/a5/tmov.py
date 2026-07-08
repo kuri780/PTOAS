@@ -11,6 +11,14 @@ from ptodsl import pto
 import ptodsl.tilelib as tilelib
 
 
+def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_layouts, **_):
+    return (
+        all(space in {"ub", "vec"} for space in operand_memory_spaces)
+        and all(layout == "row_major" for layout in operand_b_layouts)
+        and all(layout == "none_box" for layout in operand_s_layouts)
+    )
+
+
 @tilelib.tile_template(
     op="pto.tmov",
     target="a5",
@@ -23,8 +31,10 @@ import ptodsl.tilelib as tilelib
         ("i16", "i16"),
         ("i8", "i8"),
     ],
-    memory_spaces=("ub", "ub"),
-    layouts=("row_major",),
+    constraints=[
+        _ub_or_vec_row_major,
+        tilelib.require_same_valid_shape("src", "dst"),
+    ],
     id=0,
     loop_depth=2,
     is_post_update=False,

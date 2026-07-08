@@ -38,35 +38,46 @@ def template_tload_nd2nd(src: pto.PartitionTensorView, dst: pto.Tile):
     g0, g1, g2, g3, g4 = src.shape
     s0, s1, s2, s3, s4 = src.strides
     _, ub_cols = dst.shape
-    _, valid_cols = dst.valid_shape
+    valid_rows, valid_cols = dst.valid_shape
 
-    n_burst = g3
-    len_burst = g4 * elem_bytes
-    gm_stride = s3 * elem_bytes
+    n_burst = valid_rows if g0 == 1 and g1 == 1 and g2 == 1 and g3 is None else g3
+    len_burst = (valid_cols if g4 is None else g4) * elem_bytes
+    gm_stride = 0 if g3 == 1 or s3 is None else s3 * elem_bytes
     ub_stride = ub_cols * elem_bytes
 
-    dst_stride2 = g3 * ub_cols
+    dst_stride2 = (valid_rows if g3 is None else g3) * ub_cols
     dst_stride1 = g2 * dst_stride2
     dst_stride0 = g1 * dst_stride1
 
     loops = []
-    if g2 != 1:
+    if g2 not in (1, None):
         loops.append((g2, s2 * elem_bytes, dst_stride2 * elem_bytes))
-    if g1 != 1:
+    if g1 not in (1, None):
         loops.append((g1, s1 * elem_bytes, dst_stride1 * elem_bytes))
 
     gm_ptr = src.as_ptr()
     ub_ptr = dst.as_ptr()
-    for i in range(0, g0, 1):
+    if g0 == 1 and s0 is None:
         pto.mte_load(
-            pto.addptr(gm_ptr, i * s0),
-            pto.addptr(ub_ptr, i * dst_stride0),
+            gm_ptr,
+            ub_ptr,
             0,
             len_burst,
             nburst=(n_burst, gm_stride, ub_stride),
             loops=loops or None,
             pad=dma_pad_for(dst),
         )
+    else:
+        for i in range(0, g0, 1):
+            pto.mte_load(
+                pto.addptr(gm_ptr, i * s0),
+                pto.addptr(ub_ptr, i * dst_stride0),
+                0,
+                len_burst,
+                nburst=(n_burst, gm_stride, ub_stride),
+                loops=loops or None,
+                pad=dma_pad_for(dst),
+            )
 
 
 @tilelib.tile_template(
@@ -85,34 +96,46 @@ def template_tload_dn2dn(src: pto.PartitionTensorView, dst: pto.Tile):
     g0, g1, g2, g3, g4 = src.shape
     s0, s1, s2, s3, s4 = src.strides
     ub_rows, _ = dst.shape
+    valid_rows, _ = dst.valid_shape
 
-    n_burst = g4
-    len_burst = g3 * elem_bytes
-    gm_stride = s4 * elem_bytes
+    n_burst = dst.valid_shape[1] if g4 is None else g4
+    len_burst = valid_rows * elem_bytes
+    gm_stride = 0 if g4 == 1 or s4 is None else s4 * elem_bytes
     ub_stride = ub_rows * elem_bytes
 
-    dst_stride2 = ub_rows * g4
+    dst_stride2 = ub_rows * n_burst
     dst_stride1 = g2 * dst_stride2
     dst_stride0 = g1 * dst_stride1
 
     loops = []
-    if g2 != 1:
+    if g2 not in (1, None):
         loops.append((g2, s2 * elem_bytes, dst_stride2 * elem_bytes))
-    if g1 != 1:
+    if g1 not in (1, None):
         loops.append((g1, s1 * elem_bytes, dst_stride1 * elem_bytes))
 
     gm_ptr = src.as_ptr()
     ub_ptr = dst.as_ptr()
-    for i in range(0, g0, 1):
+    if g0 == 1 and s0 is None:
         pto.mte_load(
-            pto.addptr(gm_ptr, i * s0),
-            pto.addptr(ub_ptr, i * dst_stride0),
+            gm_ptr,
+            ub_ptr,
             0,
             len_burst,
             nburst=(n_burst, gm_stride, ub_stride),
             loops=loops or None,
             pad=dma_pad_for(dst),
         )
+    else:
+        for i in range(0, g0, 1):
+            pto.mte_load(
+                pto.addptr(gm_ptr, i * s0),
+                pto.addptr(ub_ptr, i * dst_stride0),
+                0,
+                len_burst,
+                nburst=(n_burst, gm_stride, ub_stride),
+                loops=loops or None,
+                pad=dma_pad_for(dst),
+            )
 
 
 @tilelib.tile_template(
@@ -199,4 +222,3 @@ def template_tload_gm_to_mat_dn2nz(src: pto.PartitionTensorView, dst: pto.Tile):
         dst_group=(1, 1, k, 0),
         ctrl=(0, False),
     )
-

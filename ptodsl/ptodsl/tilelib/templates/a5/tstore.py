@@ -38,34 +38,43 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
     elem_bytes = pto.bytewidth(src.dtype)
     g0, g1, g2, g3, g4 = dst.shape
     s0, s1, s2, s3, s4 = dst.strides
-    _, valid_cols = src.valid_shape
+    valid_rows, valid_cols = src.valid_shape
     _, ub_cols = src.shape
 
-    n_burst = g3
+    n_burst = valid_rows if g0 == 1 and g1 == 1 and g2 == 1 and g3 is None else g3
     len_burst = valid_cols * elem_bytes
     ub_stride = ub_cols * elem_bytes
-    gm_stride = s3 * elem_bytes
+    gm_stride = 0 if g3 == 1 or s3 is None else s3 * elem_bytes
 
-    src_stride2 = g3 * ub_cols
+    src_stride2 = (valid_rows if g3 is None else g3) * ub_cols
     src_stride1 = g2 * src_stride2
     src_stride0 = g1 * src_stride1
 
     loops = []
-    if g2 != 1:
+    if g2 not in (1, None):
         loops.append((g2, src_stride2 * elem_bytes, s2 * elem_bytes))
-    if g1 != 1:
+    if g1 not in (1, None):
         loops.append((g1, src_stride1 * elem_bytes, s1 * elem_bytes))
 
     ub_ptr = src.as_ptr()
     gm_ptr = dst.as_ptr()
-    for i in range(0, g0, 1):
+    if g0 == 1 and s0 is None:
         pto.mte_store(
-            pto.addptr(ub_ptr, i * src_stride0),
-            pto.addptr(gm_ptr, i * s0),
+            ub_ptr,
+            gm_ptr,
             len_burst,
             nburst=(n_burst, ub_stride, gm_stride),
             loops=loops or None,
         )
+    else:
+        for i in range(0, g0, 1):
+            pto.mte_store(
+                pto.addptr(ub_ptr, i * src_stride0),
+                pto.addptr(gm_ptr, i * s0),
+                len_burst,
+                nburst=(n_burst, ub_stride, gm_stride),
+                loops=loops or None,
+            )
 
 
 @tilelib.tile_template(
@@ -83,34 +92,43 @@ def template_tstore_dn(src: pto.Tile, dst: pto.PartitionTensorView):
     elem_bytes = pto.bytewidth(src.dtype)
     g0, g1, g2, g3, g4 = dst.shape
     s0, s1, s2, s3, s4 = dst.strides
-    valid_rows, _ = src.valid_shape
+    valid_rows, valid_cols = src.valid_shape
     ub_rows, _ = src.shape
 
-    n_burst = g4
+    n_burst = valid_cols if g4 is None else g4
     len_burst = valid_rows * elem_bytes
-    gm_stride = s4 * elem_bytes
+    gm_stride = 0 if g4 == 1 or s4 is None else s4 * elem_bytes
     ub_stride = ub_rows * elem_bytes
 
-    src_stride2 = ub_rows * g4
+    src_stride2 = ub_rows * n_burst
     src_stride1 = g2 * src_stride2
     src_stride0 = g1 * src_stride1
 
     loops = []
-    if g2 != 1:
+    if g2 not in (1, None):
         loops.append((g2, src_stride2 * elem_bytes, s2 * elem_bytes))
-    if g1 != 1:
+    if g1 not in (1, None):
         loops.append((g1, src_stride1 * elem_bytes, s1 * elem_bytes))
 
     ub_ptr = src.as_ptr()
     gm_ptr = dst.as_ptr()
-    for i in range(0, g0, 1):
+    if g0 == 1 and s0 is None:
         pto.mte_store(
-            pto.addptr(ub_ptr, i * src_stride0),
-            pto.addptr(gm_ptr, i * s0),
+            ub_ptr,
+            gm_ptr,
             len_burst,
             nburst=(n_burst, ub_stride, gm_stride),
             loops=loops or None,
         )
+    else:
+        for i in range(0, g0, 1):
+            pto.mte_store(
+                pto.addptr(ub_ptr, i * src_stride0),
+                pto.addptr(gm_ptr, i * s0),
+                len_burst,
+                nburst=(n_burst, ub_stride, gm_stride),
+                loops=loops or None,
+            )
 
 
 @tilelib.tile_template(
@@ -256,4 +274,3 @@ def template_tstore_fp_acc_to_gm(src: pto.Tile, fp: pto.Tile, dst: pto.Partition
         layout="nz2nd",
         pre_quant=(fp.as_ptr(), quant_mode),
     )
-

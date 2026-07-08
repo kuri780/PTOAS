@@ -26,6 +26,14 @@ FLOAT_SIGNATURES = [
 ]
 
 
+def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_layouts, **_):
+    return (
+        all(space in {"ub", "vec"} for space in operand_memory_spaces)
+        and all(layout == "row_major" for layout in operand_b_layouts)
+        and all(layout == "none_box" for layout in operand_s_layouts)
+    )
+
+
 def register_row_expand_binary(*, op, name, vector_op, dtypes):
     @tilelib.tile_template(
         op=op,
@@ -33,9 +41,7 @@ def register_row_expand_binary(*, op, name, vector_op, dtypes):
         name=name,
         dtypes=dtypes,
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_row_expand_binary,
         ],
         id=0,
@@ -56,9 +62,7 @@ def register_column_expand_binary(*, op, name, vector_op, dtypes):
         name=name,
         dtypes=dtypes,
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_column_expand_binary,
         ],
         id=0,
@@ -79,9 +83,7 @@ def register_row_expand_expdif():
         name="template_trowexpandexpdif_f32",
         dtypes=[("f32", "f32", "f32")],
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_row_expand_binary,
         ],
         id=0,
@@ -103,9 +105,7 @@ def register_row_expand_expdif():
         name="template_trowexpandexpdif_f16",
         dtypes=[("f16", "f16", "f16")],
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_row_expand_binary,
         ],
         id=0,
@@ -131,9 +131,7 @@ def register_column_expand_expdif():
         name="template_tcolexpandexpdif_f32",
         dtypes=[("f32", "f32", "f32")],
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_column_expand_binary,
         ],
         id=0,
@@ -155,9 +153,7 @@ def register_column_expand_expdif():
         name="template_tcolexpandexpdif_f16",
         dtypes=[("f16", "f16", "f16")],
         constraints=[
-            tilelib.check_memory_space("ub"),
-            tilelib.check_layout("row_major"),
-            tilelib.check_s_layout("none_box"),
+            _ub_or_vec_row_major,
             _valid_column_expand_binary,
         ],
         id=0,

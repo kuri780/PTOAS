@@ -20,6 +20,14 @@ def _valid_column_expand(src_valid_shape=(), dst_valid_shape=(), **_):
     )
 
 
+def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_layouts, **_):
+    return (
+        all(space in {"ub", "vec"} for space in operand_memory_spaces)
+        and all(layout == "row_major" for layout in operand_b_layouts)
+        and all(layout == "none_box" for layout in operand_s_layouts)
+    )
+
+
 @tilelib.tile_template(
     op="pto.tcolexpand",
     target="a5",
@@ -33,9 +41,7 @@ def _valid_column_expand(src_valid_shape=(), dst_valid_shape=(), **_):
         ("f32", "f32"),
     ],
     constraints=[
-        tilelib.check_memory_space("ub"),
-        tilelib.check_layout("row_major"),
-        tilelib.check_s_layout("none_box"),
+        _ub_or_vec_row_major,
         _valid_column_expand,
     ],
     id=0,

@@ -31,6 +31,8 @@ def _known_le(lhs, rhs) -> bool:
 def _shape_size(shape):
     result = 1
     for dim in shape:
+        if dim is None:
+            return None
         result *= dim
     return result
 
@@ -110,7 +112,7 @@ def tload_dn2dn_constraint(src_kind, src_shape, src_strides, src_memory_space, d
     if src_kind != "view" or dst_kind != "tile" or src_memory_space != "gm" or dst_memory_space not in {"ub", "vec"}:
         return False
     logical_rows = src_shape[3]
-    logical_cols = src_shape[0] * src_shape[1] * src_shape[2] * src_shape[4]
+    logical_cols = _shape_size((src_shape[0], src_shape[1], src_shape[2], src_shape[4]))
     return _is_tile_layout(dst_config, row_major=False, s_layout="none_box") and _check_load_bounds(
         src_shape,
         src_strides,
@@ -155,7 +157,7 @@ def tstore_dn_constraint(src_kind, src_shape, src_valid_shape, src_memory_space,
     if src_kind != "tile" or dst_kind != "view" or src_memory_space not in {"ub", "vec"} or dst_memory_space != "gm":
         return False
     logical_rows = dst_shape[3]
-    logical_cols = dst_shape[0] * dst_shape[1] * dst_shape[2] * dst_shape[4]
+    logical_cols = _shape_size((dst_shape[0], dst_shape[1], dst_shape[2], dst_shape[4]))
     return _is_tile_layout(src_config, row_major=False, s_layout="none_box") and _check_store_bounds(
         src_shape,
         src_valid_shape,

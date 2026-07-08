@@ -253,6 +253,11 @@ static std::optional<pto::Layout> resolveViewLayout(Value value) {
 
   Operation *definingOp = value.getDefiningOp();
   while (definingOp) {
+    if (auto part = dyn_cast<pto::PartitionViewOp>(definingOp)) {
+      value = part.getSource();
+      definingOp = value.getDefiningOp();
+      continue;
+    }
     if (auto layout = getLayoutAttrFromOp(definingOp))
       return layout;
     if (auto subview = dyn_cast<memref::SubViewOp>(definingOp)) {
@@ -274,6 +279,59 @@ static std::optional<pto::Layout> resolveViewLayout(Value value) {
     break;
   }
   return std::nullopt;
+}
+
+static void populatePTOViewShapeAndStrides(Value value,
+                                           SmallVectorImpl<int64_t> &shape,
+                                           SmallVectorImpl<int64_t> &strides) {
+  if (!value)
+    return;
+
+  if (auto part = value.getDefiningOp<pto::PartitionViewOp>()) {
+    if (shape.empty()) {
+      shape.reserve(part.getSizes().size());
+      for (Value sizeValue : part.getSizes()) {
+        int64_t size = ShapedType::kDynamic;
+        (void)getStaticIntFromValue(sizeValue, size);
+        shape.push_back(size);
+      }
+      if (shape.empty()) {
+        auto partTy =
+            dyn_cast<pto::PartitionTensorViewType>(part.getResult().getType());
+        if (partTy)
+          shape.assign(partTy.getShape().begin(), partTy.getShape().end());
+      }
+    }
+    SmallVector<int64_t> sourceShape;
+    SmallVector<int64_t> sourceStrides;
+    populatePTOViewShapeAndStrides(part.getSource(), sourceShape,
+                                   sourceStrides);
+    if (strides.empty() && !sourceStrides.empty())
+      strides = sourceStrides;
+    return;
+  }
+
+  if (auto make = value.getDefiningOp<pto::MakeTensorViewOp>()) {
+    if (shape.empty()) {
+      auto viewTy = dyn_cast<pto::TensorViewType>(make.getResult().getType());
+      if (viewTy)
+        shape.assign(viewTy.getShape().begin(), viewTy.getShape().end());
+    }
+    if (strides.empty()) {
+      strides.reserve(make.getStrides().size());
+      for (Value strideValue : make.getStrides()) {
+        int64_t stride = ShapedType::kDynamic;
+        (void)getStaticIntFromValue(strideValue, stride);
+        strides.push_back(stride);
+      }
+    }
+    return;
+  }
+
+  if (auto viewTy = dyn_cast<pto::TensorViewType>(value.getType())) {
+    if (shape.empty())
+      shape.assign(viewTy.getShape().begin(), viewTy.getShape().end());
+  }
 }
 
 static void populateViewShapeAndStrides(Value value,
@@ -534,28 +592,20 @@ static void appendViewOperandSpecJson(std::string &json, Value operand,
   json += "}";
 }
 
-static SmallVector<int64_t> computeCompactStrides(ArrayRef<int64_t> shape) {
-  SmallVector<int64_t> strides(shape.size(), 1);
-  int64_t running = 1;
-  for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
-    strides[i] = running;
-    if (ShapedType::isDynamic(shape[i]) || ShapedType::isDynamic(running)) {
-      running = ShapedType::kDynamic;
-      continue;
-    }
-    running *= shape[i];
-  }
-  return strides;
-}
-
 static void appendViewOperandSpecJson(std::string &json, Value operand,
                                       pto::PartitionTensorViewType viewType) {
   std::string dtype = getDtypeString(viewType.getElementType());
   json += "{\"kind\":\"view\",\"dtype\":\"" + dtype + "\",\"shape\":";
-  ArrayRef<int64_t> shape = viewType.getShape();
+  SmallVector<int64_t> shape;
+  SmallVector<int64_t> strides;
+  populatePTOViewShapeAndStrides(operand, shape, strides);
+  if (shape.empty())
+    shape.assign(viewType.getShape().begin(), viewType.getShape().end());
   appendJsonDimArray(json, shape);
-  json += ",\"strides\":";
-  appendJsonDimArray(json, computeCompactStrides(shape));
+  if (!strides.empty()) {
+    json += ",\"strides\":";
+    appendJsonDimArray(json, strides);
+  }
   json += ",\"memory_space\":\"";
   json += getMemorySpaceString(viewType);
   json += "\"";

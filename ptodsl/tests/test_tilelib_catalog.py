@@ -555,6 +555,72 @@ class TileLibCatalogTest(unittest.TestCase):
                 selected = select("pto.tmin" if op == "pto.tmin" else op, "a5", specs)
                 self.assertIn(expected_op, selected.specialize(**specs).mlir_text())
 
+    def test_column_vec_smoke_shapes_render(self):
+        cases = (
+            (
+                "pto.tcolexpand",
+                {"src": (1, 128, (1, 63)), "dst": (8, 128, (8, 63))},
+                "f32",
+                "pto.vsts",
+            ),
+            (
+                "pto.tcolexpandmax",
+                {"src0": (10, 64, (10, 64)), "src1": (1, 64, (1, 64)), "dst": (10, 64, (10, 64))},
+                "f16",
+                "pto.vmax",
+            ),
+            (
+                "pto.tcolexpandmin",
+                {"src0": (10, 64, (10, 64)), "src1": (1, 64, (1, 64)), "dst": (10, 64, (10, 64))},
+                "f16",
+                "pto.vmin",
+            ),
+            (
+                "pto.tcolexpandmul",
+                {"src0": (10, 64, (10, 64)), "src1": (1, 64, (1, 64)), "dst": (10, 64, (10, 64))},
+                "f16",
+                "pto.vmul",
+            ),
+            (
+                "pto.tcolmax",
+                {"src": (1, 256, (1, 255)), "dst": (1, 256, (1, 255))},
+                "f32",
+                "pto.vmax",
+            ),
+            (
+                "pto.tcolmin",
+                {"src": (1, 256, (1, 255)), "dst": (1, 256, (1, 255))},
+                "f32",
+                "pto.vmin",
+            ),
+            (
+                "pto.tlrelu",
+                {"src": (32, 64, (32, 64)), "dst": (32, 64, (32, 64))},
+                "f32",
+                "pto.vlrelu",
+            ),
+            (
+                "pto.tmov",
+                {"src": (32, 32, (32, 32)), "dst": (32, 32, (32, 32))},
+                "f32",
+                "pto.vsts",
+            ),
+        )
+        for op, tile_shapes, dtype_name, expected_op in cases:
+            with self.subTest(op=op):
+                specs = {}
+                for name, (rows, cols, valid_shape) in tile_shapes.items():
+                    specs[name] = TileSpec(
+                        shape=(rows, cols),
+                        dtype=ScalarType(dtype_name),
+                        memory_space="vec",
+                        valid_shape=valid_shape,
+                    )
+                if op == "pto.tlrelu":
+                    specs["slope"] = ScalarSpec(dtype=ScalarType(dtype_name), value=1)
+                selected = select(op, "a5", specs)
+                self.assertIn(expected_op, selected.specialize(**specs).mlir_text())
+
     def test_tcmp_vec_tiles_render_packed_mask_paths(self):
         cases = (
             ("f32", "pto.pdintlv_b8", "PK"),
