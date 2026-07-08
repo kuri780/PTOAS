@@ -244,7 +244,7 @@ PyPTO 生成规则：
 | `TLoad` 后发布 signal | `pto.cmo.cacheinvalid %payload single_cache_line` 作为 payload marker；不需要显式 fence | 若 marker 匹配 pending GM read，则补 `PIPE_MTE2` drain；non-cacheable marker 不生成 `dcci` |
 | `TWait` 后读取 cacheable scalar GM payload | payload load 前生成 `pto.cmo.cacheinvalid %addr single_cache_line : !pto.ptr<T, gm>`，或使用 whole-cache 形式 | 无 |
 | `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 single-line 或 whole-cache `pto.cmo.cacheinvalid` | 无 |
-| cacheable scalar GM store 后发布 signal | payload store 后生成 single-line 或 whole-cache `pto.cmo.cacheinvalid`，随后 `pto.fence.barrier_all #pto.fence_scope<gm>` | 无 |
+| cacheable scalar GM store 后发布 signal | 必须提供 `pto.cmo.cacheinvalid %payload single_cache_line` 作为 TNotify payload marker，并在 payload store 后、signal 前完成 CMO 和 `pto.fence.barrier_all #pto.fence_scope<gm>`；如果使用 whole-cache CMO，也仍需额外提供 addressed marker | 无 |
 
 `pto.entry` launcher 可以调用多个 kernel 函数；每个 kernel 函数会被
 `pto-memory-consistency` 独立分析。kernel body 内部若通过 `func.call` 调用包含 payload
@@ -334,7 +334,12 @@ pto.TNotifyOp(...)
 ```
 
 这对应 cacheable scalar GM store 发布 payload 的场景。`CmoCacheInvalidOp` 和
-`FenceBarrierAllOp` 都是必需的，且顺序必须是 CMO 在 fence 之前。
+`FenceBarrierAllOp` 都是必需的，且顺序必须是 CMO 在 fence 之前。release 侧的
+`pto.cmo.cacheinvalid all #pto.address_space<gm>` 只能表示 whole-cache CMO 边界，不能提供
+TNotify payload 地址；如果使用 whole-cache CMO，PyPTO 还需要生成一个 matching
+`pto.cmo.cacheinvalid %payload single_cache_line` 作为 payload marker。若 whole-cache CMO
+已经覆盖该 cacheable store，这个 addressed marker 会被 MemoryConsistency pass 消费并消除，
+不会额外生成第二条 `dcci`。
 
 ## 7. Backend Lowering 状态
 

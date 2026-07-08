@@ -136,6 +136,8 @@ struct TNotifyReleaseState {
     addressedCmoPayloads.clear();
   }
 
+  bool hasReleasePayloadAccess() const { return !pendingAccesses.empty(); }
+
   bool accessMatchesAddressedCmo(const PendingReleaseAccess &access) const {
     for (Value payload : addressedCmoPayloads)
       if (payloadMayAlias(access.payload, payload))
@@ -289,7 +291,7 @@ struct TNotifyReleaseState {
     for (PendingReleaseAccess &access : pendingAccesses) {
       if (!payloadMayAlias(access.payload, addr))
         continue;
-      if (access.needsGmCacheCmo) {
+      if (access.needsGmCacheCmo && !access.cmoCovered) {
         access.cmoCovered = true;
         needsRealCmo = true;
       }
@@ -603,14 +605,22 @@ static void setTNotifyReleaseAttrs(pto::TNotifyOp op,
 static void setTNotifyPipeDrainAttrs(pto::TNotifyOp op,
                                      const TNotifyReleaseState &state) {
   TNotifyReleaseState emitState;
-  emitState.drainMte2 =
-      state.hasAddressedCmo ? state.addressedDrainMte2 : state.drainMte2;
+  emitState.drainMte2 = state.hasAddressedCmo && state.addressedDrainMte2;
+  emitState.drainMte3 = state.hasAddressedCmo && state.addressedDrainMte3;
   setTNotifyReleaseAttrs(op, emitState);
 }
 
 static void diagnoseTNotifyRelease(pto::TNotifyOp op,
                                    const TNotifyReleaseState &state,
                                    bool &hasFailure) {
+  if (state.hasReleasePayloadAccess() && !state.hasAddressedCmo) {
+    op.emitOpError()
+        << "requires explicit `pto.cmo.cacheinvalid %addr "
+           "single_cache_line` to identify the TNotify payload address";
+    hasFailure = true;
+    return;
+  }
+
   if (state.hasAddressedCmo) {
     if (state.addressedNeedsGmCacheCmo) {
       op.emitOpError()
@@ -660,9 +670,9 @@ static void insertDrainsBeforeBarrierAll(pto::FenceBarrierAllOp fence,
         fence.getLoc(), pto::PipeAttr::get(fence.getContext(), pipe));
   };
   const bool drainMte3 =
-      state.hasAddressedCmo ? state.addressedDrainMte3 : state.drainMte3;
+      state.hasAddressedCmo && state.addressedDrainMte3;
   const bool drainFix =
-      state.hasAddressedCmo ? state.addressedDrainFix : state.drainFix;
+      state.hasAddressedCmo && state.addressedDrainFix;
   if (drainMte3) {
     insertBarrier(pto::PIPE::PIPE_MTE3);
     state.markPipeDrained(pto::PIPE::PIPE_MTE3);

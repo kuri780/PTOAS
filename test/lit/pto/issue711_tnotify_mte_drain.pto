@@ -50,6 +50,7 @@ module {
     pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
                outs(%dst : !pto.partition_tensor_view<1x32xf32>)
     pto.barrier <PIPE_MTE2>
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<1x32xf32>
     pto.fence.barrier_all #pto.fence_scope<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
@@ -84,6 +85,7 @@ module {
 
     pto.tstore ins(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
                outs(%dst : !pto.partition_tensor_view<16x16xf32>)
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<16x16xf32>
     pto.fence.barrier_all #pto.fence_scope<gm>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
@@ -118,6 +120,7 @@ module {
 
     pto.tload ins(%src : !pto.partition_tensor_view<1x32xf32>)
               outs(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.cmo.cacheinvalid %src single_cache_line : !pto.partition_tensor_view<1x32xf32>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
@@ -151,6 +154,7 @@ module {
 
     pto.tload ins(%src : !pto.partition_tensor_view<1x32xf32>)
               outs(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.cmo.cacheinvalid %src single_cache_line : !pto.partition_tensor_view<1x32xf32>
     pto.barrier <PIPE_MTE2>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
@@ -195,6 +199,7 @@ module {
     pto.barrier <PIPE_MTE2>
     pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
                outs(%dst : !pto.partition_tensor_view<1x32xf32>)
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<1x32xf32>
     pto.barrier <PIPE_MTE3>
     pto.fence.barrier_all #pto.fence_scope<gm>
 
@@ -230,6 +235,7 @@ module {
 
     pto.tstore ins(%tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
                outs(%dst : !pto.partition_tensor_view<1x32xf32>)
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<1x32xf32>
     pto.barrier <PIPE_MTE3>
     pto.fence.barrier_all #pto.fence_scope<gm>
 

@@ -40,7 +40,7 @@ module {
     return
   }
 
-  func.func @missing_scalar_release_cmo(
+  func.func @missing_scalar_release_marker(
       %payload_ptr: !pto.ptr<i32>,
       %signal_ptr: !pto.ptr<i32>)
       attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
@@ -71,7 +71,7 @@ module {
 
     pto.store_scalar %v_i32, %payload_ptr[%c0] : !pto.ptr<i32>, i32
     pto.fence.barrier_all #pto.fence_scope<gm>
-    pto.cmo.cacheinvalid all #pto.address_space<gm>
+    pto.cmo.cacheinvalid %payload_ptr single_cache_line : !pto.ptr<i32>
 
     %sig_view = pto.make_tensor_view %signal_ptr,
       shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
@@ -149,9 +149,9 @@ module {
   }
 }
 
-// CHECK: requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>`
-// CHECK: requires explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before `pto.fence.barrier_all #pto.fence_scope<gm>`
-// CHECK: requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>`
+// CHECK: requires explicit `pto.cmo.cacheinvalid %addr single_cache_line` to identify the TNotify payload address
+// CHECK: requires explicit `pto.cmo.cacheinvalid %addr single_cache_line` to identify the TNotify payload address
+// CHECK: requires explicit `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching `pto.cmo.cacheinvalid %addr single_cache_line`
 // CHECK: requires explicit `pto.cmo.cacheinvalid %addr single_cache_line` after matching cacheable GM scalar stores
 // CHECK: requires explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before a cacheable GM load
 // CHECK: dirty GM cache may exist; insert explicit `pto.cmo.cacheinvalid all #pto.address_space<gm>` before the load
