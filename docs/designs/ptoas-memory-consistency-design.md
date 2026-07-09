@@ -211,6 +211,12 @@ pto.cmo.cacheinvalid %payload_ptr single_cache_line : !pto.ptr<i32, gm>
 `cacheinvalid` 用来避免读取到本地 stale cache line。也可以使用 whole-cache 形式：
 `pto.cmo.cacheinvalid all #pto.address_space<gm>`。如果缺少该 op，PTOAS 会报错。
 
+Acquire 侧的 `single_cache_line` 形式是用户或 PyPTO 对 cache line 覆盖关系的显式承诺：
+`%payload_ptr` 必须覆盖后续 `load_scalar` 实际读取的 GM 地址。PTOAS 当前只检查
+`TWait` 或 ready `TTest` 后、cacheable GM `load_scalar` 前存在 `cmo.cacheinvalid`，
+不会证明该 CMO 地址和后续 load 地址是否 alias。如果生成方无法保证精确地址正确，
+应使用 `pto.cmo.cacheinvalid all #pto.address_space<gm>` 做保守 whole-cache invalidate。
+
 ### 5.4 Cacheable Scalar GM Store 后发布 Signal
 
 适用场景：
@@ -252,8 +258,8 @@ PyPTO 生成规则：
 | --- | --- | --- |
 | `TStore`、`TStoreFP` 或 `TPUT` 后发布 signal | `pto.cmo.cacheinvalid %payload single_cache_line` 作为精准 payload marker，或 `pto.cmo.cacheinvalid all #pto.address_space<gm>` 作为保守全量 marker，随后 `pto.fence.barrier_all #pto.fence_scope<gm>` | 若 marker 选择到 pending GM write，则补 `PIPE_MTE3` 或 `PIPE_FIX` drain；non-cacheable single-line marker 不生成 `dcci`，whole-cache marker 生成 whole-cache `dcci` |
 | `TLoad` 后发布 signal | `pto.cmo.cacheinvalid %payload single_cache_line` 作为精准 payload marker，或 `pto.cmo.cacheinvalid all #pto.address_space<gm>` 作为保守全量 marker；不需要显式 fence | 若 marker 选择到 pending GM read，则补 `PIPE_MTE2` drain；non-cacheable single-line marker 不生成 `dcci`，whole-cache marker 生成 whole-cache `dcci` |
-| `TWait` 后读取 cacheable scalar GM payload | payload load 前生成 `pto.cmo.cacheinvalid %addr single_cache_line : !pto.ptr<T, gm>`，或使用 whole-cache 形式 | 无 |
-| `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 single-line 或 whole-cache `pto.cmo.cacheinvalid` | 无 |
+| `TWait` 后读取 cacheable scalar GM payload | payload load 前生成 `pto.cmo.cacheinvalid %addr single_cache_line : !pto.ptr<T, gm>`，或使用 whole-cache 形式；single-line 地址必须由 PyPTO 或用户保证覆盖后续 load | PTOAS 检查 CMO 存在和顺序，不校验 acquire CMO 与 load 的 alias 关系 |
+| `TTest` ready path 后读取 cacheable scalar GM payload | 在 ready path 的 payload load 前生成 single-line 或 whole-cache `pto.cmo.cacheinvalid`；single-line 地址必须由 PyPTO 或用户保证覆盖后续 load | PTOAS 检查 CMO 存在和顺序，不校验 acquire CMO 与 load 的 alias 关系 |
 | cacheable scalar GM store 后发布 signal | 在 payload store 后生成 `pto.cmo.cacheinvalid %payload single_cache_line`，或使用 `pto.cmo.cacheinvalid all #pto.address_space<gm>`；随后生成 `pto.fence.barrier_all #pto.fence_scope<gm>` | single-line 只覆盖指定 cache line；whole-cache 覆盖全部 scalar D-cache，并保守选择全部 pending GM payload |
 
 如果某个 TNotify 只是发布 signal，而不表示某块 GM payload 已经准备好，可以不生成 payload
@@ -383,7 +389,7 @@ high-level memory-consistency op。后续需要补一层 VPTO memory-consistency
 ## 8. 当前限制
 
 - `cmo.cacheinvalid` 支持 whole-cache 和 single-cache-line 粒度，但还没有连续 range 形式。
-- MemoryConsistency pass 当前不证明 single-line CMO 是否覆盖 payload，地址正确性由 PyPTO 或用户保证。
+- MemoryConsistency pass 当前不证明 acquire 侧 single-line CMO 是否覆盖后续 `load_scalar` payload，地址正确性由 PyPTO 或用户保证；不确定时应使用 whole-cache `cmo.cacheinvalid all #pto.address_space<gm>`。
 - `TWait` 和 `TTest` acquire 侧当前只覆盖 `load_scalar`。
 - VPTO 暂不支持 high-level `cmo.cacheinvalid` 和 `fence.barrier_all` 的真实 lowering；
   低层 `pto.dcci` 和 `pto.dsb` 已有 VPTO lowering。
