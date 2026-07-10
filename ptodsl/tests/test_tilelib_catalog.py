@@ -1036,6 +1036,33 @@ class TileLibCatalogTest(unittest.TestCase):
                 self.assertEqual(selected.name, expected_name)
                 self.assertIn("pto.mte_l0c_l1", selected.specialize(**specs).mlir_text())
 
+    def test_tinsert_acc_to_mat_basic_renders(self):
+        for dst_dtype in ("f16", "bf16"):
+            with self.subTest(dst_dtype=dst_dtype):
+                specs = {
+                    "src": TileSpec(
+                        shape=(16, 16),
+                        dtype=ScalarType("f32"),
+                        memory_space="acc",
+                        valid_shape=(16, 16),
+                        b_layout="col_major",
+                        s_layout="row_major",
+                    ),
+                    "index_row": ScalarSpec(dtype=ScalarType("i32"), value=0),
+                    "index_col": ScalarSpec(dtype=ScalarType("i32"), value=0),
+                    "dst": TileSpec(
+                        shape=(16, 16),
+                        dtype=ScalarType(dst_dtype),
+                        memory_space="mat",
+                        valid_shape=(16, 16),
+                        b_layout="col_major",
+                        s_layout="row_major",
+                    ),
+                }
+                selected = select("pto.tinsert", "a5", specs)
+                self.assertEqual(selected.name, "template_tinsert_acc_to_mat_basic")
+                self.assertIn("pto.mte_l0c_l1", selected.specialize(**specs).mlir_text())
+
     def test_tpart_add_mul_partial_source_versions_render(self):
         for op, expected_op in (("pto.tpartadd", "pto.vadd"), ("pto.tpartmul", "pto.vmul")):
             with self.subTest(op=op):
