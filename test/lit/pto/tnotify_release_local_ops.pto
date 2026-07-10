@@ -1,0 +1,79 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// TNotify release analysis must be payload-specific. Some local tile ops run on
+// MTE3 or FIX internally, but they do not publish GM payloads and must not
+// require a barrier_all or emit a release drain before TNotify.
+
+// RUN: ptoas --pto-arch=a5 %s -o - 2>&1 | FileCheck %s
+
+module attributes {"pto.target_arch" = "a5"} {
+  func.func @local_tinsert_mte3_then_tnotify(%signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %src = pto.alloc_tile :
+      !pto.tile_buf<loc=vec, dtype=f16, rows=64, cols=64, v_row=64, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %dst = pto.alloc_tile :
+      !pto.tile_buf<loc=mat, dtype=f16, rows=64, cols=64, v_row=64, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tinsert ins(%src, %c0, %c0 :
+        !pto.tile_buf<loc=vec, dtype=f16, rows=64, cols=64, v_row=64, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>,
+        index, index)
+      outs(%dst :
+        !pto.tile_buf<loc=mat, dtype=f16, rows=64, cols=64, v_row=64, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+      {tinsertMode = #pto.tinsert_mode<split2>}
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op set>}
+    return
+  }
+
+  func.func @local_tmov_fix_then_tnotify(%signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %src = pto.alloc_tile :
+      !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    %dst = pto.alloc_tile :
+      !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tmov ins(%src :
+        !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+      outs(%dst :
+        !pto.tile_buf<loc=mat, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op set>}
+    return
+  }
+}
+
+// CHECK-LABEL: AICORE void local_tinsert_mte3_then_tnotify(
+// CHECK:      TINSERT
+// CHECK-NOT:  pipe_barrier(
+// CHECK-NOT:  dsb(
+// CHECK:      pto::comm::TNOTIFY(
+
+// CHECK-LABEL: AICORE void local_tmov_fix_then_tnotify(
+// CHECK:      TMOV
+// CHECK-NOT:  pipe_barrier(
+// CHECK-NOT:  dsb(
+// CHECK:      pto::comm::TNOTIFY(

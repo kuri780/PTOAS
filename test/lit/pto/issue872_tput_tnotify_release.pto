@@ -1,0 +1,173 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Regression for issue #872: pto.comm.tput is a macro that can issue MTE3 GM
+// stores internally. A following TNotify publishes a cross-rank signal, so those
+// TPUT payload stores must be drained and made DDR-visible before the signal.
+
+// RUN: ptoas --pto-arch=a3 %s -o - 2>&1 | FileCheck %s
+
+module {
+  func.func @tput_tnotify_release(
+      %src_ptr: !pto.ptr<f32>,
+      %dst_ptr: !pto.ptr<f32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c8 = arith.constant 8 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c8, %c64], strides = [%c64, %c1] : !pto.tensor_view<?x?xf32>
+    %src = pto.partition_view %src_view,
+      offsets = [%c0, %c0], sizes = [%c8, %c64]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x64xf32>
+
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c8, %c64], strides = [%c64, %c1] : !pto.tensor_view<?x?xf32>
+    %dst = pto.partition_view %dst_view,
+      offsets = [%c0, %c0], sizes = [%c8, %c64]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x64xf32>
+
+    %stage = pto.alloc_tile valid_row = %c2 valid_col = %c32 :
+      !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.comm.tput(%dst, %src, buf(%stage) :
+      !pto.partition_tensor_view<8x64xf32>,
+      !pto.partition_tensor_view<8x64xf32>,
+      !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      {atomicType = #pto<atomic_type atomic_none>}
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<8x64xf32>
+    pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op atomic_add>}
+    return
+  }
+
+  func.func @tput_existing_pipe_all_still_dsb(
+      %src_ptr: !pto.ptr<f32>,
+      %dst_ptr: !pto.ptr<f32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c8 = arith.constant 8 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c8, %c64], strides = [%c64, %c1] : !pto.tensor_view<?x?xf32>
+    %src = pto.partition_view %src_view,
+      offsets = [%c0, %c0], sizes = [%c8, %c64]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x64xf32>
+
+    %dst_view = pto.make_tensor_view %dst_ptr,
+      shape = [%c8, %c64], strides = [%c64, %c1] : !pto.tensor_view<?x?xf32>
+    %dst = pto.partition_view %dst_view,
+      offsets = [%c0, %c0], sizes = [%c8, %c64]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<8x64xf32>
+
+    %stage = pto.alloc_tile valid_row = %c2 valid_col = %c32 :
+      !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.comm.tput(%dst, %src, buf(%stage) :
+      !pto.partition_tensor_view<8x64xf32>,
+      !pto.partition_tensor_view<8x64xf32>,
+      !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=?, v_col=?, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      {atomicType = #pto<atomic_type atomic_none>}
+    pto.cmo.cacheinvalid %dst single_cache_line : !pto.partition_tensor_view<8x64xf32>
+    pto.barrier <PIPE_ALL>
+    pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op atomic_add>}
+    return
+  }
+
+  func.func @tbroadcast_tnotify_release(
+      %src_ptr: !pto.ptr<f32>,
+      %peer_ptr: !pto.ptr<f32>,
+      %signal_ptr: !pto.ptr<i32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %v_i32 = arith.constant 1 : i32
+
+    %ping = pto.alloc_tile :
+      !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    %src_view = pto.make_tensor_view %src_ptr,
+      shape = [%c1, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %src = pto.partition_view %src_view,
+      offsets = [%c0, %c0], sizes = [%c1, %c32]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x32xf32>
+
+    %peer_view = pto.make_tensor_view %peer_ptr,
+      shape = [%c1, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %peer = pto.partition_view %peer_view,
+      offsets = [%c0, %c0], sizes = [%c1, %c32]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x32xf32>
+
+    pto.comm.tbroadcast(%src, recv(%ping), group(%peer) :
+        !pto.partition_tensor_view<1x32xf32>,
+        !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+        !pto.partition_tensor_view<1x32xf32>) {root = 0 : i32}
+    pto.cmo.cacheinvalid %peer single_cache_line : !pto.partition_tensor_view<1x32xf32>
+    pto.fence.barrier_all #pto.fence_scope<gm>
+
+    %sig_view = pto.make_tensor_view %signal_ptr,
+      shape = [%c1], strides = [%c1] : !pto.tensor_view<1xi32>
+    %sig = pto.partition_view %sig_view,
+      offsets = [%c0], sizes = [%c1]
+      : !pto.tensor_view<1xi32> -> !pto.partition_tensor_view<1xi32>
+    pto.comm.tnotify(%sig, %v_i32 : !pto.partition_tensor_view<1xi32>, i32)
+        {notifyOp = #pto<notify_op atomic_add>}
+    return
+  }
+}
+
+// CHECK-LABEL: AICORE void tput_tnotify_release(
+// CHECK:      pto::comm::TPUT(
+// CHECK-NOT:  PTOAS__DCCI_SINGLE_CACHE_LINE
+// CHECK-NOT:  pipe_barrier(PIPE_MTE2);
+// CHECK:      pipe_barrier(PIPE_MTE3);
+// CHECK-NEXT: dsb(DSB_DDR);
+// CHECK:      pto::comm::TNOTIFY(
+
+// CHECK-LABEL: AICORE void tput_existing_pipe_all_still_dsb(
+// CHECK:      pto::comm::TPUT(
+// CHECK-NOT:  PTOAS__DCCI_SINGLE_CACHE_LINE
+// CHECK-NEXT: pipe_barrier(PIPE_ALL);
+// CHECK-NOT:  pipe_barrier(PIPE_MTE2);
+// CHECK-NOT:  pipe_barrier(PIPE_MTE3);
+// CHECK:      dsb(DSB_DDR);
+// CHECK:      pto::comm::TNOTIFY(
+
+// CHECK-LABEL: AICORE void tbroadcast_tnotify_release(
+// CHECK:      pto::comm::TBROADCAST(
+// CHECK-NOT:  PTOAS__DCCI_SINGLE_CACHE_LINE
+// CHECK-NOT:  pipe_barrier(PIPE_MTE2);
+// CHECK:      pipe_barrier(PIPE_MTE3);
+// CHECK-NEXT: dsb(DSB_DDR);
+// CHECK:      pto::comm::TNOTIFY(

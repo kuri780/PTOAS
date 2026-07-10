@@ -60,7 +60,7 @@ module {
 // CPP: [[DST1]][{{.*}}] =
 // CPP: [[DST0]][{{.*}}] =
 // CPP: pipe_barrier(PIPE_ALL);
-// CPP-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+// CPP-NEXT: dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CPP-NEXT: dsb((mem_dsb_t)0);
 // CPP-NEXT: #endif // __DAV_VEC__
 // CPP: return;
@@ -69,11 +69,11 @@ module {
 // CPP-SAME: (__gm__ int32_t* [[ME_DST:[_A-Za-z][_A-Za-z0-9]*]], __gm__ int32_t* [[ME_SRC:[_A-Za-z][_A-Za-z0-9]*]], int64_t [[ME_IDX:[_A-Za-z][_A-Za-z0-9]*]])
 // CPP: [[ME_DST]][[[ME_IDX]]] =
 // CPP: pipe_barrier(PIPE_ALL);
-// CPP-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+// CPP-NEXT: dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CPP-NEXT: dsb((mem_dsb_t)0);
 // CPP-NEXT: return;
 // CPP: pipe_barrier(PIPE_ALL);
-// CPP-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+// CPP-NEXT: dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CPP-NEXT: dsb((mem_dsb_t)0);
 // CPP-NEXT: #endif // __DAV_VEC__
 // CPP: return;
@@ -84,13 +84,13 @@ module {
 // CPP: goto [[TEMP_TAIL:label[0-9]+]];
 // CPP: [[TEMP_EARLY]]:
 // CPP-NEXT: pipe_barrier(PIPE_ALL);
-// CPP-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+// CPP-NEXT: dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CPP-NEXT: dsb((mem_dsb_t)0);
 // CPP-NEXT: return;
 // CPP: [[TEMP_TAIL]]:
 // CPP: reinterpret_cast<__gm__ int32_t*>
 // CPP: pipe_barrier(PIPE_ALL);
-// CPP-NEXT: dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+// CPP-NEXT: dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);
 // CPP-NEXT: dsb((mem_dsb_t)0);
 // CPP-NEXT: #endif // __DAV_VEC__
 // CPP: return;

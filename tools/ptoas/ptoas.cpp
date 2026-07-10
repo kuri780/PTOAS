@@ -1768,7 +1768,7 @@ static void appendScalarGMFlush(std::string &out, llvm::StringRef indent) {
   out.append(indent.str());
   out.append("pipe_barrier(PIPE_ALL);\n");
   out.append(indent.str());
-  out.append("dcci((__gm__ void*)0, ENTIRE_DATA_CACHE, CACHELINE_OUT);\n");
+  out.append("dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE);\n");
   out.append(indent.str());
   out.append("dsb((mem_dsb_t)0);\n");
 }
@@ -2971,6 +2971,7 @@ int mlir::pto::compilePTOASModule(
     pm.addPass(createNarrowUnusedMultiResultProvenancePass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addPass(pto::createPTOMemoryConsistencyPass());
   if (failed(applyConfiguredPassManagerCLOptions(pm, "main PTOAS pipeline")))
     return 1;
 

@@ -295,6 +295,15 @@ if(BUILD_TESTING)
       LABELS "PTODSL"
       ENVIRONMENT "${_pto_python_test_env}"
     )
+    add_test(
+      NAME pto_memory_consistency_bindings
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/python/memory_consistency_bindings.py"
+    )
+    set_tests_properties(pto_memory_consistency_bindings PROPERTIES
+      LABELS "PTO"
+      ENVIRONMENT "${_pto_python_test_env}"
+    )
   endif()
   add_subdirectory(tools/ptobc/tests)
 endif()

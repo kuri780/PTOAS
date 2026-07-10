@@ -8703,6 +8703,31 @@ private:
   LoweringState &state;
 };
 
+template <typename MemoryConsistencyOp>
+class LowerUnsupportedMemoryConsistencyOpPattern final
+    : public OpConversionPattern<MemoryConsistencyOp> {
+public:
+  explicit LowerUnsupportedMemoryConsistencyOpPattern(
+      TypeConverter &typeConverter, MLIRContext *context,
+      LoweringState &state)
+      : OpConversionPattern<MemoryConsistencyOp>(typeConverter, context) {
+    (void)state;
+  }
+
+  LogicalResult
+  matchAndRewrite(MemoryConsistencyOp op,
+                  typename MemoryConsistencyOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    (void)adaptor;
+    (void)rewriter;
+    op.emitOpError()
+        << "is not supported by the VPTO backend yet; PTOAS validates the "
+           "memory-consistency contract, but high-level CMO/fence ops must be "
+           "lowered to `pto.dcci` or `pto.dsb` before VPTO LLVM lowering";
+    return failure();
+  }
+};
+
 class LowerDsbOpPattern final : public OpConversionPattern<pto::DsbOp> {
 public:
   explicit LowerDsbOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -10172,7 +10197,10 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerPipeEventSyncOpPattern<pto::WaitFlagOp>,
                LowerPipeEventDynSyncOpPattern<pto::SetFlagDynOp>,
                LowerPipeEventDynSyncOpPattern<pto::WaitFlagDynOp>,
-               LowerBarrierOpPattern, LowerMemBarOpPattern, LowerDsbOpPattern,
+               LowerBarrierOpPattern, LowerMemBarOpPattern,
+               LowerUnsupportedMemoryConsistencyOpPattern<pto::CmoCacheInvalidOp>,
+               LowerUnsupportedMemoryConsistencyOpPattern<pto::FenceBarrierAllOp>,
+               LowerDsbOpPattern,
                LowerDcciOpPattern,
                LowerBufSyncOpPattern<pto::GetBufOp>,
                LowerBufSyncOpPattern<pto::RlsBufOp>,
@@ -10235,6 +10263,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
   target.addLegalOp<UnrealizedConversionCastOp>();
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
+                      pto::CmoCacheInvalidOp, pto::FenceBarrierAllOp,
                       pto::DsbOp, pto::DcciOp,
                       pto::GetBufOp, pto::RlsBufOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,

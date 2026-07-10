@@ -72,6 +72,7 @@ def build():
                 pto.TGetOp(dst, src, ping)
                 pto.TGetOp(dst, src, ping, pong=pong)
 
+                pto.FenceBarrierAllOp(pto.FenceScope.GM)
                 pto.TNotifyOp(signal, c5, pto.NotifyOpAttr.get(pto.NotifyOp.Set, ctx))
                 pto.TNotifyOp(signal, c3, pto.NotifyOpAttr.get(pto.NotifyOp.AtomicAdd, ctx))
                 pto.TWaitOp(signal, c5, pto.WaitCmpAttr.get(pto.WaitCmp.GE, ctx))

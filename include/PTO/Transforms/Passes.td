@@ -742,6 +742,25 @@ def PTOResolveBufferSelect : Pass<"pto-resolve-buffer-select", "ModuleOp"> {
   ];
 }
 
+def PTOMemoryConsistency : Pass<"pto-memory-consistency", "ModuleOp"> {
+  let summary = "Annotate PTO memory consistency actions before backend lowering";
+  let description = [{
+    Analyzes signal/payload ordering requirements and annotates communication
+    signal ops and scalar GM consumers with release/acquire actions consumed by
+    backend lowering. It covers TNotify release actions for direct MTE
+    operations, macro-op MTE3 phases, cacheable scalar GM stores, and
+    conservative TWait/TTest acquire invalidation for scalar GM loads.
+  }];
+
+  let constructor = "mlir::pto::createPTOMemoryConsistencyPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 def PTOUnrollSIMTFor : Pass<"pto-unroll-simt-for", "func::FuncOp"> {
   let summary =
       "Unroll explicitly annotated scf.for loops in pto.simt_entry functions";

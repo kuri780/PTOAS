@@ -141,6 +141,11 @@ static void bindPTOModule(pybind11::module &m) {
     .value("BIAS",   mlir::pto::AddressSpace::BIAS)
     .value("SCALING", mlir::pto::AddressSpace::SCALING)
     .export_values();
+    py::enum_<mlir::pto::FenceScope>(m, "FenceScope")
+    .value("LocalMemory", mlir::pto::FenceScope::LocalMemory)
+    .value("GM", mlir::pto::FenceScope::GM)
+    .value("All", mlir::pto::FenceScope::All)
+    .export_values();
     py::enum_<mlir::pto::BLayout>(m, "BLayout")
     .value("RowMajor", mlir::pto::BLayout::RowMajor)
     .value("ColMajor", mlir::pto::BLayout::ColMajor);
@@ -483,6 +488,29 @@ static void bindPTOModule(pybind11::module &m) {
         "value",
         [](MlirAttribute self) -> int32_t {
         return mlirPTOAddressSpaceAttrGetValue(self);
+        });
+
+    mlir_attribute_subclass(
+        m, "FenceScopeAttr",
+        [](MlirAttribute a) { return mlirPTOAttrIsAFenceScopeAttr(a); })
+    .def_classmethod(
+        "get",
+        [](py::object cls, py::object value, MlirContext context) -> py::object {
+        int32_t v = 0;
+        if (py::isinstance<py::int_>(value)) {
+            v = py::cast<int32_t>(value);
+        } else {
+            v = py::cast<int32_t>(value.attr("value").cast<py::int_>());
+        }
+        MlirAttribute a = mlirPTOFenceScopeAttrGet(context, v);
+        if (mlirAttributeIsNull(a)) return py::none();
+        return cls.attr("__call__")(a);
+        },
+        py::arg("cls"), py::arg("value"), py::arg("context") = py::none())
+    .def_property_readonly(
+        "value",
+        [](MlirAttribute self) -> int32_t {
+        return mlirPTOFenceScopeAttrGetValue(self);
         });
 
     mlir_attribute_subclass(

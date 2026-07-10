@@ -8076,6 +8076,77 @@ LogicalResult StoreScalarOp::verify() {
   return success();
 }
 
+// ---- CmoCacheInvalidOp ----
+static bool isGmOrDefaultAddressSpace(pto::AddressSpace space) {
+  return space == pto::AddressSpace::GM || space == pto::AddressSpace::Zero;
+}
+
+static bool isGmOrDefaultCmoAddressType(Type type) {
+  if (auto ptrTy = dyn_cast<mlir::pto::PtrType>(type))
+    return isGmOrDefaultAddressSpace(ptrTy.getMemorySpace().getAddressSpace());
+  if (auto memTy = dyn_cast<MemRefType>(type)) {
+    auto spaceAttr = dyn_cast_or_null<pto::AddressSpaceAttr>(memTy.getMemorySpace());
+    return !spaceAttr || isGmOrDefaultAddressSpace(spaceAttr.getAddressSpace());
+  }
+  if (isa<mlir::pto::TensorViewType, mlir::pto::PartitionTensorViewType>(type))
+    return true;
+  return false;
+}
+
+ParseResult CmoCacheInvalidOp::parse(OpAsmParser &parser,
+                                     OperationState &result) {
+  if (succeeded(parser.parseOptionalKeyword("all"))) {
+    AddressSpaceAttr spaceAttr;
+    if (parser.parseAttribute(spaceAttr, "space", result.attributes) ||
+        parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+    return success();
+  }
+
+  OpAsmParser::UnresolvedOperand addr;
+  Type addrTy;
+  if (parser.parseOperand(addr) ||
+      parser.parseKeyword("single_cache_line") ||
+      parser.parseColonType(addrTy) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  if (parser.resolveOperand(addr, addrTy, result.operands))
+    return failure();
+
+  if (!result.attributes.get("space")) {
+    result.addAttribute(
+        "space", AddressSpaceAttr::get(parser.getContext(), AddressSpace::GM));
+  }
+  return success();
+}
+
+void CmoCacheInvalidOp::print(OpAsmPrinter &p) {
+  if (Value addr = getAddr()) {
+    p << " " << addr << " single_cache_line";
+    p << " : " << addr.getType();
+    p.printOptionalAttrDict((*this)->getAttrs(),
+                            /*elidedAttrs=*/{"space"});
+    return;
+  }
+
+  p << " all " << getSpace();
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"space"});
+}
+
+LogicalResult CmoCacheInvalidOp::verify() {
+  if (!isGmOrDefaultAddressSpace(getSpace().getAddressSpace()))
+    return emitOpError("only supports GM cache maintenance");
+
+  if (Value addr = getAddr()) {
+    if (!isGmOrDefaultCmoAddressType(addr.getType()))
+      return emitOpError("single_cache_line address expects a GM pointer, GM memref, or GM tensor view");
+  }
+
+  return success();
+}
+
 // ---- GetBufOp / RlsBufOp ----
 static LogicalResult verifyBufSyncOp(Operation *op, Attribute opTypeAttr,
                                      IntegerAttr bufIdAttr, IntegerAttr modeAttr) {

@@ -487,6 +487,21 @@ int32_t mlirPTOSyncOpTypeAttrGetValue(MlirAttribute attr) {
   return static_cast<int32_t>(a.getOpType());
 }
 
+bool mlirPTOAttrIsAFenceScopeAttr(MlirAttribute attr) {
+  return mlir::isa<mlir::pto::FenceScopeAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirPTOFenceScopeAttrGet(MlirContext ctx, int32_t value) {
+  auto *c = unwrap(ctx);
+  auto scope = static_cast<mlir::pto::FenceScope>(value);
+  return wrap(mlir::pto::FenceScopeAttr::get(c, scope));
+}
+
+int32_t mlirPTOFenceScopeAttrGetValue(MlirAttribute attr) {
+  auto a = mlir::cast<mlir::pto::FenceScopeAttr>(unwrap(attr));
+  return static_cast<int32_t>(a.getScope());
+}
+
 MlirAttribute mlirPTOEventAttrGet(MlirContext ctx, int32_t value) {
   auto *c = unwrap(ctx);
   auto v = static_cast<mlir::pto::EVENT>(value);

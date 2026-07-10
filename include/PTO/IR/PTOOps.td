@@ -2896,6 +2896,49 @@ def BarrierOp : PTO_Op<"barrier"> {
   let assemblyFormat = "$pipe attr-dict";
 }
 
+def CmoCacheInvalidOp : PTO_Op<"cmo.cacheinvalid"> {
+  let summary = "Perform cache maintenance for a memory space";
+  let description = [{
+    Cache maintenance operation for the specified memory space.
+
+    The whole-cache form lowers to PTO-ISA's two-argument
+    `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)`.
+
+    The single-cache-line form carries the GM payload address selected by the
+    producer DSL/user.  When it is required for a cacheable scalar path, it
+    lowers to `dcci(addr, cache_line_t::SINGLE_CACHE_LINE)`.  When it only marks
+    a non-cacheable payload for signal release analysis, MemoryConsistency may
+    consume it as marker-only IR and erase it before EmitC lowering.
+
+    MemoryConsistency interprets both forms as explicit CMO boundaries on
+    producer release and consumer acquire paths. It also uses the addressed form
+    to match a TNotify payload against pending MTE2, MTE3, FIX, or scalar GM
+    accesses before deciding which pipe drains are required. Precise coverage of
+    the selected line is the producer DSL/user's responsibility in this phase.
+  }];
+
+  let arguments = (ins
+    Optional<AnyType>:$addr,
+    PTO_AddressSpaceAttr:$space
+  );
+
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
+def FenceBarrierAllOp : PTO_Op<"fence.barrier_all"> {
+  let summary = "All-direction memory fence for a visibility scope";
+  let description = [{
+    Memory fence for a visibility scope. Around signal/payload communication it
+    can be used as the producer-side publish barrier or the consumer-side
+    acquire barrier depending on placement. `scope = gm` lowers to
+    `dsb(DSB_DDR)`.
+  }];
+
+  let arguments = (ins PTO_FenceScopeAttr:$scope);
+  let assemblyFormat = "$scope attr-dict";
+}
+
 def TSyncOp : PTO_TOp<"tsync"> {
   let summary = "Direct TSYNC mapping (variadic operands).";
   let description = [{
