@@ -105,6 +105,14 @@ def scalar_descriptor(dtype: ScalarType):
     return descriptor
 
 
+def _scalar_type_token(dtype: ScalarType) -> str:
+    aliases = {
+        "f8e4m3": "f8E4M3FN",
+        "hif8": "!pto.hif8",
+    }
+    return aliases.get(dtype.name, dtype.name)
+
+
 @dataclass(frozen=True)
 class TileSpec:
     """Concrete specialization of one tile operand.
@@ -200,8 +208,9 @@ class ViewSpec:
     def mlir_type(self):
         dims = "x".join("?" if dim is None else str(dim) for dim in self.shape)
         addr_space = _memref_address_space_token(self.memory_space)
+        dtype = _scalar_type_token(self.dtype)
         return Type.parse(
-            f"memref<{dims}x{self.dtype.name}, #pto.address_space<{addr_space}>>"
+            f"memref<{dims}x{dtype}, #pto.address_space<{addr_space}>>"
         )
 
 
@@ -214,7 +223,7 @@ class VectorSpec:
 
     def mlir_type(self):
         dims = "x".join(str(dim) for dim in self.shape)
-        return Type.parse(f"vector<{dims}x{self.dtype.name}>")
+        return Type.parse(f"vector<{dims}x{_scalar_type_token(self.dtype)}>")
 
 
 def _memref_address_space_token(value: str) -> str:

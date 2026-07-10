@@ -908,6 +908,41 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertEqual(selected.name, "template_tload_nd2nd")
         self.assertIn("pto.mte_gm_ub", selected.specialize(**specs).mlir_text())
 
+    def test_tload_tstore_accept_low_precision_storage_dtypes(self):
+        for dtype in ("f8e4m3", "hif8"):
+            with self.subTest(dtype=dtype):
+                load_specs = {
+                    "src": ViewSpec(
+                        shape=(1, 1, 1, 16, 64),
+                        dtype=ScalarType(dtype),
+                        strides=(1024, 1024, 1024, 64, 1),
+                    ),
+                    "dst": TileSpec(
+                        shape=(16, 64),
+                        dtype=ScalarType(dtype),
+                        memory_space="vec",
+                    ),
+                }
+                load = select("pto.tload", "a5", load_specs)
+                self.assertEqual(load.name, "template_tload_nd2nd")
+                self.assertIn("pto.mte_gm_ub", load.specialize(**load_specs).mlir_text())
+
+                store_specs = {
+                    "src": TileSpec(
+                        shape=(16, 64),
+                        dtype=ScalarType(dtype),
+                        memory_space="vec",
+                    ),
+                    "dst": ViewSpec(
+                        shape=(1, 1, 1, 16, 64),
+                        dtype=ScalarType(dtype),
+                        strides=(1024, 1024, 1024, 64, 1),
+                    ),
+                }
+                store = select("pto.tstore", "a5", store_specs)
+                self.assertEqual(store.name, "template_tstore_nd")
+                self.assertIn("pto.mte_ub_gm", store.specialize(**store_specs).mlir_text())
+
     def test_tstore_versions_render(self):
         cases = (
             (
