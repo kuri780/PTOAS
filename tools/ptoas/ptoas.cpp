@@ -416,7 +416,7 @@ static llvm::cl::opt<TileLibBackend> tileLibBackend(
                    "Use the legacy TileLang DSL TileLib"),
         clEnumValN(TileLibBackend::PTODSL, "ptodsl",
                    "Use the PTODSL TileLib daemon")),
-    llvm::cl::init(TileLibBackend::TileLang));
+    llvm::cl::init(TileLibBackend::PTODSL));
 
 static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
                                                            char **argv) {

@@ -542,13 +542,13 @@ def ExpandTileOp : Pass<"pto-expand-tile-op", "ModuleOp"> {
            /*default=*/"\"\"",
            "Path to Unix domain socket for daemon RPC">,
     Option<"tileLibBackend", "tile-lib-backend", "std::string",
-           /*default=*/"\"tilelang\"",
-           "TileLib backend: tilelang or ptodsl">,
+           /*default=*/"\"ptodsl\"",
+           "TileLib backend: ptodsl or tilelang">,
     Option<"tileLibPkgPath", "tile-lib-pkg-path", "std::string",
            /*default=*/"\"\"",
            "PYTHONPATH root for the selected TileLib backend">,
     Option<"daemonHelperModule", "daemon-helper-module", "std::string",
-           /*default=*/"\"tilelang_dsl.daemon_helper\"",
+           /*default=*/"\"ptodsl.tilelib.serving.helper\"",
            "Python module used for daemon helper RPC calls">
   ];
 }
