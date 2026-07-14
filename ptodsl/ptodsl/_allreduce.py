@@ -23,7 +23,8 @@ Dispatch tree (compile-time, since *threads* / *scale* are Python ints)::
 from __future__ import annotations
 
 from . import scalar
-from ._control_flow import if_, for_
+from . import _control_flow as pto
+from ._ast_rewrite import rewrite_jit_function
 from ._ops import const as _const, get_laneid, get_tid_x, redux_add, redux_max, redux_min, shuffle_bfly, syncthreads
 from ._surface_values import unwrap_surface_value
 from ._types import _resolve, float16 as _f16_dtype, float32 as _f32_dtype, si32 as _si32_dtype, ui32 as _ui32_dtype
@@ -157,6 +158,7 @@ def _emit_warp_reduce(x, *,
 
 # ── cross_warp_reduce  ─────────────────────────────────────────────────────────
 
+@rewrite_jit_function
 def _emit_cross_warp_reduce(x, scratch, *,
                             dtype, threads, scale, thread_offset, reducer):
     """Cross-warp all-reduce (threads > 32)."""
@@ -170,7 +172,7 @@ def _emit_cross_warp_reduce(x, scratch, *,
 
     # ── thread indexing ──────────────────────────────────────────────────
     tid_x = get_tid_x()
-    if thread_offset:
+    if pto.const_expr(thread_offset):
         tx = tid_x - thread_offset
         wid = tx // 32
         lid = tx & 31
@@ -180,62 +182,57 @@ def _emit_cross_warp_reduce(x, scratch, *,
         lid = get_laneid()
 
     # ── per-warp reduce ──────────────────────────────────────────────────
-    if scale == 1:
+    if pto.const_expr(scale == 1):
         warp_val = redux_fn(x)
     else:
         warp_val = _emit_butterfly(x, threads=32, scale=scale, reducer=reducer)
 
     # ── warp leaders write partial results ───────────────────────────────
     is_writer = lid < scale
-    with if_(is_writer) as br:
-        with br.then_:
-            slot = wid * scale + lid
-            scalar.store(warp_val, scratch, scalar.index_cast(slot))
+    if is_writer:
+        slot = wid * scale + lid
+        scalar.store(warp_val, scratch, scalar.index_cast(slot))
 
     syncthreads()
 
     # ── leader warp reduces partial sums ─────────────────────────────────
     is_leader_warp = tx < 32
-    with if_(is_leader_warp) as br:
-        with br.then_:
-            if scale == 1:
-                loaded = scalar.select(
-                    lid < num_warps,
-                    scalar.load(scratch, scalar.index_cast(lid)),
-                    c_identity,
-                )
-                stage4_result = redux_fn(loaded)
-            elif scale * num_warps <= 32:
-                total = scale * num_warps
-                loaded = scalar.select(
-                    lid < total,
-                    scalar.load(scratch, scalar.index_cast(lid)),
-                    c_identity,
-                )
-                stage4_result = _emit_butterfly(
-                    loaded, threads=total, scale=scale, reducer=reducer,
-                )
-            else:
-                is_reducer = lid < scale
-                reduced = c_identity
-                my_slot = lid % scale
-                for w in range(num_warps):
-                    idx_val = w * scale + my_slot
-                    loaded_v = scalar.load(scratch, scalar.index_cast(idx_val))
-                    reduced = combine(reduced, loaded_v)
-                stage4_result = scalar.select(is_reducer, reduced, c_identity)
+    if is_leader_warp:
+        if pto.const_expr(scale == 1):
+            loaded = scalar.select(
+                lid < num_warps,
+                scalar.load(scratch, scalar.index_cast(lid)),
+                c_identity,
+            )
+            stage4_result = redux_fn(loaded)
+        elif pto.const_expr(scale * num_warps <= 32):
+            total = scale * num_warps
+            loaded = scalar.select(
+                lid < total,
+                scalar.load(scratch, scalar.index_cast(lid)),
+                c_identity,
+            )
+            stage4_result = _emit_butterfly(
+                loaded, threads=total, scale=scale, reducer=reducer,
+            )
+        else:
+            is_reducer = lid < scale
+            reduced = c_identity
+            my_slot = lid % scale
+            for w in pto.static_range(num_warps):
+                idx_val = w * scale + my_slot
+                loaded_v = scalar.load(scratch, scalar.index_cast(idx_val))
+                reduced = combine(reduced, loaded_v)
+            stage4_result = scalar.select(is_reducer, reduced, c_identity)
+    else:
+        stage4_result = c_identity
 
-            br.assign(stage4_result=stage4_result)
-        with br.else_:
-            br.assign(stage4_result=c_identity)
-
-    partial_reduced = br.stage4_result
+    partial_reduced = stage4_result
 
     # ── global leader writes result ──────────────────────────────────────
     is_global_leader = tx < scale
-    with if_(is_global_leader) as br5:
-        with br5.then_:
-            scalar.store(partial_reduced, scratch, scalar.index_cast(tx))
+    if is_global_leader:
+        scalar.store(partial_reduced, scratch, scalar.index_cast(tx))
 
     # ── broadcast ────────────────────────────────────────────────────────
     syncthreads()
@@ -247,6 +244,7 @@ def _emit_cross_warp_reduce(x, scratch, *,
 
 # ── ub_reduce  ─────────────────────────────────────────────────────────────────
 
+@rewrite_jit_function
 def _emit_ub_reduce(x, scratch, *,
                     dtype, threads, scale, thread_offset, reducer):
     """UB-scratch all-reduce (fallback for non-pow2 or general case)."""
@@ -264,32 +262,26 @@ def _emit_ub_reduce(x, scratch, *,
 
     # ── reducers sequentially combine ────────────────────────────────────
     is_reducer = lane < scale
-    with if_(is_reducer) as br:
-        with br.then_:
-            group_offset = group * threads
-            first_elem = group_offset + lane
-            acc = scalar.load(scratch, scalar.index_cast(first_elem))
+    if is_reducer:
+        group_offset = group * threads
+        first_elem = group_offset + lane
+        acc = scalar.load(scratch, scalar.index_cast(first_elem))
 
-            carry_loop = for_(scale, threads, step=scale).carry(acc=acc)
-            with carry_loop:
-                prev = carry_loop.acc
-                elem = first_elem + carry_loop.iv
-                loaded = scalar.load(scratch, elem)
-                carry_loop.update(acc=combine(prev, loaded))
-            acc = carry_loop.final("acc")
+        for offset in range(scale, threads, scale):
+            elem = first_elem + offset
+            loaded = scalar.load(scratch, elem)
+            acc = combine(acc, loaded)
 
-            br.assign(flag=acc)
-        with br.else_:
-            br.assign(flag=x)
+        flag = acc
+    else:
+        flag = x
 
-    flag = br.flag
     syncthreads()
 
     # ── per-class leader writes back ─────────────────────────────────────
     is_leader = lane < scale
-    with if_(is_leader) as br5:
-        with br5.then_:
-            scalar.store(flag, scratch, scalar.index_cast(group * threads + lane))
+    if is_leader:
+        scalar.store(flag, scratch, scalar.index_cast(group * threads + lane))
 
     # ── broadcast ────────────────────────────────────────────────────────
     syncthreads()
