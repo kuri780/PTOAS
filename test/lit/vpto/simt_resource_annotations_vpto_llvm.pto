@@ -1,0 +1,76 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
+// RUN: ptoas --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @kernel() attributes {pto.aicore} {
+    return
+  }
+
+  func.func @default_config() attributes {pto.simt_entry} {
+    return
+  }
+
+  func.func @threads_256() attributes {pto.simt_entry, pto.simt_max_threads = 256 : i32} {
+    return
+  }
+
+  func.func @threads_257() attributes {pto.simt_entry, pto.simt_max_threads = 257 : i32} {
+    return
+  }
+
+  func.func @threads_512() attributes {pto.simt_entry, pto.simt_max_threads = 512 : i32} {
+    return
+  }
+
+  func.func @threads_513() attributes {pto.simt_entry, pto.simt_max_threads = 513 : i32} {
+    return
+  }
+
+  func.func @threads_1024() attributes {pto.simt_entry, pto.simt_max_threads = 1024 : i32} {
+    return
+  }
+
+  func.func @threads_1025() attributes {pto.simt_entry, pto.simt_max_threads = 1025 : i32} {
+    return
+  }
+
+  func.func @threads_2048() attributes {pto.simt_entry, pto.simt_max_threads = 2048 : i32} {
+    return
+  }
+}
+
+// CHECK-LABEL: define linkonce_odr simt_entry void @default_config()
+// CHECK-SAME: !annotation ![[DEFAULT_THREADS:[0-9]+]] !annotation ![[DEFAULT_REGS:[0-9]+]]
+// CHECK-LABEL: define linkonce_odr simt_entry void @threads_2048()
+// CHECK-SAME: !annotation ![[THREADS_2048:[0-9]+]] !annotation ![[REGS_2048:[0-9]+]]
+
+// The module annotations derive one thread/register pair per SIMT entry.
+// CHECK: distinct !{null, !"simt-max-threads", i32 1024}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 32}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 256}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 128}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 257}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 64}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 512}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 64}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 513}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 32}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 1024}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 32}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 1025}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 16}
+// CHECK-NEXT: distinct !{null, !"simt-max-threads", i32 2048}
+// CHECK-NEXT: distinct !{null, !"simt-max-registers", i32 16}
+
+// CHECK-DAG: ![[DEFAULT_THREADS]] = !{!"simt-max-threads", i32 1024}
+// CHECK-DAG: ![[DEFAULT_REGS]] = !{!"simt-max-registers", i32 32}
+// CHECK-DAG: ![[THREADS_2048]] = !{!"simt-max-threads", i32 2048}
+// CHECK-DAG: ![[REGS_2048]] = !{!"simt-max-registers", i32 16}

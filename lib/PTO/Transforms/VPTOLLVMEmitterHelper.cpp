@@ -534,10 +534,19 @@ LogicalResult attachAIVectorScopeMetadata(llvm::Module &llvmModule,
   return success();
 }
 
+constexpr uint32_t getSimtMaxRegistersForThreads(uint32_t maxThreads) {
+  if (maxThreads > 1024)
+    return 16;
+  if (maxThreads > 512)
+    return 32;
+  if (maxThreads > 256)
+    return 64;
+  return 128;
+}
+
 void attachHIVMKernelAnnotations(llvm::Module &llvmModule,
                                  ModuleOp sourceModule) {
   constexpr uint32_t kDefaultSimtMaxThreads = 1024;
-  constexpr uint32_t kDefaultSimtMaxRegisters = 32;
 
   llvm::NamedMDNode *annotations =
       llvmModule.getOrInsertNamedMetadata("hivm.annotations");
@@ -545,7 +554,7 @@ void attachHIVMKernelAnnotations(llvm::Module &llvmModule,
   llvm::Type *i32Ty = llvm::Type::getInt32Ty(ctx);
   llvm::Constant *one = llvm::ConstantInt::get(i32Ty, 1);
 
-  llvm::StringMap<std::pair<uint32_t, uint32_t>> simtConfigByName;
+  llvm::StringMap<uint32_t> simtMaxThreadsByName;
   llvm::StringSet<llvm::MallocAllocator> ptoEntryFunctions;
 
   sourceModule.walk([&](LLVM::LLVMFuncOp funcOp) {
@@ -558,15 +567,11 @@ void attachHIVMKernelAnnotations(llvm::Module &llvmModule,
       return;
 
     uint32_t maxThreads = kDefaultSimtMaxThreads;
-    uint32_t maxRegisters = kDefaultSimtMaxRegisters;
     if (auto attr =
             funcOp->getAttrOfType<IntegerAttr>(pto::kPTOSimtMaxThreadsAttrName))
       maxThreads = static_cast<uint32_t>(attr.getInt());
-    if (auto attr = funcOp->getAttrOfType<IntegerAttr>(
-            pto::kPTOSimtMaxRegistersAttrName))
-      maxRegisters = static_cast<uint32_t>(attr.getInt());
 
-    simtConfigByName[symName] = {maxThreads, maxRegisters};
+    simtMaxThreadsByName[symName] = maxThreads;
   });
 
   auto callsSimtEntry = [](llvm::Function &function) {
@@ -611,12 +616,10 @@ void attachHIVMKernelAnnotations(llvm::Module &llvmModule,
       continue;
     if (function.getCallingConv() == llvm::CallingConv::SimtEntry) {
       uint32_t maxThreads = kDefaultSimtMaxThreads;
-      uint32_t maxRegisters = kDefaultSimtMaxRegisters;
-      if (auto it = simtConfigByName.find(function.getName());
-          it != simtConfigByName.end()) {
-        maxThreads = it->second.first;
-        maxRegisters = it->second.second;
-      }
+      if (auto it = simtMaxThreadsByName.find(function.getName());
+          it != simtMaxThreadsByName.end())
+        maxThreads = it->second;
+      uint32_t maxRegisters = getSimtMaxRegistersForThreads(maxThreads);
 
       addLLVMFunctionI32Annotation(function, "simt-max-threads", maxThreads);
       addLLVMFunctionI32Annotation(function, "simt-max-registers",
