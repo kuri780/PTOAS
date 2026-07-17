@@ -18,7 +18,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-  func.func @launch_config_body(%dst: !pto.ptr<i32, ub>) attributes {pto.simt_entry, pto.simt_max_threads = 256 : i32, pto.simt_max_regs = 48 : i32} {
+  func.func @launch_config_body(%dst: !pto.ptr<i32, ub>) attributes {pto.simt_entry, pto.simt_max_threads = 256 : i32} {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %tid_x = pto.get_tid_x : i32
@@ -30,5 +30,4 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 }
 
 // CHECK-LABEL: llvm.func @launch_config_body
-// CHECK-SAME: pto.simt_max_regs = 48 : i32
 // CHECK-SAME: pto.simt_max_threads = 256 : i32
