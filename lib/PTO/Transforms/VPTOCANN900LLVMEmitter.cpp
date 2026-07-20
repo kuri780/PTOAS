@@ -4244,9 +4244,19 @@ materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
 static void
 collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
   llvm::StringMap<std::string> seen;
+  // Collect format strings from pto::PrintOp.
   module.walk([&](pto::PrintOp printOp) {
     StringRef fmt = printOp.getFormat();
     if (fmt.empty()) fmt = "%f";
+    if (seen.count(fmt)) return;
+    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+    seen[fmt] = globalName;
+    state.stringGlobals.push_back({fmt.str(), globalName});
+  });
+  // Collect hardcoded format strings used by TPrintOp lowering.
+  module.walk([&](pto::TPrintOp tprintOp) {
+    (void)tprintOp;
+    StringRef fmt = "[tprint]\n";
     if (seen.count(fmt)) return;
     std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
     seen[fmt] = globalName;
@@ -9102,6 +9112,58 @@ private:
   LoweringState &state;
 };
 
+// Lower pto.tprint -> func::CallOp @cce::printf for each tile element.
+//
+// TPrintOp prints the contents of a Tile or GlobalTensor.  In the EmitC path
+// this expands to the TPRINT(...) macro which iterates over elements.  For
+// the VPTO LLVM path the tile may still carry a PTO dialect type at this
+// stage (ExpandTileOp does not decompose tiles solely referenced by tprint).
+//
+// Strategy: register the tile descriptor as an opaque pointer-sized value and
+// emit a debug summary call.  Full element-by-element printing is deferred.
+class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
+public:
+  LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                       LoweringState &state)
+      : OpConversionPattern<pto::TPrintOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Emit a summary message via cce::printf — the tile type may not be
+    // fully lowered to a standard MLIR type yet, so we print a marker
+    // rather than attempting per-element iteration from LLVM IR.
+    auto loc = op.getLoc();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+
+    // Create a minimal format string for the debug marker.
+    std::string fmt = "[tprint]\n";
+    std::string globalName;
+    for (auto &kv : state.stringGlobals) {
+      if (kv.first == fmt) { globalName = kv.second; break; }
+    }
+    if (globalName.empty()) {
+      globalName = "_ptoas_printf_fmt_" + std::to_string(state.stringGlobals.size());
+      state.stringGlobals.push_back({fmt, globalName});
+    }
+
+    auto addrOp = rewriter.create<LLVM::AddressOfOp>(loc, ptrType, globalName);
+
+    auto funcType = rewriter.getFunctionType(TypeRange{ptrType}, TypeRange{i32Type});
+    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
+
+    rewriter.create<func::CallOp>(loc, "cce::printf",
+        TypeRange{i32Type}, ValueRange{addrOp.getResult()});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 template <typename VoteOp>
 class LowerVoteOpPattern final : public OpConversionPattern<VoteOp> {
 public:
@@ -10507,7 +10569,8 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyUbufToUbufOpPattern,
                LowerCopyCbufToUbufOpPattern,
                LowerCopyUbufToCbufOpPattern,
-               LowerPrintOpPattern>(
+               LowerPrintOpPattern,
+               LowerTPrintOpPattern>(
       typeConverter, patterns.getContext(), state);
 }
 

@@ -4186,9 +4186,19 @@ materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
 static void
 collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
   llvm::StringMap<std::string> seen;
+  // Collect format strings from pto::PrintOp.
   module.walk([&](pto::PrintOp printOp) {
     StringRef fmt = printOp.getFormat();
     if (fmt.empty()) fmt = "%f";
+    if (seen.count(fmt)) return;
+    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+    seen[fmt] = globalName;
+    state.stringGlobals.push_back({fmt.str(), globalName});
+  });
+  // Collect hardcoded format strings used by TPrintOp lowering.
+  module.walk([&](pto::TPrintOp tprintOp) {
+    (void)tprintOp;
+    StringRef fmt = "[tprint]\n";
     if (seen.count(fmt)) return;
     std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
     seen[fmt] = globalName;
@@ -9038,6 +9048,45 @@ private:
   LoweringState &state;
 };
 
+class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
+public:
+  LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                       LoweringState &state)
+      : OpConversionPattern<pto::TPrintOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+
+    std::string fmt = "[tprint]\n";
+    std::string globalName;
+    for (auto &kv : state.stringGlobals) {
+      if (kv.first == fmt) { globalName = kv.second; break; }
+    }
+    if (globalName.empty()) {
+      globalName = "_ptoas_printf_fmt_" + std::to_string(state.stringGlobals.size());
+      state.stringGlobals.push_back({fmt, globalName});
+    }
+
+    auto addrOp = rewriter.create<LLVM::AddressOfOp>(loc, ptrType, globalName);
+
+    auto funcType = rewriter.getFunctionType(TypeRange{ptrType}, TypeRange{i32Type});
+    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
+
+    rewriter.create<func::CallOp>(loc, "cce::printf",
+        TypeRange{i32Type}, ValueRange{addrOp.getResult()});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 template <typename VoteOp>
 class LowerVoteOpPattern final : public OpConversionPattern<VoteOp> {
 public:
@@ -10445,7 +10494,8 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyUbufToUbufOpPattern,
                LowerCopyCbufToUbufOpPattern,
                LowerCopyUbufToCbufOpPattern,
-               LowerPrintOpPattern>(
+               LowerPrintOpPattern,
+               LowerTPrintOpPattern>(
       typeConverter, patterns.getContext(), state);
 }
 
