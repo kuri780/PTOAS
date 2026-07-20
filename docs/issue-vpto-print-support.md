@@ -1,4 +1,4 @@
-# [Feature] VPTO 后端支持 `pto.print` / `pto.tprint` 设备端打印
+# [Feature Request] VPTO 后端支持 `pto.print` / `pto.tprint` 设备端打印
 
 ## 背景
 
@@ -9,82 +9,95 @@ PTOAS 有两个后端：
 | **EmitC** | PTO IR → EmitC 方言 → C++ 源码 → bisheng 编译 | 默认后端，生成 C++ 代码 |
 | **VPTO** | PTO IR → LLVM IR → 目标文件 | 直接生成 LLVM IR，绕过 C++ |
 
-PTO IR 层有两个调试打印 op：
+PTO IR 层已经有两个调试打印 op，但**只在 EmitC 后端可用**：
 
-| Op | 功能 | 示例 |
-|----|------|------|
+| Op | 功能 | IR 写法 |
+|----|------|---------|
 | `pto.print` | 打印标量（带格式字符串） | `pto.print ins("%f", %val : f32)` |
-| `pto.tprint` | 打印 Tile/GlobalTensor 全部内容 | `pto.tprint ins(%tile : !pto.tile_buf<...>)` |
+| `pto.tprint` | 打印 Tile/GlobalTensor 全部元素 | `pto.tprint ins(%tile)` |
 
-**问题**：这两个 op 此前**只在 EmitC 后端有 lowering**，VPTO 后端遇到它们直接崩溃：
+## 问题
+
+在 VPTO 后端使用这两个 op 会直接崩溃：
 
 ```
 error: cannot be converted to LLVM IR: missing `LLVMTranslationDialectInterface`
 registration for dialect for op: pto.print
 ```
 
-## 当前实现状态
+**根因**：VPTO 后端的流水线是 `LowerVPTOOpsPass` → `LowerVPTOTypesPass` → MLIR→LLVM IR 标准转换。`LowerVPTOOpsPass` 中 `populateVPTOOpLoweringPatterns` 列出了 ~230 行 pattern 覆盖几乎所有 PTO op，但**唯独没有 `PrintOp` 和 `TPrintOp` 的降级 pattern**。未被处理的 op 残留到 `translateModuleToLLVMIR()`，MLIR 不认识 PTO 方言，报错。
 
-分支：`feature/print-support-research`
+## 需求
 
-| 功能 | EmitC | VPTO（改前） | VPTO（改后） |
-|------|-------|-------------|-------------|
-| `pto.print` | ✅ `cce::printf("fmt", val)` | ❌ crash | ✅ `cce::printf` via LLVM IR |
-| `pto.tprint` | ✅ `TPRINT(...)` 宏（逐元素） | ❌ crash | ⚠️ debug marker（桩） |
+### 1. `pto.print` — 标量打印（优先级：高）
 
-### `pto.print`（已完整实现）
+对标 EmitC 路径的 `cce::printf("fmt", val)`。
 
-**实现方式**：两阶段策略
-
-1. **预扫描**（`collectAndCreatePrintfStringGlobals`）：在 dialect conversion 之前遍历所有 `pto::PrintOp`，收集格式字符串，为每个唯一字符串创建 `LLVM::GlobalOp`
-2. **LowerPrintOpPattern**：将 `pto.print` 降级为 `LLVM::AddressOfOp` + `func::CallOp @cce::printf(fmt_ptr, scalar)`
-
-**LLVM IR 生成效果**：
-```llvm
-@_ptoas_printf_fmt_0 = private constant [8 x i8] c"cst=%d\0A\00"
-declare i32 @"cce::printf"(ptr, i8)
-%2 = call i32 @"cce::printf"(ptr @_ptoas_printf_fmt_0, i8 -7)
+EmitC 路径生成的 C++：
+```cpp
+cce::printf("value = %f\n", scalar);
 ```
 
-### `pto.tprint`（桩实现，待完善）
+VPTO 路径需要生成等效的 LLVM IR：
+```llvm
+@.fmt = private constant [13 x i8] c"value = %f\0A\00"
+declare i32 @"cce::printf"(ptr, ...)
+%fmt = getelementptr ... @.fmt ...
+%result = call i32 @"cce::printf"(ptr %fmt, float %scalar)
+```
 
-**为什么是桩**：`TPrintOp` 的 operands 是 `TileBufType`（如 `!pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, ...>`）。这个类型经过 `VPTOTypeConverter` 无法转换，`ExpandTileOp` 也不处理纯 print 用途的 tile。要在 LLVM IR 中做逐元素打印，需要生成元素遍历循环 + N 次 `cce::printf` 调用。
+**关键挑战**：
+- 格式字符串是编译期常量，LLVM IR 中需要创建 `LLVM::GlobalOp` 全局常量
+- 多个 `pto.print` 可能用相同格式字符串，需要去重
+- 外部函数 `cce::printf` 需要声明（可复用已有 `PlannedDecl` 机制）
 
-当前实现降级为打印一个硬编码标记 `[tprint]\n`，**不再崩溃**，tile 数据内容被丢弃。
+### 2. `pto.tprint` — Tile 打印（优先级：中）
 
-## 涉及的文件
+对标 EmitC 路径的 `TPRINT(...)` 宏（展开为逐元素 `cce::printf` 循环）。
+
+EmitC 路径生成的 C++：
+```cpp
+TPRINT<pto::PrintFormat::Width8_Precision4>(tile, tmp);
+```
+
+**关键挑战**：
+- `TPrintOp` 的 operand 是 `TileBufType`（如 `!pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, ...>`）
+- `ExpandTileOp` 不处理纯 print 用途的 tile（只处理被计算 op 引用的 tile）
+- `VPTOTypeConverter` 无法转换 `TileBufType`
+- 需要在 MLIR 层生成元素遍历循环 + 逐元素 `cce::printf` 调用，或调用运行时 helper
+
+## 技术方案要点
+
+### `pto.print` 实现思路
+
+在 `LowerVPTOOpsPass` 中添加 `LowerPrintOpPattern`，参考已有 pattern（如 `LowerRuntimeQueryOpPattern`）的模式：
+
+1. 预扫描模块，为所有唯一格式字符串创建 `LLVM::GlobalOp`
+2. Pattern 中创建 `LLVM::AddressOfOp` 获取格式字符串指针
+3. 通过 `PlannedDecl` 机制声明外部函数 `cce::printf`
+4. 创建 `func::CallOp @cce::printf(fmt_ptr, scalar)`
+
+### `pto.tprint` 实现思路
+
+有几种方案可讨论：
+
+- **方案 A**：扩展 `ExpandTileOp`，对纯 print 用途的 tile 也展开为标量 ops，后续由已有 pattern 处理
+- **方案 B**：在 `LowerTPrintOpPattern` 中直接生成 `scf.for` 循环 + `cce::printf` 调用
+- **方案 C**：调用运行时 helper 函数（需 pto-isa 运行时提供 `TPRINT` 的 LLVM 可调用版本，而非 C++ 宏）
+
+## 涉及文件（预估）
 
 | 文件 | 改动 |
 |------|------|
-| `lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp` | 添加 `LowerPrintOpPattern`、`LowerTPrintOpPattern`（桩）、`collectAndCreatePrintfStringGlobals`、扩展 `LoweringState`、注册 pattern、标记 illegal |
+| `lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp` | 添加 `LowerPrintOpPattern`、`LowerTPrintOpPattern`、格式字符串预扫描、扩展 `LoweringState`、注册 pattern、标记 illegal |
 | `lib/PTO/Transforms/VPTOLLVMEmitter.cpp` | 同上（旧 CANN 版本同步） |
-| `docs/print_support_research.md` | 研究报告（含 EmitC 降级流程分析、VPTO 管线分析、实现方案设计） |
+| `lib/PTO/Transforms/ExpandTileOp.cpp` | （可选，方案 A）处理 TPrintOp 引用的 tile |
 
-## 剩余工作
+## 编译时依赖
 
-### 1. `pto.tprint` 完整逐元素打印
-
-需要解决 tile 类型转换问题。可能的方案：
-
-- **方案 A**：在 `ExpandTileOp` 中添加 TPrintOp 处理，把纯 print 用途的 tile 也展开为标量操作
-- **方案 B**：在 `LowerTPrintOpPattern` 中直接对已转换的 tile buffer 生成逐元素打印循环（`scf.for` + `cce::printf`）
-- **方案 C**：调用运行时 helper 函数（需要 pto-isa 运行时提供 `TPRINT` 的 LLVM 可调用版本）
-
-### 2. 端到端验证
-
-需要在真实 NPU 硬件或模拟器上验证 `cce::printf` 输出。当前模拟器 (`camodel`) 有 `call stack overflow` 问题，可能是模拟器对 `cce::printf` 支持不完善。
-
-## 编译时需要的 flag
-
-无论 EmitC 还是 VPTO 路径，生成的 LLVM IR / C++ 中的 `cce::printf` 调用都需要 bisheng 编译时启用：
+无论 EmitC 还是 VPTO 路径，`cce::printf` 都需要 bisheng 编译时启用：
 
 | Flag | 作用 |
 |------|------|
 | `--cce-enable-print` | bisheng 选项，启用设备→主机 debug 通道 |
 | `-DPTOAS_ENABLE_CCE_PRINT=1` | 预处理器宏，让 `launch.cpp` 包含 `<ccelib/print/print.h>` |
-
-## 参考
-
-- 研究报告：`docs/print_support_research.md`
-- 分支：`feature/print-support-research`
-- 文档：`docs/PTO_IR_manual.md` 第 9824 行关于 TPRINT 的说明
