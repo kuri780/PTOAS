@@ -218,6 +218,10 @@ struct PlannedDecl {
 
 struct LoweringState {
   SmallVector<PlannedDecl> plannedDecls;
+  // Format-string → LLVM global symbol name (populated by pre-scan before
+  // dialect conversion so AddressOfOp references resolve against existing
+  // symbols).
+  SmallVector<std::pair<std::string, std::string>> stringGlobals;
 };
 
 enum class VcvtElemKind {
@@ -4231,6 +4235,39 @@ materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
     func.setPrivate();
   }
   return success();
+}
+
+// Pre-scan: walk all pto::PrintOp, collect unique format strings, create
+// LLVM::GlobalOp for each BEFORE dialect conversion runs.  This way
+// LowerPrintOpPattern can safely emit LLVM::AddressOfOp references against
+// already-existing symbols.
+static void
+collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
+  llvm::StringMap<std::string> seen;
+  module.walk([&](pto::PrintOp printOp) {
+    StringRef fmt = printOp.getFormat();
+    if (fmt.empty()) fmt = "%f";
+    if (seen.count(fmt)) return;
+    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+    seen[fmt] = globalName;
+    state.stringGlobals.push_back({fmt.str(), globalName});
+  });
+  if (state.stringGlobals.empty()) return;
+
+  OpBuilder builder(module.getBodyRegion());
+  builder.setInsertionPointToStart(&module.getBodyRegion().front());
+  auto i8Type = IntegerType::get(module.getContext(), 8);
+  for (auto &kv : state.stringGlobals) {
+    SmallVector<Attribute> elements;
+    for (char c : kv.first)
+      elements.push_back(IntegerAttr::get(i8Type, c));
+    elements.push_back(IntegerAttr::get(i8Type, 0)); // null terminator
+    auto arrayType = LLVM::LLVMArrayType::get(i8Type, elements.size());
+    builder.create<LLVM::GlobalOp>(
+        module.getLoc(), arrayType,
+        /*isConstant=*/true, LLVM::Linkage::Private, kv.second,
+        ArrayAttr::get(module.getContext(), elements));
+  }
 }
 
 template <typename UnaryOp>
@@ -9016,6 +9053,55 @@ private:
   LoweringState &state;
 };
 
+// Lower pto.print -> func::CallOp @cce::printf(fmt_ptr, scalar)
+//
+// Format strings are pre-created as LLVM::GlobalOp by
+// collectAndCreatePrintfStringGlobals() before dialect conversion, so
+// LLVM::AddressOfOp references resolve against existing symbols.
+class LowerPrintOpPattern final : public OpConversionPattern<pto::PrintOp> {
+public:
+  LowerPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                      LoweringState &state)
+      : OpConversionPattern<pto::PrintOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::PrintOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // 1. Look up the pre-created global symbol name for this format string
+    StringRef fmt = op.getFormat();
+    if (fmt.empty()) fmt = "%f";
+    std::string globalName;
+    for (auto &kv : state.stringGlobals) {
+      if (kv.first == fmt) { globalName = kv.second; break; }
+    }
+    if (globalName.empty())
+      return op.emitError(
+          "internal: pto.print format string not found in stringGlobals map");
+
+    // 2. LLVM::AddressOfOp to get a pointer to the global string constant
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto addrOp = rewriter.create<LLVM::AddressOfOp>(
+        op.getLoc(), ptrType, globalName);
+
+    // 3. Register cce::printf external declaration via PlannedDecl
+    Type scalarType = adaptor.getScalar().getType();
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{ptrType, scalarType}, TypeRange{rewriter.getI32Type()});
+    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
+
+    // 4. func::CallOp -> cce::printf(fmt_ptr, scalar)
+    rewriter.create<func::CallOp>(op.getLoc(), "cce::printf",
+        TypeRange{rewriter.getI32Type()},
+        ValueRange{addrOp.getResult(), adaptor.getScalar()});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 template <typename VoteOp>
 class LowerVoteOpPattern final : public OpConversionPattern<VoteOp> {
 public:
@@ -10420,7 +10506,8 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyOpPattern<pto::CopyUbufToGmOp>,
                LowerCopyUbufToUbufOpPattern,
                LowerCopyCbufToUbufOpPattern,
-               LowerCopyUbufToCbufOpPattern>(
+               LowerCopyUbufToCbufOpPattern,
+               LowerPrintOpPattern>(
       typeConverter, patterns.getContext(), state);
 }
 
@@ -10437,7 +10524,8 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::CmoCacheInvalidOp, pto::FenceBarrierAllOp,
                       pto::DsbOp, pto::DcciOp,
                       pto::GetBufOp, pto::RlsBufOp,
-                      pto::GetBufDynOp, pto::RlsBufDynOp>();
+                      pto::GetBufDynOp, pto::RlsBufDynOp,
+                      pto::PrintOp, pto::TPrintOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,
                       pto::GetBlockNumOp, pto::GetSubBlockNumOp,
                       pto::GetCtrlOp, pto::GetVms4SrOp, pto::GetTidXOp,
@@ -10576,6 +10664,9 @@ static LogicalResult lowerVPTOOps(ModuleOp module, llvm::raw_ostream &diagOS) {
 
   configureVPTOOpLoweringTarget(target, typeConverter);
   populateVPTOOpLoweringPatterns(typeConverter, patterns, state);
+  // Pre-create LLVM globals for pto.print format strings so AddressOfOp
+  // references resolve against existing symbols during conversion.
+  collectAndCreatePrintfStringGlobals(module, state);
 
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     diagOS << "VPTO LLVM emission failed: VPTO op lowering failed\n";
