@@ -120,10 +120,37 @@ registration for dialect for op: pto.print
 
 ### VPTO 中的 op 降级模式
 
-以 `LowerVecScalarMaskedOpPattern<pto::VaddsOp>` 为例，VPTO 使用模板化的 pattern 将 PTO op 降级为：
-- arith 运算（arith.addi, arith.muli 等）
-- LLVM 内建调用（llvm.call @llvm.ascend.*）
-- func.call（调用运行时函数）
+现有的 pattern 分两类：
+
+**A. 声明外部函数 + func::CallOp** — 以 `LowerBarrierOpPattern` 为典型（第 8725 行附近）：
+
+```cpp
+// 1. 计算目标函数名 (如 "llvm.hivm.BARRIER")
+StringRef calleeName = buildSyncCallee<pto::BarrierOp>(op.getContext());
+// 2. 创建函数类型
+auto funcType = rewriter.getFunctionType(TypeRange{rewriter.getI64Type()}, TypeRange{});
+// 3. 产生 func::CallOp
+rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{}, ValueRange{pipeValue});
+// 4. 登记声明，后续由 materializeDecls() 统一创建 func::FuncOp
+state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+// 5. 删除原 op
+rewriter.eraseOp(op);
+```
+
+关键数据结构（`VPTOCANN900LLVMEmitter.cpp:214-219`）：
+```cpp
+struct PlannedDecl {
+  std::string name;
+  FunctionType type;
+};
+struct LoweringState {
+  SmallVector<PlannedDecl> plannedDecls;
+};
+```
+
+`materializeDecls()` (第 4216 行) 在所有 pattern 运行完后，为每个 `PlannedDecl` 创建 `func::FuncOp` 声明。
+
+**B. 直接展开为 arith/LLVM 内建 ops** — 如 `LowerVecScalarMaskedOpPattern<pto::VaddsOp>`，直接生成 arith 运算序列。
 
 这些降级后的标准 MLIR ops 可以被 `translateModuleToLLVMIR` 正常处理。
 
@@ -131,97 +158,126 @@ registration for dialect for op: pto.print
 
 ## 3. 实现 VPTO 路径 `cce::printf` 需要做什么
 
-### 方案 A：在 LowerVPTOOpsPass 中添加降级模式（推荐）
+### 总体方案：在 LowerVPTOOpsPass 中添加降级模式
 
 **位置**：`lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp` (和 `VPTOLLVMEmitter.cpp`)
 
-**需要的改动**：
+#### 3.1 核心挑战
 
-#### 3.1 添加 `LowerPrintOpPattern`
+**格式字符串是编译期常量**，但 LLVM IR 中不能直接传字符串字面量。需要：
 
-新建一个 pattern，将 `pto::PrintOp` 降级为 `llvm.call @cce::printf`：
+1. 为每个格式字符串创建一个 **LLVM 全局常量** (`LLVM::GlobalOp`)
+2. 用 `LLVM::AddressOfOp` 获取其指针
+3. 声明外部函数 `cce::printf`（复用现有 `PlannedDecl` 机制）
+4. 用 `func::CallOp` 调用
+
+**额外难点**：多个 `pto.print` 可能用相同格式字符串，需要去重。现有的 `LoweringState` 只管理函数声明，需要扩展以支持**去重的全局字符串常量**。
+
+#### 3.2 改动清单
+
+**Step 1** — 扩展 `LoweringState`，添加去重的字符串全局池：
+
+```cpp
+struct LoweringState {
+  SmallVector<PlannedDecl> plannedDecls;
+  // 新增：格式字符串去重池，key=格式字符串, value=全局符号名
+  llvm::StringMap<std::string> stringGlobals;
+};
+```
+
+**Step 2** — 添加 `LowerPrintOpPattern`：
 
 ```cpp
 struct LowerPrintOpPattern : public OpConversionPattern<pto::PrintOp> {
-  using OpConversionPattern<pto::PrintOp>::OpConversionPattern;
+  LowerPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                      LoweringState &state)
+      : OpConversionPattern<pto::PrintOp>(typeConverter, context), state(state) {}
 
   LogicalResult matchAndRewrite(pto::PrintOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto *ctx = rewriter.getContext();
-
     // 1. 获取格式字符串
     std::string fmt = op.getFormat().str();
     if (fmt.empty()) fmt = "%f";
 
-    // 2. 创建全局字符串常量 (LLVM 要求格式字符串是全局常量)
-    auto strType = LLVM::LLVMArrayType::get(IntegerType::get(ctx, 8), fmt.size() + 1);
-    // ... 创建或复用全局字符串 ...
+    // 2. 在去重池中查找/创建全局字符串符号名
+    std::string &globalName = state.stringGlobals[fmt];
+    if (globalName.empty())
+      globalName = "_ptoas_printf_fmt_" + std::to_string(state.stringGlobals.size());
 
-    // 3. 获取标量值 (已经 type converter 转换过)
-    Value scalar = adaptor.getScalar();
+    // 3. 创建 LLVM::AddressOfOp 获取格式字符串指针
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto addrOp = rewriter.create<LLVM::AddressOfOp>(
+        loc, ptrType, globalName);
 
-    // 4. 声明 cce::printf (如果还没声明)
-    // declare i32 @cce::printf(i8*, ...)
-    auto printfFunc = getOrCreatePrintfDeclaration(module, ctx);
+    // 4. 注册 cce::printf 声明 (复用 PlannedDecl 机制)
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{ptrType, adaptor.getScalar().getType()},
+        TypeRange{rewriter.getI32Type()});
+    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
 
-    // 5. 创建调用: llvm.call @cce::printf(fmt_ptr, scalar)
-    rewriter.create<LLVM::CallOp>(loc, printfFunc,
-                                  ValueRange{fmtPtr, scalar});
+    // 5. 产生 func::CallOp
+    rewriter.create<func::CallOp>(loc, "cce::printf", TypeRange{rewriter.getI32Type()},
+                                  ValueRange{addrOp.getResult(), adaptor.getScalar()});
 
     rewriter.eraseOp(op);
     return success();
   }
+private:
+  LoweringState &state;
 };
 ```
 
-#### 3.2 注册 pattern
+**Step 3** — 添加 `materializeStringGlobals()`，在 `lowerVPTOOps()` 末尾调用：
 
-在 `populateVPTOOpLoweringPatterns` (第 10196 行) 中添加：
 ```cpp
-patterns.add<LowerPrintOpPattern>(typeConverter, patterns.getContext(), state);
+static void materializeStringGlobals(ModuleOp module,
+                                     const llvm::StringMap<std::string> &stringGlobals) {
+  auto *ctx = module.getContext();
+  auto i8Type = IntegerType::get(ctx, 8);
+  OpBuilder builder(module.getBodyRegion());
+
+  for (auto &kv : stringGlobals) {
+    StringRef fmt = kv.first();       // 格式字符串
+    StringRef globalName = kv.second; // 全局符号名
+
+    // 构造字节数组 (含 '\0')
+    SmallVector<Attribute> elements;
+    for (char c : fmt) elements.push_back(IntegerAttr::get(i8Type, c));
+    elements.push_back(IntegerAttr::get(i8Type, 0)); // null terminator
+
+    auto arrayType = LLVM::LLVMArrayType::get(i8Type, elements.size());
+    builder.create<LLVM::GlobalOp>(
+        module.getLoc(), arrayType, /*isConstant=*/true,
+        LLVM::Linkage::Private, globalName,
+        ArrayAttr::get(ctx, elements));
+  }
+}
 ```
 
-#### 3.3 标记 op 为 illegal
-
-在 `configureVPTOOpLoweringTarget` (第 10427 行) 中添加：
+**Step 4** — 在 `configureVPTOOpLoweringTarget()` 中标记 illegal：
 ```cpp
 target.addIllegalOp<pto::PrintOp, pto::TPrintOp>();
 ```
 
-#### 3.4 （可选）添加 `LowerTPrintOpPattern`
+**Step 5** — 在 `populateVPTOOpLoweringPatterns()` 中注册：
+```cpp
+patterns.add<LowerPrintOpPattern>(typeConverter, patterns.getContext(), state);
+```
 
-类似地，将 `pto::TPrintOp` 降级为 `TPRINT(...)` 宏调用或直接调用底层打印函数。
+#### 3.3 `TPrintOp` 的额外复杂度
 
-### 方案 B：在 LLVMTranslationDialectInterface 中处理
+`pto.tprint` 打印整个 Tile，在 EmitC 路径降级为 `TPRINT(src)`（宏展开为遍历 tile 元素调用 `cce::printf` 的循环）。
 
-在 PTO dialect 注册一个 `LLVMTranslationDialectInterface`，直接在 MLIR→LLVM IR 翻译阶段处理 `pto.print`。
+在 VPTO/LLVM IR 路径中，`TPRINT` 宏不可用，需要**在 MLIR 层生成元素遍历循环 + 逐元素 `cce::printf` 调用**，或者调用一个运行时 helper。这部分工作量大，建议先实现 `PrintOp`，`TPrintOp` 后续再做。
 
-**缺点**：需要改动 dialect 注册代码，侵入性更高，且 MLIR 的 `translateModuleToLLVMIR` 假设所有 dialect 都已注册 translation interface。
-
-### 涉及的文件清单
+#### 3.4 涉及的文件清单
 
 | 文件 | 改动内容 |
 |------|----------|
-| `lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp` | 添加 `LowerPrintOpPattern`、注册 pattern、标记 illegal |
-| `lib/PTO/Transforms/VPTOLLVMEmitter.cpp` | 同上（同步支持旧 CANN 版本） |
+| `lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp` | 添加 `LowerPrintOpPattern`、扩展 `LoweringState`、添加 `materializeStringGlobals`、注册 pattern、标记 illegal |
+| `lib/PTO/Transforms/VPTOLLVMEmitter.cpp` | 同上（同步支持旧 CANN 版本 Beta1） |
 | `test/lit/pto/` | 添加 VPTO 路径的 lit 测试 |
-
-### LLVM IR 中 `cce::printf` 调用的形式
-
-目标生成的 LLVM IR：
-```llvm
-@.fmt = private unnamed_addr constant [8 x i8] c"cst=%d\0A\00"
-
-declare i32 @cce::printf(i8*, ...)
-
-define void @kernel(%arg0: ptr) {
-  %fmt_ptr = getelementptr [8 x i8], [8 x i8]* @.fmt, i64 0, i64 0
-  %val = ... ; scalar value
-  call i32 (i8*, ...) @cce::printf(i8* %fmt_ptr, i8 %val)
-  ret void
-}
-```
 
 ---
 
