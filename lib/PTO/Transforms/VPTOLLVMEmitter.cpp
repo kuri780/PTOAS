@@ -9027,18 +9027,34 @@ public:
       return op.emitError(
           "internal: pto.print format string not found in stringGlobals map");
 
+    // Promote scalar to match C varargs rules: integers narrower than i32
+    // are promoted to i32 (sign-extend for signed/signless, zero-extend
+    // for unsigned), otherwise pass through.
+    Value scalar = adaptor.getScalar();
+    Type scalarType = scalar.getType();
+    Type promotedType = scalarType;
+    if (auto intType = dyn_cast<IntegerType>(scalarType)) {
+      unsigned width = intType.getWidth();
+      if (width < 32) {
+        promotedType = rewriter.getI32Type();
+        if (intType.isUnsigned())
+          scalar = rewriter.create<arith::ExtUIOp>(op.getLoc(), promotedType, scalar);
+        else
+          scalar = rewriter.create<arith::ExtSIOp>(op.getLoc(), promotedType, scalar);
+      }
+    }
+
     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
     auto addrOp = rewriter.create<LLVM::AddressOfOp>(
         op.getLoc(), ptrType, globalName);
 
-    Type scalarType = adaptor.getScalar().getType();
     auto funcType = rewriter.getFunctionType(
-        TypeRange{ptrType, scalarType}, TypeRange{rewriter.getI32Type()});
+        TypeRange{ptrType, promotedType}, TypeRange{rewriter.getI32Type()});
     state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
 
     rewriter.create<func::CallOp>(op.getLoc(), "cce::printf",
         TypeRange{rewriter.getI32Type()},
-        ValueRange{addrOp.getResult(), adaptor.getScalar()});
+        ValueRange{addrOp.getResult(), scalar});
 
     rewriter.eraseOp(op);
     return success();

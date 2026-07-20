@@ -15,10 +15,10 @@ source_filename = "ptoas.hivm.official.vector"
 
 @_ptoas_printf_fmt_0 = private constant [8 x i8] c"cst=%d\0A\00"
 
-declare i32 @"cce::printf"(ptr, i8) #0
+declare i32 @"cce::printf"(ptr, i32) #0
 
 define void @vbr_i8_kernel_2d_mix_aiv(ptr addrspace(1) %0) #1 {
-  %2 = call i32 @"cce::printf"(ptr @_ptoas_printf_fmt_0, i8 -7)
+  %2 = call i32 @"cce::printf"(ptr @_ptoas_printf_fmt_0, i32 -7)
   ret void
 }
 
