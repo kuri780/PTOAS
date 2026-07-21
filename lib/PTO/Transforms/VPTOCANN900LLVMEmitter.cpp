@@ -222,6 +222,32 @@ struct LoweringState {
   // dialect conversion so AddressOfOp references resolve against existing
   // symbols).
   SmallVector<std::pair<std::string, std::string>> stringGlobals;
+  // Non-variadic @printf declarations created by print lowering patterns.
+  // Keyed by the callee type (e.g. i32 (ptr, f64)) so that call sites with
+  // different promoted scalar types do not produce conflicting declarations.
+  void ensurePrintfDecl(ModuleOp module, Location loc,
+                        LLVM::LLVMFunctionType calleeType,
+                        std::string &outName) {
+    for (auto &entry : printfDecls) {
+      if (entry.first == calleeType) {
+        outName = entry.second;
+        return;
+      }
+    }
+    std::string name = "printf";
+    if (!printfDecls.empty())
+      name = "printf." + std::to_string(printfDecls.size());
+    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(name)) {
+      OpBuilder b(module.getBodyRegion());
+      b.setInsertionPointToStart(&module.getBodyRegion().front());
+      b.create<LLVM::LLVMFuncOp>(module.getLoc(), name, calleeType);
+    }
+    printfDecls.push_back({calleeType, name});
+    outName = name;
+  }
+
+private:
+  SmallVector<std::pair<LLVM::LLVMFunctionType, std::string>> printfDecls;
 };
 
 enum class VcvtElemKind {
@@ -9063,11 +9089,15 @@ private:
   LoweringState &state;
 };
 
-// Lower pto.print -> func::CallOp @cce::printf(fmt_ptr, scalar)
+// Lower pto.print -> llvm.call @printf(fmt_ptr, ...) with C varargs promotion.
 //
 // Format strings are pre-created as LLVM::GlobalOp by
 // collectAndCreatePrintfStringGlobals() before dialect conversion, so
 // LLVM::AddressOfOp references resolve against existing symbols.
+//
+// Integers narrower than i32 are sign/zero-extended to i32; float types
+// narrower than f64 (half, bf16, f32) are fpext'd to f64.  These match the
+// C default argument promotions that the EmitC path gets from clang.
 class LowerPrintOpPattern final : public OpConversionPattern<pto::PrintOp> {
 public:
   LowerPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -9088,21 +9118,22 @@ public:
       return op.emitError(
           "internal: pto.print format string not found in stringGlobals map");
 
-    // 2. Promote scalar to match C varargs rules: integers narrower than i32
-    //    are promoted to i32 (sign-extend for signed/signless, zero-extend
-    //    for unsigned), otherwise pass through.  This matches what the EmitC
-    //    path gets from C++ default argument promotions.
+    // 2. Promote scalar to match C varargs rules.
     Value scalar = adaptor.getScalar();
     Type scalarType = scalar.getType();
-    Type promotedType = scalarType;
     if (auto intType = dyn_cast<IntegerType>(scalarType)) {
       unsigned width = intType.getWidth();
       if (width < 32) {
-        promotedType = rewriter.getI32Type();
+        Type promotedType = rewriter.getI32Type();
         if (intType.isUnsigned())
           scalar = rewriter.create<arith::ExtUIOp>(op.getLoc(), promotedType, scalar);
         else
           scalar = rewriter.create<arith::ExtSIOp>(op.getLoc(), promotedType, scalar);
+      }
+    } else if (auto floatType = dyn_cast<FloatType>(scalarType)) {
+      if (floatType.getWidth() < 64) {
+        Type promotedType = rewriter.getF64Type();
+        scalar = rewriter.create<arith::ExtFOp>(op.getLoc(), promotedType, scalar);
       }
     }
 
@@ -9111,15 +9142,21 @@ public:
     auto addrOp = rewriter.create<LLVM::AddressOfOp>(
         op.getLoc(), ptrType, globalName);
 
-    // 4. Register cce::printf external declaration via PlannedDecl
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{ptrType, promotedType}, TypeRange{rewriter.getI32Type()});
-    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
-
-    // 5. func::CallOp -> cce::printf(fmt_ptr, scalar)
-    rewriter.create<func::CallOp>(op.getLoc(), "cce::printf",
-        TypeRange{rewriter.getI32Type()},
-        ValueRange{addrOp.getResult(), scalar});
+    // 4. LLVM::CallOp -> @printf(fmt_ptr, scalar) with non-variadic type.
+    // Variadic calls are unsupported by the CCEC device ISel
+    // (HiIPUISelLowering), so we emit a concrete signature with the
+    // promoted scalar type.
+    auto calleeType = LLVM::LLVMFunctionType::get(
+        rewriter.getI32Type(), {ptrType, scalar.getType()},
+        /*isVarArg=*/false);
+    std::string printfName;
+    auto module = op->getParentOfType<ModuleOp>();
+    state.ensurePrintfDecl(module, op.getLoc(), calleeType, printfName);
+    auto calleeAttr = FlatSymbolRefAttr::get(
+        rewriter.getStringAttr(printfName));
+    rewriter.create<LLVM::CallOp>(op.getLoc(), TypeRange{rewriter.getI32Type()},
+                                  calleeAttr,
+                                  ValueRange{addrOp.getResult(), scalar});
 
     rewriter.eraseOp(op);
     return success();
@@ -9129,15 +9166,11 @@ private:
   LoweringState &state;
 };
 
-// Lower pto.tprint -> func::CallOp @cce::printf for each tile element.
+// Lower pto.tprint -> llvm.call @printf(fmt_ptr) debug marker.
 //
-// TPrintOp prints the contents of a Tile or GlobalTensor.  In the EmitC path
-// this expands to the TPRINT(...) macro which iterates over elements.  For
-// the VPTO LLVM path the tile may still carry a PTO dialect type at this
-// stage (ExpandTileOp does not decompose tiles solely referenced by tprint).
-//
-// Strategy: register the tile descriptor as an opaque pointer-sized value and
-// emit a debug summary call.  Full element-by-element printing is deferred.
+// Emits a summary marker via @printf — the tile type may not be fully
+// lowered to a standard MLIR type yet, so we print a marker rather than
+// attempting per-element iteration from LLVM IR.
 class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
 public:
   LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -9147,12 +9180,8 @@ public:
   LogicalResult
   matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // Emit a summary message via cce::printf — the tile type may not be
-    // fully lowered to a standard MLIR type yet, so we print a marker
-    // rather than attempting per-element iteration from LLVM IR.
     auto loc = op.getLoc();
     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    auto i32Type = rewriter.getI32Type();
 
     // Create a minimal format string for the debug marker.
     std::string fmt = "[tprint]\n";
@@ -9167,11 +9196,17 @@ public:
 
     auto addrOp = rewriter.create<LLVM::AddressOfOp>(loc, ptrType, globalName);
 
-    auto funcType = rewriter.getFunctionType(TypeRange{ptrType}, TypeRange{i32Type});
-    state.plannedDecls.push_back(PlannedDecl{"cce::printf", funcType});
-
-    rewriter.create<func::CallOp>(loc, "cce::printf",
-        TypeRange{i32Type}, ValueRange{addrOp.getResult()});
+    // Non-variadic @printf for tprint debug marker: (ptr) -> i32
+    auto calleeType = LLVM::LLVMFunctionType::get(
+        rewriter.getI32Type(), {ptrType}, /*isVarArg=*/false);
+    std::string printfName;
+    auto module = op->getParentOfType<ModuleOp>();
+    state.ensurePrintfDecl(module, op.getLoc(), calleeType, printfName);
+    auto calleeAttr = FlatSymbolRefAttr::get(
+        rewriter.getStringAttr(printfName));
+    rewriter.create<LLVM::CallOp>(op.getLoc(), TypeRange{rewriter.getI32Type()},
+                                  calleeAttr,
+                                  ValueRange{addrOp.getResult()});
 
     rewriter.eraseOp(op);
     return success();
