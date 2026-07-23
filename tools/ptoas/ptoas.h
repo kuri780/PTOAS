@@ -115,6 +115,7 @@ struct PTOASCompileResult {
   std::string vptoStubSource;
   EmittedLLVMModule vptoCubeModule;
   EmittedLLVMModule vptoVectorModule;
+  bool usesPrint = false;
 };
 
 int compilePTOASModule(OwningOpRef<ModuleOp> &module,

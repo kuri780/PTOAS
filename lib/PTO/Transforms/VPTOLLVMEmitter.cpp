@@ -223,32 +223,14 @@ struct LoweringState {
   // dialect conversion so AddressOfOp references resolve against existing
   // symbols).
   SmallVector<std::pair<std::string, std::string>> stringGlobals;
-  // Non-variadic @printf declarations created by print lowering patterns.
-  // Keyed by the callee type (e.g. i32 (ptr, f64)) so that call sites with
-  // different promoted scalar types do not produce conflicting declarations.
-  void ensurePrintfDecl(ModuleOp module, Location loc,
-                        LLVM::LLVMFunctionType calleeType,
-                        std::string &outName) {
-    for (auto &entry : printfDecls) {
-      if (entry.first == calleeType) {
-        outName = entry.second;
-        return;
-      }
-    }
-    std::string name = "printf";
-    if (!printfDecls.empty())
-      name = "printf." + std::to_string(printfDecls.size());
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(name)) {
-      OpBuilder b(module.getBodyRegion());
-      b.setInsertionPointToStart(&module.getBodyRegion().front());
-      b.create<LLVM::LLVMFuncOp>(module.getLoc(), name, calleeType);
-    }
-    printfDecls.push_back({calleeType, name});
-    outName = name;
-  }
-
-private:
-  SmallVector<std::pair<LLVM::LLVMFunctionType, std::string>> printfDecls;
+  // Whether the module uses pto.print / pto.tprint (set by pre-scan).
+  bool usesPrint = false;
+  // Name of the fix-stack intrinsic declaration (created lazily).
+  std::string fixStackFuncName;
+  // Name of the DCCI intrinsic declaration (created lazily).
+  std::string dcciFuncName;
+  // Name of the get-block-idx intrinsic declaration (created lazily).
+  std::string blockIdxFuncName;
 };
 
 enum class VcvtElemKind {
@@ -4220,10 +4202,12 @@ collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
     std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
     seen[fmt] = globalName;
     state.stringGlobals.push_back({fmt.str(), globalName});
+    state.usesPrint = true;
   });
   // Collect hardcoded format strings used by TPrintOp lowering.
   module.walk([&](pto::TPrintOp tprintOp) {
     (void)tprintOp;
+    state.usesPrint = true;
     StringRef fmt = "[tprint]\n";
     if (seen.count(fmt)) return;
     std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
@@ -4246,6 +4230,145 @@ collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
         /*isConstant=*/true, LLVM::Linkage::Private, kv.second,
         ArrayAttr::get(module.getContext(), elements));
   }
+}
+
+// Add a hidden ptr addrspace(1) (DTData) parameter to every pto.entry function
+// and declare the CCE intrinsics required by print lowering.  Must run before
+// dialect conversion so the type converter can handle the new function signature.
+static LogicalResult addDTDataParamToEntryFunctions(ModuleOp module,
+                                                    LoweringState &state) {
+  if (!state.usesPrint)
+    return success();
+
+  MLIRContext *ctx = module.getContext();
+  auto llvmPtr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+  auto llvmPtr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+  auto i64Type = IntegerType::get(ctx, 64);
+
+  auto declareFunc = [&](StringRef name, LLVM::LLVMFunctionType fty) {
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+      return;
+    OpBuilder b(module.getBodyRegion());
+    b.setInsertionPointToStart(&module.getBodyRegion().front());
+    auto func = b.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fty);
+    func.setPrivate();
+  };
+
+  // @llvm.hivm.get.sycl.fix.stack.object() -> !pto.ptr<0>
+  {
+    auto fty = LLVM::LLVMFunctionType::get(llvmPtr0Type, {}, false);
+    declareFunc("llvm.hivm.get.sycl.fix.stack.object", fty);
+    state.fixStackFuncName = "llvm.hivm.get.sycl.fix.stack.object";
+  }
+  // @llvm.hivm.DCCI(!pto.ptr<1>, i64) -> ()
+  {
+    auto fty = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(ctx), {llvmPtr1Type, i64Type}, false);
+    declareFunc("llvm.hivm.DCCI", fty);
+    state.dcciFuncName = "llvm.hivm.DCCI";
+  }
+  // @llvm.hivm.GET.BLOCK.IDX() -> i64
+  {
+    auto fty = LLVM::LLVMFunctionType::get(i64Type, {}, false);
+    declareFunc("llvm.hivm.GET.BLOCK.IDX", fty);
+    state.blockIdxFuncName = "llvm.hivm.GET.BLOCK.IDX";
+  }
+
+  // Add DTData parameter to every pto.entry function.
+  SmallVector<func::FuncOp> entryFuncs;
+  module.walk([&](func::FuncOp func) {
+    if (pto::isPTOEntryFunction(func))
+      entryFuncs.push_back(func);
+  });
+
+  for (func::FuncOp func : entryFuncs) {
+    unsigned idx = func.getNumArguments();
+    (void)func.insertArgument(idx, llvmPtr1Type, {}, func.getLoc());
+    SmallVector<Type> newArgTypes(func.getArgumentTypes());
+    auto newFuncType =
+        FunctionType::get(ctx, newArgTypes, func.getResultTypes());
+    (void)func.setFunctionType(newFuncType);
+  }
+
+  return success();
+}
+
+// After dialect conversion, inject the prologue (fix-stack init +
+// kernelWriteType = AiV) at the beginning of every entry function.
+static LogicalResult injectPrintPrologue(ModuleOp module,
+                                         LoweringState &state) {
+  if (!state.usesPrint)
+    return success();
+
+  MLIRContext *ctx = module.getContext();
+  auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+  auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+  auto i64Type = IntegerType::get(ctx, 64);
+  auto i8Type = IntegerType::get(ctx, 8);
+  auto i32Type = IntegerType::get(ctx, 32);
+  auto i1Type = IntegerType::get(ctx, 1);
+
+  SmallVector<func::FuncOp> entryFuncs;
+  module.walk([&](func::FuncOp func) {
+    if (pto::isPTOEntryFunction(func))
+      entryFuncs.push_back(func);
+  });
+
+  for (func::FuncOp func : entryFuncs) {
+    if (func.getNumArguments() == 0)
+      continue;
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+    if (dtDataArg.getType() != ptr1Type)
+      continue;
+
+    Region &body = func.getBody();
+    if (body.empty())
+      continue;
+    Block &origEntry = body.front();
+    Location loc = func.getLoc();
+
+    Block *bodyBlock = origEntry.splitBlock(origEntry.begin());
+    OpBuilder builder(&origEntry, origEntry.begin());
+
+    auto fixStackFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        state.fixStackFuncName);
+    if (!fixStackFunc)
+      return failure();
+    auto fixCall = builder.create<LLVM::CallOp>(
+        loc, ptr0Type, fixStackFunc.getSymName(), ValueRange{});
+    Value fixStackPtr = fixCall.getResult();
+
+    auto nullPtr = builder.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto nullCheck = builder.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::eq, dtDataArg, nullPtr);
+
+    Block *initBlock = builder.createBlock(bodyBlock);
+    Block *nullBlock = builder.createBlock(bodyBlock);
+    builder.setInsertionPointToEnd(&origEntry);
+    builder.create<LLVM::CondBrOp>(loc, nullCheck.getResult(), nullBlock,
+                                   initBlock);
+
+    // nullBlock: store 0 to fix stack.
+    builder.setInsertionPointToStart(nullBlock);
+    auto zeroI64 = builder.create<LLVM::ConstantOp>(loc, i64Type,
+                                                    builder.getI64IntegerAttr(0));
+    builder.create<LLVM::StoreOp>(loc, zeroI64.getResult(), fixStackPtr);
+    builder.create<LLVM::BrOp>(loc, ValueRange{}, bodyBlock);
+
+    // initBlock: store DTData to fix stack, set kernelWriteType = AiV.
+    builder.setInsertionPointToStart(initBlock);
+    auto dtI64 = builder.create<LLVM::PtrToIntOp>(loc, i64Type, dtDataArg);
+    builder.create<LLVM::StoreOp>(loc, dtI64.getResult(), fixStackPtr);
+    auto kwoff = builder.create<LLVM::ConstantOp>(loc, i64Type,
+                                                  builder.getI64IntegerAttr(24));
+    auto kwPtr = builder.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg,
+                                             ValueRange{kwoff.getResult()});
+    auto twoVal = builder.create<LLVM::ConstantOp>(loc, i32Type,
+                                                   builder.getI32IntegerAttr(2));
+    builder.create<LLVM::StoreOp>(loc, twoVal.getResult(), kwPtr.getResult());
+    builder.create<LLVM::BrOp>(loc, ValueRange{}, bodyBlock);
+  }
+
+  return success();
 }
 
 template <typename UnaryOp>
@@ -9033,11 +9156,13 @@ private:
   LoweringState &state;
 };
 
-// Lower pto.print -> llvm.call @printf(fmt_ptr, ...) with C varargs promotion.
+// Lower pto.print -> inline DebugTunnel protocol via LLVM CFG (cond_br).
 //
-// Integers narrower than i32 are sign/zero-extended to i32; float types
-// narrower than f64 (half, bf16, f32) are fpext'd to f64.  These match the
-// C default argument promotions that the EmitC path gets from clang.
+// Generates the same control-flow structure as the verified v6 hand-written IR:
+//   entry:  null-check DTData + LogWholeRegion → cond_br to write_bb or done_bb
+//   write_bb: block-offset, overflow-check → protocol bytes + DCCI → done_bb
+//   done_bb: continue with original function
+
 class LowerPrintOpPattern final : public OpConversionPattern<pto::PrintOp> {
 public:
   LowerPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -9047,6 +9172,16 @@ public:
   LogicalResult
   matchAndRewrite(pto::PrintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+    auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+    auto i64Type = rewriter.getI64Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i1Type = rewriter.getI1Type();
+
+    // Look up format-string global.
     StringRef fmt = op.getFormat();
     if (fmt.empty()) fmt = "%f";
     std::string globalName;
@@ -9054,48 +9189,270 @@ public:
       if (kv.first == fmt) { globalName = kv.second; break; }
     }
     if (globalName.empty())
-      return op.emitError(
-          "internal: pto.print format string not found in stringGlobals map");
+      return op.emitError("internal: format string not found in stringGlobals");
 
-    // Promote scalar to match C varargs rules.
+    // Get DTData from entry function's last argument.
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func || func.getNumArguments() == 0)
+      return op.emitError("pto.print must be inside a function");
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+
+    // ---- Split: current block → remainder after this pattern ----
+    Block *origBlock = rewriter.getInsertionBlock();
+    Block *doneBlock = rewriter.splitBlock(origBlock, Block::iterator(op));
+
+    // ---- Build null checks in origBlock ----
+    rewriter.setInsertionPointToEnd(origBlock);
+
+    // Check DTData != null
+    auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+
+    // Load LogWholeRegion from DTData+0
+    auto lrAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 0)});
+    auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
+    auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
+
+    // Combine: both must be non-null
+    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type,
+                                                dtNotNull.getResult(),
+                                                lrNotNull.getResult());
+
+    // Create write_bb and branch
+    auto *writeBlock = new Block();
+    origBlock->getParent()->push_back(writeBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, bothOk.getResult(), writeBlock, doneBlock);
+
+    // ---- Build protocol writes in writeBlock ----
+    rewriter.setInsertionPointToStart(writeBlock);
+
+    // Load LogBufferSize from DTData+16
+    auto lbsAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 16)});
+    auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
+
+    // stride = LogBufferSize + 64
+    auto stride64 = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                               logBufSize.getResult(),
+                                               stride64.getResult());
+
+    // Block offset = get_block_idx() * stride
+    auto blockIdxFunc = op->getParentOfType<ModuleOp>()
+                            .lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
+    if (!blockIdxFunc) {
+      rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
+      rewriter.eraseOp(op);
+      return success();
+    }
+    auto blockIdxCall = rewriter.create<LLVM::CallOp>(
+        loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
+    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type,
+                                                  blockIdxCall.getResult(),
+                                                  stride.getResult());
+
+    // LogBuffer base = LogWholeRegion + block_off
+    auto logBufBase = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, logRegion.getResult(),
+        ValueRange{blockOff.getResult()});
+
+    auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
+
+    // ---- Determine record size ----
     Value scalar = adaptor.getScalar();
     Type scalarType = scalar.getType();
-    if (auto intType = dyn_cast<IntegerType>(scalarType)) {
-      unsigned width = intType.getWidth();
-      if (width < 32) {
-        Type promotedType = rewriter.getI32Type();
-        if (intType.isUnsigned())
-          scalar = rewriter.create<arith::ExtUIOp>(op.getLoc(), promotedType, scalar);
-        else
-          scalar = rewriter.create<arith::ExtSIOp>(op.getLoc(), promotedType, scalar);
-      }
-    } else if (auto floatType = dyn_cast<FloatType>(scalarType)) {
-      if (floatType.getWidth() < 64) {
-        Type promotedType = rewriter.getF64Type();
-        scalar = rewriter.create<arith::ExtFOp>(op.getLoc(), promotedType, scalar);
+    bool isFloat = isa<FloatType>(scalarType);
+    int64_t dataSize = isFloat ? 4 : 8;
+
+    // Parse format string
+    StringRef fmtStr = op.getFormat();
+    size_t prefixLen = 0;
+    {
+      size_t pos = 0;
+      while (pos < fmtStr.size()) {
+        if (fmtStr[pos] == '%') {
+          prefixLen = pos; pos++;
+          while (pos < fmtStr.size() &&
+                 (fmtStr[pos] == '+' || fmtStr[pos] == '-' ||
+                  fmtStr[pos] == '0' || fmtStr[pos] == '#' ||
+                  fmtStr[pos] == ' ')) pos++;
+          while (pos < fmtStr.size() && fmtStr[pos] >= '0' && fmtStr[pos] <= '9') pos++;
+          if (pos < fmtStr.size() && fmtStr[pos] == '.') {
+            pos++;
+            while (pos < fmtStr.size() && fmtStr[pos] >= '0' && fmtStr[pos] <= '9') pos++;
+          }
+          if (pos < fmtStr.size() &&
+              (fmtStr[pos] == 'l' || fmtStr[pos] == 'h' || fmtStr[pos] == 'z')) pos++;
+          if (pos < fmtStr.size()) { pos++; prefixLen = pos; }
+        } else { pos++; }
       }
     }
 
-    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    auto addrOp = rewriter.create<LLVM::AddressOfOp>(
-        op.getLoc(), ptrType, globalName);
+    int64_t fmtPrefixLen = static_cast<int64_t>(prefixLen) + 1;
+    int64_t fmtSuffixLen = static_cast<int64_t>(fmtStr.size() - prefixLen) + 1;
+    int64_t recordSize = 1 + dataSize + 2 + fmtPrefixLen + 1 + 2 + fmtSuffixLen + 1;
 
-    // Get or create a non-variadic @printf declaration matching the promoted
-    // scalar type.  Variadic calls are unsupported by the CCEC device ISel
-    // (HiIPUISelLowering), so we emit a concrete (ptr, promotedType) -> i32
-    // signature and let the C promotion (sext / fpext above) handle ABI
-    // compatibility.
-    auto calleeType = LLVM::LLVMFunctionType::get(
-        rewriter.getI32Type(), {ptrType, scalar.getType()},
-        /*isVarArg=*/false);
-    std::string printfName;
-    auto module = op->getParentOfType<ModuleOp>();
-    state.ensurePrintfDecl(module, op.getLoc(), calleeType, printfName);
-    auto calleeAttr = FlatSymbolRefAttr::get(
-        rewriter.getStringAttr(printfName));
-    rewriter.create<LLVM::CallOp>(op.getLoc(), TypeRange{rewriter.getI32Type()},
-                                  calleeAttr,
-                                  ValueRange{addrOp.getResult(), scalar});
+    // Overflow check: skip write if pLogSize + recordSize > LogBufferSize
+    auto recSizeVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(recordSize));
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                               pLogSize.getResult(),
+                                               recSizeVal.getResult());
+    auto overflow = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(),
+        logBufSize.getResult());
+
+    // Split writeBlock into overflow-check and actual-write
+    auto *overflowBlock = new Block();
+    auto *writePayloadBlock = new Block();
+    origBlock->getParent()->push_back(overflowBlock);
+    origBlock->getParent()->push_back(writePayloadBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, overflow.getResult(), overflowBlock,
+                                    writePayloadBlock);
+
+    // overflowBlock: just update pLogSize (overflow guard from CCE) then br done
+    rewriter.setInsertionPointToStart(overflowBlock);
+    rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+    rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
+
+    // ---- writePayloadBlock: actual protocol byte writing ----
+    rewriter.setInsertionPointToStart(writePayloadBlock);
+
+    // Write base pointer = logBufBase + 64 (header) + pLogSize
+    auto headerOff = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto writeOff = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                                  headerOff.getResult(),
+                                                  pLogSize.getResult());
+    auto writePtr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, logBufBase.getResult(),
+        ValueRange{writeOff.getResult()});
+
+    auto storeI8 = [&](Value base, int64_t offset, Value val) {
+      auto off = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(offset));
+      auto ptr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, base,
+                                              ValueRange{off.getResult()});
+      rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+    };
+
+    // [0] Type marker: FLOAT=2 or INT=3
+    uint8_t typeMarker = isFloat ? 2 : 3;
+    auto markerVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i8Type, rewriter.getI8IntegerAttr(typeMarker));
+    storeI8(writePtr.getResult(), 0, markerVal);
+
+    // [1..N] Data bytes (little-endian)
+    if (isFloat) {
+      auto bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
+      for (int i = 0; i < 4; ++i) {
+        auto shift = rewriter.create<LLVM::ConstantOp>(
+            loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
+        auto shifted = rewriter.create<LLVM::LShrOp>(loc, i32Type,
+                                                      bits.getResult(), shift);
+        auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+        storeI8(writePtr.getResult(), 1 + i, byte);
+      }
+    } else {
+      Value intVal = scalar;
+      if (auto it = dyn_cast<IntegerType>(scalar.getType())) {
+        if (it.getWidth() < 64) {
+          if (it.isUnsigned())
+            intVal = rewriter.create<LLVM::ZExtOp>(loc, i64Type, scalar);
+          else
+            intVal = rewriter.create<LLVM::SExtOp>(loc, i64Type, scalar);
+        }
+      }
+      for (int i = 0; i < 8; ++i) {
+        auto shift = rewriter.create<LLVM::ConstantOp>(
+            loc, i64Type, rewriter.getI64IntegerAttr(i * 8));
+        auto shifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, intVal, shift);
+        auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+        storeI8(writePtr.getResult(), 1 + i, byte);
+      }
+    }
+
+    // Format string length (i16 LE)
+    int64_t fmtOff = 1 + dataSize;
+    auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen));
+    auto shift8 = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(8));
+    auto fmtLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenVal);
+    auto fmtLenShifted = rewriter.create<LLVM::LShrOp>(
+        loc, i64Type, fmtLenVal.getResult(), shift8.getResult());
+    auto fmtLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenShifted);
+    storeI8(writePtr.getResult(), fmtOff, fmtLenLow);
+    storeI8(writePtr.getResult(), fmtOff + 1, fmtLenHigh);
+
+    // Format string bytes (copy from global)
+    auto fmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type, globalName);
+    for (int64_t i = 0; i < fmtPrefixLen; ++i) {
+      auto charOff = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(i));
+      auto charPtr = rewriter.create<LLVM::GEPOp>(
+          loc, ptr0Type, i8Type, fmtGlobal.getResult(),
+          ValueRange{charOff.getResult()});
+      auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+      storeI8(writePtr.getResult(), fmtOff + 2 + i, ch);
+    }
+
+    // NORMAL=1 section
+    int64_t normalOff = fmtOff + 2 + fmtPrefixLen;
+    auto normalMarker = rewriter.create<LLVM::ConstantOp>(
+        loc, i8Type, rewriter.getI8IntegerAttr(1));
+    storeI8(writePtr.getResult(), normalOff, normalMarker);
+
+    auto remLenVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(fmtSuffixLen));
+    auto remLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, remLenVal);
+    auto remLenShifted2 = rewriter.create<LLVM::LShrOp>(
+        loc, i64Type, remLenVal.getResult(), shift8.getResult());
+    auto remLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type, remLenShifted2);
+    storeI8(writePtr.getResult(), normalOff + 1, remLenLow);
+    storeI8(writePtr.getResult(), normalOff + 2, remLenHigh);
+
+    for (int64_t i = 0; i < fmtSuffixLen; ++i) {
+      auto charOff = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(prefixLen + i));
+      auto charPtr = rewriter.create<LLVM::GEPOp>(
+          loc, ptr0Type, i8Type, fmtGlobal.getResult(),
+          ValueRange{charOff.getResult()});
+      auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+      storeI8(writePtr.getResult(), normalOff + 3 + i, ch);
+    }
+
+    // END=0 marker
+    int64_t endOff = normalOff + 3 + fmtSuffixLen;
+    auto endMarker = rewriter.create<LLVM::ConstantOp>(
+        loc, i8Type, rewriter.getI8IntegerAttr(0));
+    storeI8(writePtr.getResult(), endOff, endMarker);
+
+    // Update pLogSize
+    rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+
+    // DCCI flush
+    auto dcciFunc = op->getParentOfType<ModuleOp>()
+                        .lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+    if (dcciFunc) {
+      auto flushNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+      auto flushOne = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(1));
+      rewriter.create<LLVM::CallOp>(loc, TypeRange{},
+                                    dcciFunc.getSymName(),
+                                    ValueRange{flushNull.getResult(),
+                                               flushOne.getResult()});
+    }
+
+    // Branch to done block
+    rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
 
     rewriter.eraseOp(op);
     return success();
@@ -9104,7 +9461,7 @@ public:
 private:
   LoweringState &state;
 };
-
+// Lower pto.tprint -> inline DebugTunnel debug marker via LLVM CFG.
 class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
 public:
   LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -9114,33 +9471,143 @@ public:
   LogicalResult
   matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+    auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+    auto i64Type = rewriter.getI64Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i1Type = rewriter.getI1Type();
 
-    std::string fmt = "[tprint]\n";
-    std::string globalName;
-    for (auto &kv : state.stringGlobals) {
-      if (kv.first == fmt) { globalName = kv.second; break; }
+    // Get DTData from entry function.
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func || func.getNumArguments() == 0) {
+      rewriter.eraseOp(op);
+      return success();
     }
-    if (globalName.empty()) {
-      globalName = "_ptoas_printf_fmt_" + std::to_string(state.stringGlobals.size());
-      state.stringGlobals.push_back({fmt, globalName});
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+
+    // Split current block
+    Block *origBlock = rewriter.getInsertionBlock();
+    Block *doneBlock = rewriter.splitBlock(origBlock, Block::iterator(op));
+    rewriter.setInsertionPointToEnd(origBlock);
+
+    // DTData null check
+    auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+
+    // Load LogWholeRegion
+    auto lrAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 0)});
+    auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
+    auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
+
+    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type,
+                                                dtNotNull.getResult(),
+                                                lrNotNull.getResult());
+
+    auto *writeBlock = new Block();
+    origBlock->getParent()->push_back(writeBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, bothOk.getResult(), writeBlock, doneBlock);
+
+    rewriter.setInsertionPointToStart(writeBlock);
+
+    // Load LogBufferSize, compute stride
+    auto lbsAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 16)});
+    auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
+    auto stride64 = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                               logBufSize.getResult(),
+                                               stride64.getResult());
+    auto blockIdxFunc = op->getParentOfType<ModuleOp>()
+                            .lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
+    if (!blockIdxFunc) {
+      rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
+      rewriter.eraseOp(op);
+      return success();
+    }
+    auto blockIdxCall = rewriter.create<LLVM::CallOp>(
+        loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
+    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type,
+                                                  blockIdxCall.getResult(),
+                                                  stride.getResult());
+    auto logBufBase = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, logRegion.getResult(),
+        ValueRange{blockOff.getResult()});
+    auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
+
+    // NORMAL section: "[tprint]\n\0" = 10 bytes, total = 14 bytes
+    int64_t recordSize = 1 + 2 + 10 + 1;
+    auto recSizeVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(recordSize));
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                               pLogSize.getResult(),
+                                               recSizeVal.getResult());
+    auto overflow = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(),
+        logBufSize.getResult());
+
+    // Overflow → skip write, just update pLogSize
+    auto *overflowBlock = new Block();
+    auto *writePayloadBlock = new Block();
+    origBlock->getParent()->push_back(overflowBlock);
+    origBlock->getParent()->push_back(writePayloadBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, overflow.getResult(), overflowBlock,
+                                    writePayloadBlock);
+
+    rewriter.setInsertionPointToStart(overflowBlock);
+    rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+    rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
+
+    rewriter.setInsertionPointToStart(writePayloadBlock);
+
+    auto headerOff = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto writeOff = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                                  headerOff.getResult(),
+                                                  pLogSize.getResult());
+    auto writePtr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, logBufBase.getResult(),
+        ValueRange{writeOff.getResult()});
+
+    auto storeI8Off = [&](Value base, int64_t offset, uint8_t val) {
+      auto off = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(offset));
+      auto ptr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, base,
+                                              ValueRange{off.getResult()});
+      auto v = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(val));
+      rewriter.create<LLVM::StoreOp>(loc, v, ptr);
+    };
+
+    storeI8Off(writePtr.getResult(), 0, 1);
+    storeI8Off(writePtr.getResult(), 1, 10); storeI8Off(writePtr.getResult(), 2, 0);
+    uint8_t tprintBytes[] = {'[', 't', 'p', 'r', 'i', 'n', 't', ']', '\n', '\0'};
+    for (int i = 0; i < 10; ++i)
+      storeI8Off(writePtr.getResult(), 3 + i, tprintBytes[i]);
+    storeI8Off(writePtr.getResult(), 13, 0);
+
+    rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+
+    auto dcciFunc = op->getParentOfType<ModuleOp>()
+                        .lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+    if (dcciFunc) {
+      auto flushNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+      auto flushOne = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(1));
+      rewriter.create<LLVM::CallOp>(loc, TypeRange{},
+                                    dcciFunc.getSymName(),
+                                    ValueRange{flushNull.getResult(),
+                                               flushOne.getResult()});
     }
 
-    auto addrOp = rewriter.create<LLVM::AddressOfOp>(loc, ptrType, globalName);
-
-    // Non-variadic @printf for tprint debug marker: (ptr) -> i32
-    auto calleeType = LLVM::LLVMFunctionType::get(
-        rewriter.getI32Type(), {ptrType}, /*isVarArg=*/false);
-    std::string printfName;
-    auto module = op->getParentOfType<ModuleOp>();
-    state.ensurePrintfDecl(module, op.getLoc(), calleeType, printfName);
-    auto calleeAttr = FlatSymbolRefAttr::get(
-        rewriter.getStringAttr(printfName));
-    rewriter.create<LLVM::CallOp>(op.getLoc(), TypeRange{rewriter.getI32Type()},
-                                  calleeAttr,
-                                  ValueRange{addrOp.getResult()});
-
+    rewriter.create<LLVM::BrOp>(loc, ValueRange{}, doneBlock);
     rewriter.eraseOp(op);
     return success();
   }
@@ -9148,6 +9615,7 @@ public:
 private:
   LoweringState &state;
 };
+
 
 template <typename VoteOp>
 class LowerVoteOpPattern final : public OpConversionPattern<VoteOp> {
@@ -10716,10 +11184,25 @@ static LogicalResult lowerVPTOOps(ModuleOp module, llvm::raw_ostream &diagOS) {
   populateVPTOOpLoweringPatterns(typeConverter, patterns, state);
   collectAndCreatePrintfStringGlobals(module, state);
 
+  // If the module uses print ops, add the DTData hidden parameter to every
+  // entry function BEFORE type conversion.
+  if (failed(addDTDataParamToEntryFunctions(module, state))) {
+    diagOS << "VPTO LLVM emission failed: DTData parameter injection failed\n";
+    return failure();
+  }
+
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     diagOS << "VPTO LLVM emission failed: VPTO op lowering failed\n";
     return failure();
   }
+
+  // Inject the print prologue (fix-stack init + kernelWriteType = AiV) AFTER
+  // dialect conversion so we can use LLVM dialect ops directly.
+  if (failed(injectPrintPrologue(module, state))) {
+    diagOS << "VPTO LLVM emission failed: print prologue injection failed\n";
+    return failure();
+  }
+
   if (failed(materializeDecls(module, state.plannedDecls, diagOS)))
     return failure();
   return success();

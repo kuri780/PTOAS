@@ -74,6 +74,24 @@ static void stripUnsupportedBishengAttrs(llvm::Module &module) {
 
 static bool writeLLVMModuleFile(llvm::Module &module, StringRef path,
                                 llvm::raw_ostream &diagOS) {
+  // Convert to text first so we can normalize LLVM IR for bisheng (which is
+  // based on LLVM 15 and cannot parse `nuw` on constant GEP expressions).
+  std::string ir;
+  {
+    llvm::raw_string_ostream rso(ir);
+    stripUnsupportedBishengAttrs(module);
+    module.print(rso, nullptr);
+  }
+  // Strip `nuw` from GEPs: MLIR/LLVM 21 emits `inbounds nuw` on constant
+  // GEPs whose indices are non-negative constants, but LLVM 15 (bisheng)
+  // rejects `nuw` in that position.
+  static constexpr llvm::StringLiteral kNuwGep = "inbounds nuw";
+  size_t pos = 0;
+  while ((pos = ir.find(kNuwGep, pos)) != std::string::npos) {
+    ir.replace(pos, kNuwGep.size(), "inbounds");
+    pos += 8; // advance past "inbounds"
+  }
+
   std::error_code ec;
   llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
   if (ec) {
@@ -81,8 +99,7 @@ static bool writeLLVMModuleFile(llvm::Module &module, StringRef path,
            << ec.message() << "\n";
     return false;
   }
-  stripUnsupportedBishengAttrs(module);
-  module.print(os, nullptr);
+  os << ir;
   os.flush();
   if (os.has_error()) {
     diagOS << "Error: failed to write LLVM module to " << path << "\n";
@@ -240,6 +257,7 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
                                     const mlir::pto::CANNToolchain &toolchain,
                                     llvm::StringRef deviceObjPath,
                                     llvm::StringRef stderrPath,
+                                    bool usesPrint,
                                     llvm::raw_ostream &diagOS);
 static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef outObjPath,
@@ -324,23 +342,24 @@ public:
   bool compileHostStub(const mlir::pto::CANNToolchain &toolchain,
                        llvm::StringRef moduleId,
                        llvm::StringRef targetCPU,
-                       llvm::raw_ostream &diagOS) {
+                       bool usesPrint, llvm::raw_ostream &diagOS) {
     if (failed(tempFiles.create("ptoas-host-stub", ".o", hostStubObjPath,
                                 diagOS)))
       return false;
     return compileHostStubToObject(stubPath, hostStubObjPath, moduleId,
                                    targetCPU, toolchain, mergedDeviceObjPath,
-                                   stderrPath, diagOS);
+                                   stderrPath, usesPrint, diagOS);
   }
 
   bool compileHostStubToFatobj(const mlir::pto::CANNToolchain &toolchain,
                                llvm::StringRef moduleId,
                                llvm::StringRef targetCPU,
                                llvm::StringRef outputPath,
+                               bool usesPrint,
                                llvm::raw_ostream &diagOS) {
     return compileHostStubToObject(stubPath, outputPath, moduleId, targetCPU,
                                    toolchain, mergedDeviceObjPath, stderrPath,
-                                   diagOS);
+                                   usesPrint, diagOS);
   }
 
   bool repackFatObj(const mlir::pto::CANNToolchain &toolchain,
@@ -530,6 +549,7 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
                                     const mlir::pto::CANNToolchain &toolchain,
                                     llvm::StringRef deviceObjPath,
                                     llvm::StringRef stderrPath,
+                                    bool usesPrint,
                                     llvm::raw_ostream &diagOS) {
   std::string coverageDir = ".";
   std::string debugDir = ".";
@@ -615,13 +635,48 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
       "-fcce-device-module-id",
       moduleId.str(),
       "-faddrsig",
-      "-D__GCC_HAVE_DWARF2_CFI_ASM=1",
-      "-o",
-      outObjPath.str(),
-      "-x",
-      "cce",
-      stubPath.str(),
-  };
+      "-D__GCC_HAVE_DWARF2_CFI_ASM=1"};
+
+  // When the module uses pto.print / pto.tprint, inject the CCE print flag so
+  // the host stub compiler generates DebugTunnel Open/Close wrapper code.
+  // Also add CANN runtime include paths needed by the print infrastructure.
+  if (usesPrint) {
+    args.push_back("-fcce-enable-print");
+    args.push_back("-D__CCE_ENABLE_PRINT_FOUND_CANN__");
+    std::string ascendHome;
+    if (const char *env = ::getenv("ASCEND_HOME_PATH"))
+      ascendHome = env;
+    else if (const char *env2 = ::getenv("ASCEND_HOME"))
+      ascendHome = env2;
+    if (!ascendHome.empty()) {
+      args.push_back("-I");
+      args.push_back(ascendHome + "/include");
+      args.push_back("-I");
+      args.push_back(ascendHome + "/include/experiment");
+      args.push_back("-I");
+      args.push_back(ascendHome + "/pkg_inc/");
+      args.push_back("-I");
+      args.push_back(ascendHome + "/pkg_inc/runtime/runtime/");
+      args.push_back("-I");
+      args.push_back(ascendHome + "/pkg_inc/profiling/");
+      // The CANN Host-side runtime headers (pulled in by the DebugTunnel
+      // print infrastructure) use C standard library headers (<stdlib.h>).
+      // CC1 mode does not auto-add the C library paths, so add them here.
+      args.push_back("-internal-externc-isystem");
+      args.push_back("/usr/include/x86_64-linux-gnu");
+      args.push_back("-internal-externc-isystem");
+      args.push_back("/usr/include");
+      // NOTE: DebugTunnel headers also pull in C++ standard library
+      // headers (<string>, etc.).  Adding -internal-isystem for libstdc++
+      // causes bisheng crashes in CC1 mode, so host-stub compilation for
+      // print kernels currently requires the bisheng -xcce driver mode (see
+      // test/vpto/scripts/run_vpto_print_validation.sh for the working flow).
+      // TODO: switch compileHostStubToObject to driver mode when usesPrint.
+    }
+  }
+
+  args.insert(args.end(), {"-o", outObjPath.str(), "-x", "cce",
+                           stubPath.str()});
   return runCommandWithStderr(toolchain.bishengCc1Path, args, stderrPath, diagOS,
                               "host stub compilation");
 }
@@ -939,7 +994,8 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVM(
     llvm::Module *cubeModule, llvm::Module *vectorModule,
     llvm::StringRef stubSource, llvm::StringRef outputPath,
     llvm::StringRef moduleId, const CANNToolchain &toolchain,
-    TempFileRegistry &tempFiles, llvm::raw_ostream &diagOS) {
+    TempFileRegistry &tempFiles, bool usesPrint,
+    llvm::raw_ostream &diagOS) {
   if (!cubeModule && !vectorModule) {
     diagOS << "Error: VPTO fatobj emission requires at least one LLVM module.\n";
     return failure();
@@ -959,7 +1015,7 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVM(
 
   constexpr llvm::StringLiteral targetCPU = "dav-c310";
   if (!artifacts.compileHostStubToFatobj(toolchain, moduleId, targetCPU,
-                                         outputPath, diagOS))
+                                         outputPath, usesPrint, diagOS))
     return failure();
   return success();
 }
@@ -982,7 +1038,7 @@ mlir::LogicalResult mlir::pto::compileStubToFatobj(
   constexpr llvm::StringLiteral targetCPU = "dav-c310";
   return compileHostStubToObject(stubPath, outputPath, moduleId, targetCPU,
                                  toolchain, deviceObjPath, stderrPath,
-                                 diagOS)
+                                 /*usesPrint=*/false, diagOS)
              ? success()
              : failure();
 }
@@ -1026,7 +1082,8 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVMWithRuntime(
 
   std::string moduleId = sanitizeModuleId(outputFile.getFilename());
   constexpr llvm::StringLiteral hostTargetCPU = "dav-c310";
-  if (!artifacts.compileHostStub(*toolchain, moduleId, hostTargetCPU, diagOS))
+  if (!artifacts.compileHostStub(*toolchain, moduleId, hostTargetCPU,
+                                 /*usesPrint=*/false, diagOS))
     return failure();
 
   if (!artifacts.repackFatObj(*toolchain, moduleId, hostTargetCPU,
