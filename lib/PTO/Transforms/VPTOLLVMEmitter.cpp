@@ -231,6 +231,11 @@ struct LoweringState {
   std::string dcciFuncName;
   // Name of the get-block-idx intrinsic declaration (created lazily).
   std::string blockIdxFuncName;
+  // Constrained-region print helpers: format_string → LLVM helper func name.
+  // PrintOp inside scf::IfOp (SizedRegion<1>) cannot use the normal splitBlock
+  // CFG pattern; instead a small private helper function is created that
+  // contains the protocol logic and is called from inside the if-region.
+  llvm::StringMap<std::string> constrainedPrintHelpers;
 };
 
 enum class VcvtElemKind {
@@ -4180,6 +4185,16 @@ materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
       }
       continue;
     }
+    // When pto.print/pto.tprint is used in the module,
+    // addDTDataParamToEntryFunctions eagerly creates LLVM::LLVMFuncOp
+    // for CCE intrinsics (GET.BLOCK.IDX, DCCI, etc.) BEFORE type
+    // conversion.  If a later pattern also pushes a PlannedDecl for the
+    // same symbol we must not create a duplicate func::FuncOp, otherwise
+    // the module symbol table will contain two ops with the same name
+    // (one LLVM::LLVMFuncOp and one func::FuncOp) and LLVM IR emission
+    // will fail with "redefinition of symbol".
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(decl.name))
+      continue;
     auto func =
         builder.create<func::FuncOp>(module.getLoc(), decl.name, decl.type);
     func.setPrivate();
@@ -4230,6 +4245,55 @@ collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
         /*isConstant=*/true, LLVM::Linkage::Private, kv.second,
         ArrayAttr::get(module.getContext(), elements));
   }
+}
+
+// Pre-scan: create private LLVM helper functions for pto::PrintOp ops that
+// appear inside constrained regions (scf::IfOp).  The normal lowering uses
+// splitBlock to build a multi-block CFG for the DebugTunnel protocol, but
+// scf.if regions are SizedRegion<1> and reject additional blocks.  Instead we
+// outline the protocol into a helper function and emit a simple call from
+// inside the if-region.
+static void
+createConstrainedPrintHelpers(ModuleOp module, LoweringState &state) {
+  if (!state.usesPrint)
+    return;
+
+  int counter = 0;
+  MLIRContext *ctx = module.getContext();
+  auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+  auto voidType = LLVM::LLVMVoidType::get(ctx);
+
+  module.walk([&](pto::PrintOp printOp) {
+    Operation *parent = printOp->getParentOp();
+    if (!isa<scf::IfOp>(parent))
+      return;
+
+    std::string key = printOp.getFormat().str();
+    if (state.constrainedPrintHelpers.count(key))
+      return; // already created a helper for this format
+
+    std::string helperName =
+        "_ptoas_print_if_" + std::to_string(counter++);
+    Type scalarType = printOp.getScalar().getType();
+    auto funcType = LLVM::LLVMFunctionType::get(
+        voidType, {ptr1Type, scalarType}, /*isVarArg=*/false);
+
+    OpBuilder b(module.getBodyRegion());
+    b.setInsertionPointToStart(&module.getBodyRegion().front());
+    auto func =
+        b.create<LLVM::LLVMFuncOp>(module.getLoc(), helperName, funcType);
+    func.setPrivate();
+
+    // Minimal stub body: just an entry block with llvm.return.
+    // The actual protocol logic is filled in by
+    // LowerPrintOpPattern when it needs to emit a call from a
+    // constrained region.
+    Block *entry = func.addEntryBlock(b);
+    b.setInsertionPointToStart(entry);
+    b.create<LLVM::ReturnOp>(module.getLoc(), ValueRange{});
+
+    state.constrainedPrintHelpers[key] = helperName;
+  });
 }
 
 // Add a hidden ptr addrspace(1) (DTData) parameter to every pto.entry function
@@ -9144,6 +9208,21 @@ public:
                                          "failed to convert runtime-query result type");
 
     StringRef calleeName = buildRuntimeQueryCallee<QueryOp>(op.getContext());
+
+    // When pto.print/pto.tprint is used, addDTDataParamToEntryFunctions
+    // eagerly creates LLVM::LLVMFuncOp for CCE intrinsics BEFORE type
+    // conversion.  If such an LLVM func already exists we must emit an
+    // LLVM::CallOp directly; a func::CallOp would fail verification
+    // because the target symbol is not a func::FuncOp.
+    ModuleOp moduleOp = op->template getParentOfType<ModuleOp>();
+    if (auto llvmFunc =
+            moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeName)) {
+      auto call = rewriter.create<LLVM::CallOp>(op.getLoc(), llvmFunc,
+                                                 ValueRange{});
+      rewriter.replaceOp(op, call.getResults());
+      return success();
+    }
+
     auto funcType = rewriter.getFunctionType(TypeRange{}, TypeRange{resultType});
     auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
                                               TypeRange{resultType}, ValueRange{});
@@ -9196,6 +9275,322 @@ public:
     if (!func || func.getNumArguments() == 0)
       return op.emitError("pto.print must be inside a function");
     Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+
+    // ---- Constrained-region fast path (e.g. inside scf.if) ----
+    // The normal path below uses splitBlock to build a multi-block CFG, but
+    // scf.if regions are SizedRegion<1> and reject additional blocks.
+    // Instead we outline the protocol into a pre-created private helper
+    // function and emit a simple call.
+    Operation *parent = op->getParentOp();
+    if (isa<scf::IfOp>(parent)) {
+      auto it = state.constrainedPrintHelpers.find(fmt);
+      if (it != state.constrainedPrintHelpers.end()) {
+        auto moduleOp = op->getParentOfType<ModuleOp>();
+        auto helperFunc =
+            moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(it->second);
+        if (helperFunc) {
+          // Build the protocol logic into the helper body.  This uses the
+          // same splitBlock / new-block approach as the normal path but
+          // operates inside the helper's own (unconstrained) body region.
+          Block *helperEntry = &helperFunc.getBody().front();
+          if (helperEntry->getOperations().size() == 1 &&
+              isa<LLVM::ReturnOp>(&helperEntry->front())) {
+            // Body is still a stub — populate it now.
+            Block *helperDone =
+                helperEntry->splitBlock(helperEntry->begin());
+            // helperEntry: empty, helperDone: [llvm.return]
+
+            // Save original insertion point, switch to helper body.
+            Block *savedBlock = rewriter.getInsertionBlock();
+            Block::iterator savedPoint = rewriter.getInsertionPoint();
+            rewriter.setInsertionPointToEnd(helperEntry);
+
+            // DTData and scalar in the helper are its arguments.
+            Value hDtData = helperFunc.getArgument(0);
+            Value hScalar = helperFunc.getArgument(1);
+            Type hScalarType = hScalar.getType();
+            bool hIsFloat = isa<FloatType>(hScalarType);
+            int64_t hDataSize = hIsFloat ? 4 : 8;
+
+            // --- null checks ---
+            auto hNullPtr1 =
+                rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+            auto hDtOk = rewriter.create<LLVM::ICmpOp>(
+                loc, i1Type, LLVM::ICmpPredicate::ne, hDtData, hNullPtr1);
+            auto hLrAddr = rewriter.create<LLVM::GEPOp>(
+                loc, ptr1Type, i8Type, hDtData,
+                ValueRange{getI64Constant(rewriter, loc, 0)});
+            auto hLogRegion =
+                rewriter.create<LLVM::LoadOp>(loc, ptr1Type, hLrAddr);
+            auto hLrNull =
+                rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+            auto hLrOk = rewriter.create<LLVM::ICmpOp>(
+                loc, i1Type, LLVM::ICmpPredicate::ne,
+                hLogRegion.getResult(), hLrNull);
+            auto hBothOk = rewriter.create<LLVM::AndOp>(
+                loc, i1Type, hDtOk.getResult(), hLrOk.getResult());
+
+            auto *hWriteBlock = new Block();
+            helperEntry->getParent()->push_back(hWriteBlock);
+            rewriter.create<LLVM::CondBrOp>(
+                loc, hBothOk.getResult(), hWriteBlock, helperDone);
+
+            // --- protocol writes in hWriteBlock ---
+            rewriter.setInsertionPointToStart(hWriteBlock);
+
+            // LogBufferSize
+            auto hLbsAddr = rewriter.create<LLVM::GEPOp>(
+                loc, ptr1Type, i8Type, hDtData,
+                ValueRange{getI64Constant(rewriter, loc, 16)});
+            auto hLogBufSize =
+                rewriter.create<LLVM::LoadOp>(loc, i64Type, hLbsAddr);
+
+            // stride
+            auto hStride64 = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(64));
+            auto hStride = rewriter.create<LLVM::AddOp>(
+                loc, i64Type, hLogBufSize.getResult(),
+                hStride64.getResult());
+
+            // block offset
+            auto hBlkFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(
+                state.blockIdxFuncName);
+            if (!hBlkFunc) {
+              rewriter.create<LLVM::BrOp>(loc, ValueRange{}, helperDone);
+              rewriter.setInsertionPoint(savedBlock, savedPoint);
+              rewriter.create<LLVM::CallOp>(
+                  loc, TypeRange{}, helperFunc.getSymName(),
+                  ValueRange{dtDataArg, adaptor.getScalar()});
+              rewriter.eraseOp(op);
+              return success();
+            }
+            auto hBlkCall = rewriter.create<LLVM::CallOp>(
+                loc, i64Type, hBlkFunc.getSymName(), ValueRange{});
+            auto hBlockOff = rewriter.create<LLVM::MulOp>(
+                loc, i64Type, hBlkCall.getResult(), hStride.getResult());
+
+            auto hLogBufBase = rewriter.create<LLVM::GEPOp>(
+                loc, ptr1Type, i8Type, hLogRegion.getResult(),
+                ValueRange{hBlockOff.getResult()});
+            auto hPLogSize =
+                rewriter.create<LLVM::LoadOp>(loc, i64Type, hLogBufBase);
+
+            // format string parsing
+            StringRef hFmtStr = fmt;
+            size_t hPrefixLen = 0;
+            {
+              size_t pos = 0;
+              while (pos < hFmtStr.size()) {
+                if (hFmtStr[pos] == '%') {
+                  hPrefixLen = pos; pos++;
+                  while (pos < hFmtStr.size() &&
+                         (hFmtStr[pos] == '+' || hFmtStr[pos] == '-' ||
+                          hFmtStr[pos] == '0' || hFmtStr[pos] == '#' ||
+                          hFmtStr[pos] == ' ')) pos++;
+                  while (pos < hFmtStr.size() && hFmtStr[pos] >= '0' &&
+                         hFmtStr[pos] <= '9') pos++;
+                  if (pos < hFmtStr.size() && hFmtStr[pos] == '.') {
+                    pos++;
+                    while (pos < hFmtStr.size() && hFmtStr[pos] >= '0' &&
+                           hFmtStr[pos] <= '9') pos++;
+                  }
+                  if (pos < hFmtStr.size() &&
+                      (hFmtStr[pos] == 'l' || hFmtStr[pos] == 'h' ||
+                       hFmtStr[pos] == 'z')) pos++;
+                  if (pos < hFmtStr.size()) { pos++; hPrefixLen = pos; }
+                } else { pos++; }
+              }
+            }
+            int64_t hFmtPrefixLen =
+                static_cast<int64_t>(hPrefixLen) + 1;
+            int64_t hFmtSuffixLen =
+                static_cast<int64_t>(hFmtStr.size() - hPrefixLen) + 1;
+            int64_t hRecordSize =
+                1 + hDataSize + 2 + hFmtPrefixLen + 1 + 2 + hFmtSuffixLen +
+                1;
+
+            // overflow check
+            auto hRecSizeVal = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(hRecordSize));
+            auto hNewPls = rewriter.create<LLVM::AddOp>(
+                loc, i64Type, hPLogSize.getResult(),
+                hRecSizeVal.getResult());
+            auto hOverflow = rewriter.create<LLVM::ICmpOp>(
+                loc, i1Type, LLVM::ICmpPredicate::ugt,
+                hNewPls.getResult(), hLogBufSize.getResult());
+
+            auto *hOverflowBlock = new Block();
+            auto *hPayloadBlock = new Block();
+            helperEntry->getParent()->push_back(hOverflowBlock);
+            helperEntry->getParent()->push_back(hPayloadBlock);
+            rewriter.create<LLVM::CondBrOp>(loc, hOverflow.getResult(),
+                                             hOverflowBlock, hPayloadBlock);
+
+            // overflow: store newPls, br done
+            rewriter.setInsertionPointToStart(hOverflowBlock);
+            rewriter.create<LLVM::StoreOp>(loc, hNewPls.getResult(),
+                                            hLogBufBase);
+            rewriter.create<LLVM::BrOp>(loc, ValueRange{}, helperDone);
+
+            // --- payload: protocol bytes ---
+            rewriter.setInsertionPointToStart(hPayloadBlock);
+            auto hHdrOff = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(64));
+            auto hWriteOff = rewriter.create<LLVM::AddOp>(
+                loc, i64Type, hHdrOff.getResult(),
+                hPLogSize.getResult());
+            auto hWritePtr = rewriter.create<LLVM::GEPOp>(
+                loc, ptr1Type, i8Type, hLogBufBase.getResult(),
+                ValueRange{hWriteOff.getResult()});
+
+            auto hStoreI8 = [&](Value base, int64_t off, Value val) {
+              auto cOff = rewriter.create<LLVM::ConstantOp>(
+                  loc, i64Type, rewriter.getI64IntegerAttr(off));
+              auto ptr = rewriter.create<LLVM::GEPOp>(
+                  loc, ptr1Type, i8Type, base, ValueRange{cOff.getResult()});
+              rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+            };
+
+            // type marker
+            uint8_t hMarker = hIsFloat ? 2 : 3;
+            auto hMarkerVal = rewriter.create<LLVM::ConstantOp>(
+                loc, i8Type, rewriter.getI8IntegerAttr(hMarker));
+            hStoreI8(hWritePtr.getResult(), 0, hMarkerVal);
+
+            // data bytes (little-endian)
+            if (hIsFloat) {
+              auto hBits = rewriter.create<LLVM::BitcastOp>(loc, i32Type,
+                                                             hScalar);
+              for (int i = 0; i < 4; ++i) {
+                auto shift = rewriter.create<LLVM::ConstantOp>(
+                    loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
+                auto shifted = rewriter.create<LLVM::LShrOp>(
+                    loc, i32Type, hBits.getResult(), shift);
+                auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type,
+                                                            shifted);
+                hStoreI8(hWritePtr.getResult(), 1 + i, byte);
+              }
+            } else {
+              Value hIntVal = hScalar;
+              if (auto it2 = dyn_cast<IntegerType>(hScalarType)) {
+                if (it2.getWidth() < 64) {
+                  if (it2.isUnsigned())
+                    hIntVal = rewriter.create<LLVM::ZExtOp>(loc, i64Type,
+                                                             hScalar);
+                  else
+                    hIntVal = rewriter.create<LLVM::SExtOp>(loc, i64Type,
+                                                             hScalar);
+                }
+              }
+              for (int i = 0; i < 8; ++i) {
+                auto shift = rewriter.create<LLVM::ConstantOp>(
+                    loc, i64Type, rewriter.getI64IntegerAttr(i * 8));
+                auto shifted = rewriter.create<LLVM::LShrOp>(
+                    loc, i64Type, hIntVal, shift);
+                auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type,
+                                                            shifted);
+                hStoreI8(hWritePtr.getResult(), 1 + i, byte);
+              }
+            }
+
+            // format string length + copy
+            int64_t hFmtOff = 1 + hDataSize;
+            auto hFmtLenVal = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(hFmtPrefixLen));
+            auto hShift8 = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(8));
+            auto hFmtLenLow =
+                rewriter.create<LLVM::TruncOp>(loc, i8Type, hFmtLenVal);
+            auto hFmtLenShifted = rewriter.create<LLVM::LShrOp>(
+                loc, i64Type, hFmtLenVal.getResult(),
+                hShift8.getResult());
+            auto hFmtLenHigh = rewriter.create<LLVM::TruncOp>(
+                loc, i8Type, hFmtLenShifted);
+            hStoreI8(hWritePtr.getResult(), hFmtOff, hFmtLenLow);
+            hStoreI8(hWritePtr.getResult(), hFmtOff + 1, hFmtLenHigh);
+
+            auto hFmtGlobal = rewriter.create<LLVM::AddressOfOp>(
+                loc, ptr0Type, globalName);
+            for (int64_t i = 0; i < hFmtPrefixLen; ++i) {
+              auto chOff = rewriter.create<LLVM::ConstantOp>(
+                  loc, i64Type, rewriter.getI64IntegerAttr(i));
+              auto chPtr = rewriter.create<LLVM::GEPOp>(
+                  loc, ptr0Type, i8Type, hFmtGlobal.getResult(),
+                  ValueRange{chOff.getResult()});
+              auto ch =
+                  rewriter.create<LLVM::LoadOp>(loc, i8Type, chPtr);
+              hStoreI8(hWritePtr.getResult(), hFmtOff + 2 + i, ch);
+            }
+
+            // NORMAL=1 section
+            int64_t hNormalOff = hFmtOff + 2 + hFmtPrefixLen;
+            auto hNormalMarker = rewriter.create<LLVM::ConstantOp>(
+                loc, i8Type, rewriter.getI8IntegerAttr(1));
+            hStoreI8(hWritePtr.getResult(), hNormalOff, hNormalMarker);
+            auto hRemLenVal = rewriter.create<LLVM::ConstantOp>(
+                loc, i64Type, rewriter.getI64IntegerAttr(hFmtSuffixLen));
+            auto hRemLenLow =
+                rewriter.create<LLVM::TruncOp>(loc, i8Type, hRemLenVal);
+            auto hRemLenShifted = rewriter.create<LLVM::LShrOp>(
+                loc, i64Type, hRemLenVal.getResult(),
+                hShift8.getResult());
+            auto hRemLenHigh =
+                rewriter.create<LLVM::TruncOp>(loc, i8Type, hRemLenShifted);
+            hStoreI8(hWritePtr.getResult(), hNormalOff + 1, hRemLenLow);
+            hStoreI8(hWritePtr.getResult(), hNormalOff + 2, hRemLenHigh);
+
+            for (int64_t i = 0; i < hFmtSuffixLen; ++i) {
+              auto chOff = rewriter.create<LLVM::ConstantOp>(
+                  loc, i64Type,
+                  rewriter.getI64IntegerAttr(hPrefixLen + i));
+              auto chPtr = rewriter.create<LLVM::GEPOp>(
+                  loc, ptr0Type, i8Type, hFmtGlobal.getResult(),
+                  ValueRange{chOff.getResult()});
+              auto ch =
+                  rewriter.create<LLVM::LoadOp>(loc, i8Type, chPtr);
+              hStoreI8(hWritePtr.getResult(), hNormalOff + 3 + i, ch);
+            }
+
+            // END=0 marker
+            int64_t hEndOff = hNormalOff + 3 + hFmtSuffixLen;
+            auto hEndMarker = rewriter.create<LLVM::ConstantOp>(
+                loc, i8Type, rewriter.getI8IntegerAttr(0));
+            hStoreI8(hWritePtr.getResult(), hEndOff, hEndMarker);
+
+            // update pLogSize
+            rewriter.create<LLVM::StoreOp>(loc, hNewPls.getResult(),
+                                            hLogBufBase);
+
+            // DCCI flush
+            auto hDcciFunc =
+                moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+            if (hDcciFunc) {
+              auto hFlushNull =
+                  rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+              auto hFlushOne = rewriter.create<LLVM::ConstantOp>(
+                  loc, i64Type, rewriter.getI64IntegerAttr(1));
+              rewriter.create<LLVM::CallOp>(
+                  loc, TypeRange{}, hDcciFunc.getSymName(),
+                  ValueRange{hFlushNull.getResult(), hFlushOne.getResult()});
+            }
+            rewriter.create<LLVM::BrOp>(loc, ValueRange{}, helperDone);
+
+            // Restore original insertion point.
+            rewriter.setInsertionPoint(savedBlock, savedPoint);
+          }
+
+          // Emit the call to the helper from inside the if-region.
+          rewriter.create<LLVM::CallOp>(
+              loc, TypeRange{}, helperFunc.getSymName(),
+              ValueRange{dtDataArg, adaptor.getScalar()});
+          rewriter.eraseOp(op);
+          return success();
+        }
+      }
+      // If we somehow get here (no helper), fall through to the error case.
+      return op.emitError(
+          "pto.print inside scf.if without a pre-created helper function");
+    }
 
     // ---- Split: current block → remainder after this pattern ----
     Block *origBlock = rewriter.getInsertionBlock();
@@ -11183,6 +11578,7 @@ static LogicalResult lowerVPTOOps(ModuleOp module, llvm::raw_ostream &diagOS) {
   configureVPTOOpLoweringTarget(target, typeConverter);
   populateVPTOOpLoweringPatterns(typeConverter, patterns, state);
   collectAndCreatePrintfStringGlobals(module, state);
+  createConstrainedPrintHelpers(module, state);
 
   // If the module uses print ops, add the DTData hidden parameter to every
   // entry function BEFORE type conversion.

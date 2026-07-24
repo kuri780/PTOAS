@@ -259,6 +259,14 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
                                     llvm::StringRef stderrPath,
                                     bool usesPrint,
                                     llvm::raw_ostream &diagOS);
+static bool compileHostStubToObjectDriverMode(llvm::StringRef stubPath,
+                                              llvm::StringRef outObjPath,
+                                              llvm::StringRef moduleId,
+                                              llvm::StringRef targetCPU,
+                                              const mlir::pto::CANNToolchain &toolchain,
+                                              llvm::StringRef deviceObjPath,
+                                              llvm::StringRef stderrPath,
+                                              llvm::raw_ostream &diagOS);
 static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef outObjPath,
                                llvm::StringRef ldLldPath,
@@ -551,6 +559,17 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
                                     llvm::StringRef stderrPath,
                                     bool usesPrint,
                                     llvm::raw_ostream &diagOS) {
+  // When the module uses pto.print / pto.tprint, use the bisheng driver mode
+  // (-xcce) instead of CC1 mode.  DebugTunnel host-side headers pull in C++
+  // standard library headers (<string>, etc.) that CC1 mode cannot resolve
+  // (adding -internal-isystem for libstdc++ causes bisheng crashes).  The
+  // driver mode auto-manages system include paths and handles these
+  // dependencies correctly.
+  if (usesPrint)
+    return compileHostStubToObjectDriverMode(stubPath, outObjPath, moduleId,
+                                              targetCPU, toolchain, deviceObjPath,
+                                              stderrPath, diagOS);
+
   std::string coverageDir = ".";
   std::string debugDir = ".";
   std::string hostTriple = llvm::sys::getProcessTriple();
@@ -637,48 +656,76 @@ static bool compileHostStubToObject(llvm::StringRef stubPath,
       "-faddrsig",
       "-D__GCC_HAVE_DWARF2_CFI_ASM=1"};
 
-  // When the module uses pto.print / pto.tprint, inject the CCE print flag so
-  // the host stub compiler generates DebugTunnel Open/Close wrapper code.
-  // Also add CANN runtime include paths needed by the print infrastructure.
-  if (usesPrint) {
-    args.push_back("-fcce-enable-print");
-    args.push_back("-D__CCE_ENABLE_PRINT_FOUND_CANN__");
-    std::string ascendHome;
-    if (const char *env = ::getenv("ASCEND_HOME_PATH"))
-      ascendHome = env;
-    else if (const char *env2 = ::getenv("ASCEND_HOME"))
-      ascendHome = env2;
-    if (!ascendHome.empty()) {
-      args.push_back("-I");
-      args.push_back(ascendHome + "/include");
-      args.push_back("-I");
-      args.push_back(ascendHome + "/include/experiment");
-      args.push_back("-I");
-      args.push_back(ascendHome + "/pkg_inc/");
-      args.push_back("-I");
-      args.push_back(ascendHome + "/pkg_inc/runtime/runtime/");
-      args.push_back("-I");
-      args.push_back(ascendHome + "/pkg_inc/profiling/");
-      // The CANN Host-side runtime headers (pulled in by the DebugTunnel
-      // print infrastructure) use C standard library headers (<stdlib.h>).
-      // CC1 mode does not auto-add the C library paths, so add them here.
-      args.push_back("-internal-externc-isystem");
-      args.push_back("/usr/include/x86_64-linux-gnu");
-      args.push_back("-internal-externc-isystem");
-      args.push_back("/usr/include");
-      // NOTE: DebugTunnel headers also pull in C++ standard library
-      // headers (<string>, etc.).  Adding -internal-isystem for libstdc++
-      // causes bisheng crashes in CC1 mode, so host-stub compilation for
-      // print kernels currently requires the bisheng -xcce driver mode (see
-      // test/vpto/scripts/run_vpto_print_validation.sh for the working flow).
-      // TODO: switch compileHostStubToObject to driver mode when usesPrint.
-    }
-  }
-
   args.insert(args.end(), {"-o", outObjPath.str(), "-x", "cce",
                            stubPath.str()});
   return runCommandWithStderr(toolchain.bishengCc1Path, args, stderrPath, diagOS,
                               "host stub compilation");
+}
+
+// Compile a host stub in bisheng driver mode (-xcce).  This is used when the
+// module contains pto.print / pto.tprint ops and the host stub needs the
+// DebugTunnel print infrastructure, which pulls in C++ standard library
+// headers that CC1 mode cannot handle.
+static bool compileHostStubToObjectDriverMode(
+    llvm::StringRef stubPath, llvm::StringRef outObjPath,
+    llvm::StringRef moduleId, llvm::StringRef targetCPU,
+    const mlir::pto::CANNToolchain &toolchain,
+    llvm::StringRef deviceObjPath, llvm::StringRef stderrPath,
+    llvm::raw_ostream &diagOS) {
+  llvm::SmallVector<std::string, 32> args = {
+      toolchain.bishengPath,
+      "-xcce",
+      "--cce-enable-print",
+      "-cce-enable-mix",
+      "-cce-launch-with-flagv2-impl",
+      std::string("--cce-aicore-arch=") + targetCPU.str(),
+      "-DREGISTER_BASE",
+      "-D__CCE_ENABLE_PRINT_FOUND_CANN__",
+      "-std=c++17",
+      "-fPIC",
+      "-O2",
+      "-Wno-macro-redefined",
+      "-Wno-ignored-attributes",
+  };
+
+  // CANN runtime include paths needed by the DebugTunnel print
+  // infrastructure (host-side headers for print buffer management).
+  std::string ascendHome;
+  if (const char *env = ::getenv("ASCEND_HOME_PATH"))
+    ascendHome = env;
+  else if (const char *env2 = ::getenv("ASCEND_HOME"))
+    ascendHome = env2;
+  if (!ascendHome.empty()) {
+    args.push_back("-I");
+    args.push_back(ascendHome + "/include");
+    args.push_back("-I");
+    args.push_back(ascendHome + "/include/experiment");
+    args.push_back("-I");
+    args.push_back(ascendHome + "/pkg_inc/");
+    args.push_back("-I");
+    args.push_back(ascendHome + "/pkg_inc/runtime/runtime/");
+    args.push_back("-I");
+    args.push_back(ascendHome + "/pkg_inc/profiling/");
+  }
+
+  // Route device-object embedding and module-id through -Xclang so the
+  // driver forwards them to the CC1 frontend.
+  args.push_back("-Xclang");
+  args.push_back("-fcce-include-aibinary");
+  args.push_back("-Xclang");
+  args.push_back(deviceObjPath.str());
+  args.push_back("-Xclang");
+  args.push_back("-fcce-device-module-id");
+  args.push_back("-Xclang");
+  args.push_back(moduleId.str());
+
+  args.push_back("-c");
+  args.push_back(stubPath.str());
+  args.push_back("-o");
+  args.push_back(outObjPath.str());
+
+  return runCommandWithStderr(toolchain.bishengPath, args, stderrPath, diagOS,
+                              "host stub compilation (driver mode)");
 }
 
 static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
