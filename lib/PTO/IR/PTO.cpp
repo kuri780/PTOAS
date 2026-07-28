@@ -12851,10 +12851,11 @@ mlir::LogicalResult mlir::pto::PrintOp::verify() {
              << "; supported: f16, bf16, f32, f64";
   } else if (auto it = dyn_cast<IntegerType>(scalarType)) {
     unsigned w = it.getWidth();
-    if (w != 8 && w != 16 && w != 32 && w != 64)
+    // TODO: re-enable i64 once DebugTunnel protocol transmits full 64-bit values.
+    if (w != 8 && w != 16 && w != 32)
       return emitOpError()
              << "unsupported integer width for print: " << w
-             << "; supported: i8, i16, i32, i64";
+             << "; supported: i8, i16, i32";
   } else {
     return emitOpError() << "expected numeric scalar type, got " << scalarType;
   }
