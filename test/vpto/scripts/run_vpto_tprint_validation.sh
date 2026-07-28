@@ -157,24 +157,49 @@ fi
 # ------------------------------------------------------------------
 log "[${CASE_TOKEN}] step 5/5: build host runner + run simulator"
 
-# Compile the launch.cpp from the case directory (user-provided host launcher)
+# Generate host runner with ACL init (required by simulator for device
+# setup and DebugTunnel print buffer allocation).
 HOST_RUNNER="${OUT_DIR}/print_runner.cpp"
-cp "${CASE_DIR}/main.cpp" "${HOST_RUNNER}"
+cat > "${HOST_RUNNER}" << RUNNEREOF
+#include <cstdio>
+#include "acl/acl.h"
 
-g++ -std=c++17 -O2 \
-  "${HOST_RUNNER}" \
-  -I "${ASCEND_HOME_PATH}/include" \
-  -L "${OUT_DIR}" \
-  -L "${ASCEND_HOME_PATH}/lib64" \
-  -L "${SIM_LIB_DIR}" \
-  -Wl,-rpath,"${OUT_DIR}" \
-  -Wl,-rpath,"${SIM_LIB_DIR}" \
-  -Wl,-rpath,"${ASCEND_HOME_PATH}/lib64" \
-  -Wl,--allow-shlib-undefined \
-  -o "${OUT_DIR}/${CASE_TOKEN}_runner" \
-  -l"${CASE_TOKEN}_kernel" \
-  -lruntime_camodel -lascendcl -lstdc++ -lm -lpthread -ldl
+extern "C" void ${LAUNCH_FN}(void *stream);
 
+int main() {
+  aclError ret = aclInit(nullptr);
+  if (ret != ACL_SUCCESS) { std::fprintf(stderr, "aclInit failed: %d\n", ret); return 1; }
+  ret = aclrtSetDevice(0);
+  if (ret != ACL_SUCCESS) { std::fprintf(stderr, "aclrtSetDevice failed: %d\n", ret); aclFinalize(); return 1; }
+  aclrtStream stream = nullptr;
+  ret = aclrtCreateStream(&stream);
+  if (ret != ACL_SUCCESS) { std::fprintf(stderr, "aclrtCreateStream failed: %d\n", ret); aclrtResetDevice(0); aclFinalize(); return 1; }
+
+  std::printf("[Host] Launching --kernel-name=%s\n", "${KERNEL_NAME}");
+  ${LAUNCH_FN}(stream);
+  aclrtSynchronizeStream(stream);
+  std::printf("[Host] Done.\n");
+
+  aclrtDestroyStream(stream);
+  aclrtResetDevice(0);
+  aclFinalize();
+  return 0;
+}
+RUNNEREOF
+
+	g++ -std=c++17 -O2 \
+	  "${HOST_RUNNER}" \
+	  -I "${ASCEND_HOME_PATH}/include" \
+	  -L "${OUT_DIR}" \
+	  -L "${ASCEND_HOME_PATH}/lib64" \
+	  -L "${SIM_LIB_DIR}" \
+	  -Wl,-rpath,"${OUT_DIR}" \
+	  -Wl,-rpath,"${SIM_LIB_DIR}" \
+	  -Wl,-rpath,"${ASCEND_HOME_PATH}/lib64" \
+	  -Wl,--allow-shlib-undefined \
+	  -o "${OUT_DIR}/${CASE_TOKEN}_runner" \
+	  -l"${CASE_TOKEN}_kernel" \
+	  -lruntime_camodel -lascendcl -lstdc++ -lm -lpthread -ldl
 # Run on simulator
 mkdir -p "${OUT_DIR}" && chmod 700 "${OUT_DIR}"
 SIM_OUT_DIR="${OUT_DIR}/sim_output"
