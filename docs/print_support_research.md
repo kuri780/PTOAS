@@ -4,13 +4,15 @@
 
 `feature/print-support-research`
 
+> **状态更新 (ed13c920)**：本文档最初编写时 VPTO 路径尚不支持 print。截至分支 HEAD (`ed13c920`)，`pto.print` 和 `pto.tprint` 均已通过**编译期内联 DebugTunnel 协议**在 VPTO 后端完整实现。下文保留原始研究分析，实际实现方案与最初提案有差异（见[第 6 节](#6-实际实现与原始提案的差异)）。
+
 ## 概述
 
 PTOAS 有两个 IR 级别的 print 操作：
-- `pto.print` — 打印标量（带格式字符串），降级为 `cce::printf("fmt", scalar)`
-- `pto.tprint` — 打印整个 Tile/GlobalTensor，降级为 `TPRINT(src)` 宏
+- `pto.print` — 打印标量（带格式字符串），在 VPTO 路径降级为内联 DebugTunnel 协议写入
+- `pto.tprint` — 打印整个 Tile/GlobalTensor，在 VPTO 路径降级为嵌套 `scf.for` 逐元素 DebugTunnel 协议写入
 
-两个后端路径对 print 的支持情况不同。
+两个后端路径均完整支持 print。
 
 ---
 
@@ -93,7 +95,7 @@ cce_print_define_opt = "    -DPTOAS_ENABLE_CCE_PRINT=1" if needs_cce_print else 
 
 ---
 
-## 2. VPTO 路径：为什么 `pto.print` 不支持（❌ 缺少降级）
+## 2. VPTO 路径：为什么 `pto.print` 原本不支持（✅ 已解决）
 
 ### VPTO 后端流水线
 
@@ -265,11 +267,17 @@ target.addIllegalOp<pto::PrintOp, pto::TPrintOp>();
 patterns.add<LowerPrintOpPattern>(typeConverter, patterns.getContext(), state);
 ```
 
-#### 3.3 `TPrintOp` 的额外复杂度
+#### 3.3 `TPrintOp` 的额外复杂度（✅ 已实现）
 
 `pto.tprint` 打印整个 Tile，在 EmitC 路径降级为 `TPRINT(src)`（宏展开为遍历 tile 元素调用 `cce::printf` 的循环）。
 
-在 VPTO/LLVM IR 路径中，`TPRINT` 宏不可用，需要**在 MLIR 层生成元素遍历循环 + 逐元素 `cce::printf` 调用**，或者调用一个运行时 helper。这部分工作量大，建议先实现 `PrintOp`，`TPrintOp` 后续再做。
+在 VPTO/LLVM IR 路径中，实际实现方案（`ed13c920`）采用了**编译期内联 DebugTunnel 协议**而非调用运行时 helper：
+- 生成嵌套 `scf.for` 循环遍历 tile 行列
+- 通过 `GET.SYS.VA.BASE` 计算 UB 虚拟地址，逐元素加载
+- 每个元素直接写入 FLOAT/INT marker + 数据 bytes + 格式串 + END marker
+- 末尾单次 DCCI flush
+
+详见 `docs/pto_print_lowering_design.md` 和 `docs/pto_print_implementation_comparison.md`。
 
 #### 3.4 涉及的文件清单
 
@@ -296,8 +304,11 @@ patterns.add<LowerPrintOpPattern>(typeConverter, patterns.getContext(), state);
 ### VPTO 路径验证结果
 
 ```
-❌ pto.print 直接报错: missing LLVMTranslationDialectInterface registration
-   需要实现上述方案 A 或 B
+✅ pto.print  → 编译期内联 DebugTunnel 协议，生成 store 指令序列
+✅ pto.tprint → 嵌套 scf.for 逐元素 DebugTunnel 协议写入
+✅ Lit 测试通过: test/lit/vpto/tprint_vec_vpto_llvm.pto
+✅ Kernel 级测试: 8 个端到端测试用例 (print-*)
+✅ 模拟器验证脚本: test/vpto/scripts/run_vpto_tprint_validation.sh
 ```
 
 ---
@@ -308,3 +319,27 @@ patterns.add<LowerPrintOpPattern>(typeConverter, patterns.getContext(), state);
 > On A2/A3/A5 devices, `TPRINT` uses `cce::printf` to emit output via the
 > device-to-host debug channel. **You must enable the CCE option
 > `-D_DEBUG --cce-enable-print`**.
+
+---
+
+## 6. 实际实现与原始提案的差异
+
+本文档第 3 节的原始提案建议通过 `cce::printf` 外部函数调用实现 VPTO print。实际实现（`ed13c920` 及前置提交）采用了完全不同的路线：
+
+### 路线差异
+
+| 维度 | 原始提案 | 实际实现 |
+|------|---------|----------|
+| **核心策略** | 声明 `cce::printf` 外部函数 + `func::CallOp` | 编译期内联 DebugTunnel 协议为 `store` 指令序列 |
+| **运行时依赖** | 依赖 `cce::printf` 函数（需 bisheng 链接） | 零外部依赖，只依赖 CCE intrinsic（fix stack、DCCI、GET.BLOCK.IDX、GET.SYS.VA.BASE） |
+| **格式串处理** | 运行时通过 `cce::printf` 解析 | 编译期在 `LowerPrintOpPattern` 中一次性解析，直接产生常量偏移 |
+| **TPrintOp** | 提案认为"工作量大，建议后续再做" | 已完整实现：嵌套 `scf.for` 遍历 tile 行列 + 逐元素 DebugTunnel 写入 |
+| **DTData 注入** | 未详细设计 | `addDTDataParamToEntryFunctions` 手动追加隐藏参数 + `injectPrintPrologue` 内联初始化 |
+| **二进制体积** | 较小（函数调用复用） | 较大（全展开）但无需外部符号 |
+
+### 为什么选择了编译期内联方案
+
+1. **消除外部依赖**：不依赖 `cce::printf` 符号，避免 C++ name mangling 和 bisheng 版本兼容问题
+2. **编译期确定一切**：所有偏移、长度、类型标记在 MLIR lowering 阶段就是常量，无需运行时计算
+3. **与 EmitC 路径等效**：生成的 LLVM IR 就是 CCE 前端编译 `cce::printf` 后的形态——只是我们跳过了 C++ 模板展开这一步
+4. **TPrintOp 自然扩展**：内联方案对 TPrintOp 同样适用，只需在 store 序列外包裹 `scf.for` 循环
