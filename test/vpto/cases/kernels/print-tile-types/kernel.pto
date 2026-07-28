@@ -12,9 +12,9 @@
 // target_ops: pto.tprint, pto.alloc_tile
 // scenarios: print-tile-f16, print-tile-i32, tprint-type-coverage
 //
-// Verifies that pto.tprint correctly lowers f16 tiles (bitcast i16 →
-// zext i32) and i32 tiles (sext i32 → i64) through the DebugTunnel
-// tile data dump protocol.
+// Verifies that pto.tprint correctly lowers f16 tiles (fpext f16 →
+// f32 → bitcast i32) and i32 tiles (sext i32 → i64) through the
+// DebugTunnel tile data dump protocol.
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @print_tile_types_kernel() attributes {pto.entry} {

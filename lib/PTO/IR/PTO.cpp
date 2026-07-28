@@ -12900,6 +12900,9 @@ mlir::LogicalResult mlir::pto::TPrintOp::verify() {
     return success();
   if (auto tb = mlir::dyn_cast<mlir::pto::TileBufType>(srcType)) {
     auto elem = tb.getElementType();
+    // NOTE: bf16 is intentionally excluded for now — the lowering code
+    // can handle it (fpext → f32), but BF16 tile TPrint semantics need
+    // hardware validation before enabling.
     if (!(elem.isF16() || elem.isF32() ||
           elem.isInteger(8) || elem.isInteger(16) || elem.isInteger(32)))
       return emitOpError() << "expects printable tile element type";
