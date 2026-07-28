@@ -253,9 +253,6 @@ fi
 #   Format "f64=%f\n" + constant 2.718281828 → expect "f64=2.718282"
 #   Format "i32=%d\n" + constant -42        → expect "i32=-42"
 #   Format "i64=%d\n" + constant 1234567890123 → expect "i64=1234567890123"
-#
-# Float values are checked with a tolerant regex to accommodate
-# minor CCE printf formatting differences.
 
 declare -A EXPECTED_PATTERNS
 EXPECTED_PATTERNS=(

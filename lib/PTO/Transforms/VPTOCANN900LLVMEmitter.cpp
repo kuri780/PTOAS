@@ -10,6 +10,7 @@
 #pragma GCC diagnostic ignored "-Woverloaded-virtual"
 
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
+#include "PTO/Transforms/PrintEncoding.h"
 
 #include "PTO/IR/PTO.h"
 #include "PTO/IR/PTOTypeUtils.h"
@@ -9280,7 +9281,6 @@ public:
     auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
-    auto f32Type = rewriter.getF32Type();
 
     // Look up format-string global.
     StringRef fmt = op.getFormat();
@@ -9345,11 +9345,16 @@ public:
       return success();
     }
 
-    // ---- Outer scf.if: null check (no else → skip on null) ----
+    // ---- Outer scf.if: DTData != null guard ----
     auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
     auto dtNotNull = rewriter.create<LLVM::ICmpOp>(
         loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
 
+    auto outerIf = rewriter.create<scf::IfOp>(loc, dtNotNull.getResult(),
+                                               /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&outerIf.getThenRegion().front());
+
+    // ---- Inner scf.if: logRegion != null guard (safe to deref now) ----
     auto lrAddr = rewriter.create<LLVM::GEPOp>(
         loc, ptr1Type, i8Type, dtDataArg,
         ValueRange{getI64Constant(rewriter, loc, 0)});
@@ -9358,15 +9363,11 @@ public:
     auto lrNotNull = rewriter.create<LLVM::ICmpOp>(
         loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
 
-    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type,
-                                                dtNotNull.getResult(),
-                                                lrNotNull.getResult());
+    auto innerIf = rewriter.create<scf::IfOp>(loc, lrNotNull.getResult(),
+                                               /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&innerIf.getThenRegion().front());
 
-    auto nullCheckIf = rewriter.create<scf::IfOp>(loc, bothOk.getResult(),
-                                                   /*withElseRegion=*/false);
-    rewriter.setInsertionPointToStart(&nullCheckIf.getThenRegion().front());
-
-    // --- Null check then: DTData and LogRegion are valid ---
+    // --- DTData and LogRegion are valid ---
 
     // Load LogBufferSize, compute per-block stride and buffer base.
     auto lbsAddr = rewriter.create<LLVM::GEPOp>(
@@ -9433,56 +9434,23 @@ public:
         rewriter.create<LLVM::StoreOp>(loc, val, ptr);
       };
 
-      // [0] Type marker: FLOAT=2 or INT=3
-      uint8_t typeMarker = isFloat ? 2 : 3;
+      // [0] Type marker and [1..N] data bytes — use the shared scalar
+      // encoding helper for type-agnostic DebugTunnel protocol conversion.
+      auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar);
+      if (failed(enc)) return failure();
+
       auto markerVal = rewriter.create<LLVM::ConstantOp>(
-          loc, i8Type, rewriter.getI8IntegerAttr(typeMarker));
+          loc, i8Type, rewriter.getI8IntegerAttr(enc->marker));
       storeI8(writePtr.getResult(), 0, markerVal);
 
-      // [1..N] Data bytes (little-endian)
-      // All float types write 4 bytes with DT_FLOAT=2 marker for protocol
-      // compatibility.  Narrow types (f16/bf16) are widened; wide types
-      // (f64) are truncated.
-      if (isFloat) {
-        Value i32Bits;
-        if (auto ft = dyn_cast<FloatType>(scalarType)) {
-          if (ft.isF16() || ft.isBF16()) {
-            auto f32val = rewriter.create<LLVM::FPExtOp>(loc, f32Type, scalar);
-            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
-          } else if (ft.isF32()) {
-            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
-          } else {
-            // f64 or other width: truncate to f32 first
-            auto f32val = rewriter.create<LLVM::FPTruncOp>(loc, f32Type, scalar);
-            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
-          }
-        }
-        for (int i = 0; i < 4; ++i) {
-          auto shift = rewriter.create<LLVM::ConstantOp>(
-              loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
-          auto shifted = rewriter.create<LLVM::LShrOp>(loc, i32Type,
-                                                        i32Bits, shift);
-          auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
-          storeI8(writePtr.getResult(), 1 + i, byte);
-        }
-      } else {
-        Value intVal = scalar;
-        if (auto it = dyn_cast<IntegerType>(scalar.getType())) {
-          if (it.getWidth() < 64) {
-            if (it.isUnsigned())
-              intVal = rewriter.create<LLVM::ZExtOp>(loc, i64Type, scalar);
-            else
-              intVal = rewriter.create<LLVM::SExtOp>(loc, i64Type, scalar);
-          }
-        }
-        for (int i = 0; i < 8; ++i) {
-          auto shift = rewriter.create<LLVM::ConstantOp>(
-              loc, i64Type, rewriter.getI64IntegerAttr(i * 8));
-          auto shifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, intVal,
-                                                        shift);
-          auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
-          storeI8(writePtr.getResult(), 1 + i, byte);
-        }
+      Type shiftType = (enc->byteWidth == 4) ? i32Type : i64Type;
+      for (unsigned i = 0; i < enc->byteWidth; ++i) {
+        auto shift = rewriter.create<LLVM::ConstantOp>(
+            loc, shiftType, rewriter.getIntegerAttr(shiftType, i * 8));
+        auto shifted = rewriter.create<LLVM::LShrOp>(loc, shiftType,
+                                                      enc->bits, shift);
+        auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+        storeI8(writePtr.getResult(), 1 + i, byte);
       }
 
       // Format string length (i16 LE)
@@ -9602,7 +9570,6 @@ public:
     auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
-    auto f32Type = rewriter.getF32Type();
 
     auto srcType = dyn_cast<pto::TileBufType>(op.getSrc().getType());
     if (!srcType) return op.emitError("pto.tprint: source must be a tile_buf");
@@ -9628,15 +9595,19 @@ public:
 
     auto valFmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type, valFmtName);
 
+    // ---- Outer scf.if: DTData != null guard ----
     auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
     auto dtNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+    auto outerIf = rewriter.create<scf::IfOp>(loc, dtNotNull.getResult(), /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&outerIf.getThenRegion().front());
+
+    // ---- Inner scf.if: logRegion != null guard (safe to deref now) ----
     auto lrAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 0)});
     auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
     auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
     auto lrNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
-    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type, dtNotNull.getResult(), lrNotNull.getResult());
-    auto nullCheckIf = rewriter.create<scf::IfOp>(loc, bothOk.getResult(), /*withElseRegion=*/false);
-    rewriter.setInsertionPointToStart(&nullCheckIf.getThenRegion().front());
+    auto innerIf = rewriter.create<scf::IfOp>(loc, lrNotNull.getResult(), /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&innerIf.getThenRegion().front());
 
     auto lbsAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 16)});
     auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
@@ -9704,39 +9675,21 @@ public:
           auto virtElemOff = rewriter.create<LLVM::AddOp>(loc, i64Type, ubBaseElemOffset, elemIdx);
           auto elemPtr = rewriter.create<LLVM::GEPOp>(loc, ptr6Type, elemType, tileDataBase, ValueRange{virtElemOff.getResult()});
           Value elemVal = rewriter.create<LLVM::LoadOp>(loc, elemType, elemPtr);
-          auto markerConst = rewriter.create<LLVM::ConstantOp>(loc, i8Type, rewriter.getI8IntegerAttr(isFloat ? 2 : 3));
+          auto enc = encodePrintScalar(rewriter, loc, elemType, elemVal);
+          if (failed(enc)) return failure();
+          auto markerConst = rewriter.create<LLVM::ConstantOp>(
+              loc, i8Type, rewriter.getI8IntegerAttr(enc->marker));
           storeByteAt(logBufBase, writeOffCol, markerConst.getResult());
-          if (isFloat) {
-            Value bits;
-            if (elemType.isF16() || elemType.isBF16()) {
-              auto f32Val = rewriter.create<LLVM::FPExtOp>(loc, f32Type, elemVal);
-              bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32Val);
-            } else if (elemType.isF32()) {
-              auto f32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, elemVal);
-              bits = f32Bits.getResult();
-            } else {
-              // f64 or other: truncate to f32 for protocol compatibility
-              auto f32Val = rewriter.create<LLVM::FPTruncOp>(loc, f32Type, elemVal);
-              bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32Val);
-            }
-            for (int i = 0; i < 4; ++i) {
-              auto shift = rewriter.create<LLVM::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
-              auto shifted = rewriter.create<LLVM::LShrOp>(loc, i32Type, bits, shift);
-              auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
-              auto off = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
-              storeByteAt(logBufBase, off.getResult(), byte);
-            }
-          } else {
-            Value intVal = elemVal;
-            if (auto intTy = dyn_cast<IntegerType>(elemType); intTy && intTy.getWidth() < 64)
-              intVal = rewriter.create<LLVM::SExtOp>(loc, i64Type, elemVal);
-            for (int i = 0; i < 8; ++i) {
-              auto shift = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(i * 8));
-              auto shifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, intVal, shift);
-              auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
-              auto off = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
-              storeByteAt(logBufBase, off.getResult(), byte);
-            }
+          Type shiftType = (enc->byteWidth == 4) ? i32Type : i64Type;
+          for (unsigned i = 0; i < enc->byteWidth; ++i) {
+            auto shift = rewriter.create<LLVM::ConstantOp>(
+                loc, shiftType, rewriter.getIntegerAttr(shiftType, i * 8));
+            auto shifted = rewriter.create<LLVM::LShrOp>(loc, shiftType,
+                                                          enc->bits, shift);
+            auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+            auto off = rewriter.create<LLVM::AddOp>(
+                loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
+            storeByteAt(logBufBase, off.getResult(), byte);
           }
           int64_t fmtOff = 1 + dataSize;
           auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen - 1));
