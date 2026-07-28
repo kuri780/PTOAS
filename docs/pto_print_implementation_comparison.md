@@ -679,47 +679,43 @@ VPTO 路径在编译期做的事情：
 
 ### 4.2 编译管线分步解析
 
-整个 VPTO print lowering 分 6 步，在 `lowerVPTOOps()` 中完成：
+整个 VPTO print lowering 分 5 步，在 `lowerVPTOOps()` 中完成：
 
 ```
-Step 1: preLowering()           ← 预扫描 + 预声明
-Step 2: addDTDataParamToEntryFunctions  ← 追加 DTData 参数
-Step 3: applyPartialConversion  ← 所有 pattern（包括 print）同时运行
-Step 4: injectPrintPrologue     ← 注入 fix stack 初始化
-Step5: materializeDecls         ← 补全延迟声明
+Step 1: collectAndCreatePrintfStringGlobals  ← 预扫描格式串，预创建 global
+Step 2: addDTDataParamToEntryFunctions      ← 声明 intrinsics + 追加 DTData 参数
+Step 3: applyPartialConversion              ← 所有 pattern（包括 print）同时运行
+Step 4: injectPrintPrologue                 ← 注入 fix stack 初始化 + kernelWriteType
+Step 5: materializeDecls                    ← 补全延迟声明
 ```
 
-代码位置：`lib/PTO/Transforms/VPTOCANN900LLVMEmitter.cpp`
+代码位置：`lib/PTO/Transforms/VPTOLLVMEmitter.cpp` / `VPTOCANN900LLVMEmitter.cpp`
 
-#### Step 1: preLowering — 预扫描
+#### Step 1: collectAndCreatePrintfStringGlobals — 预扫描
 
 ```cpp
-static LogicalResult preLowering(ModuleOp &module, LoweringState &state) {
-  // 1.1 扫描所有 pto.print / pto.tprint 的格式串
-  module.walk([&](pto::PrintOp op) {
+static void collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
+  // 1.1 扫描所有 pto.print 的格式串 → 去重创建 LLVM::GlobalOp
+  module.walk([&](pto::PrintOp printOp) {
+    StringRef fmt = printOp.getFormat();
+    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+    state.stringGlobals.push_back({fmt.str(), globalName});
     state.usesPrint = true;
-    std::string fmt = op.getFormat().str();
-    // 去重创建 LLVM::GlobalOp
-    if (!state.stringGlobals.count(fmt)) {
-      auto globalName = "_ptoas_printf_fmt_" + std::to_string(state.stringGlobals.size());
-      // 创建 constant global: @_ptoas_printf_fmt_0 = "..."
-      state.stringGlobals[fmt] = globalName;
-    }
   });
 
-  // 1.2 扫描 scf.if 内的 print → 创建 outline helper stub
-  module.walk([&](pto::PrintOp op) {
-    auto parent = op->getParentOfType<scf::IfOp>();
-    if (parent) {
-      // 为每个格式串创建一个 helper 函数
-      // helper 函数接受 (DTData, scalar) → 内部展开 protocol
-      state.constrainedHelpers[fmt] = helperFuncName;
-    }
+  // 1.2 扫描 pto.tprint → 预创建硬编码格式串 global
+  //     （如 "%6.2f"、"%6d"、TPRINT header 横幅等）
+  module.walk([&](pto::TPrintOp tprintOp) {
+    state.usesPrint = true;
+    hasTPrint = true;
   });
+  if (hasTPrint) {
+    // 预创建 TPRINT 专用格式串: header, shape, valF32, valInt, ...
+  }
 }
 ```
 
-为什么需要预扫描？因为后续的 `applyPartialConversion` 中的 pattern 需要用到这些 global 和 helper——必须先创建好。
+为什么需要预扫描？因为后续的 `applyPartialConversion` 中的 pattern 需要 `LLVM::AddressOfOp` 引用这些 global symbol——必须在 dialect conversion 之前创建好。
 
 #### Step 2: addDTDataParamToEntryFunctions — 追加 DTData 参数
 
@@ -778,130 +774,148 @@ static LogicalResult injectPrintPrologue(ModuleOp module, LoweringState &state) 
 
 ### 4.3 LowerPrintOpPattern 逐行解读
 
-代码位置：`VPTOCANN900LLVMEmitter.cpp:9234-9520`
+代码位置：`VPTOLLVMEmitter.cpp:9221-9492`（两个 emitter 完全一致）
 
-这是整个 VPTO 路径的心脏。我们把代码分段解说：
+#### 第一段：编译期解析格式串（共享分析函数）
 
-#### 第一段：编译期解析格式串
+VPTO 路径的格式串解析已提取为共享函数 `analyzePrintFormat`，定义在 `include/PTO/Transforms/PrintEncoding.h`，verifier、预扫描、lowering 共用同一份解析逻辑：
 
 ```cpp
-LogicalResult matchAndRewrite(pto::PrintOp op, ...) {
-  StringRef fmtStr = op.getFormat();
+// PrintEncoding.h — 共享分析
+enum class PrintConversionKind : uint8_t {
+  Float,        // %f, %F, %e, %E, %g, %G, %a, %A
+  SignedInt,    // %d, %i
+  UnsignedInt,  // %u, %x, %X, %o
+};
 
-  // ★ 编译期解析：找出格式说明符的位置和类型
-  size_t prefixLen = 0;
-  {
-    size_t pos = 0;
-    while (pos < fmtStr.size()) {
-      if (fmtStr[pos] == '%') {
-        prefixLen = pos;    // '%' 之前的部分
-        pos++;
-        while (flags)  pos++;    // '+', '-', '0', '#', ' '
-        while (digits) pos++;    // width
-        if ('.') while (digits) pos++;  // precision
-        if (length)  pos++;      // l, h, z
-        pos++; prefixLen = pos;  // 跳过格式说明符本身
-      } else { pos++; }
-    }
+struct PrintFormatInfo {
+  PrintConversionKind conversion;     // 转换类型
+  uint16_t prefixBytes;               // 前缀字节数（含 '\0'）
+  uint16_t suffixBytes;               // 后缀字节数（含 '\0'）
+
+  unsigned getDataSize() const {      // 协议数据大小: float→4, int→8
+    return (conversion == PrintConversionKind::Float) ? 4 : 8;
   }
 
-  // 编译期就确定所有偏移量
-  int64_t fmtPrefixLen = prefixLen + 1;   // 含 '\0'
-  int64_t fmtSuffixLen = fmtStr.size() - prefixLen + 1;  // 含 '\0'
-  int64_t recordSize = 1 + dataSize + 2 + fmtPrefixLen + 1 + 2 + fmtSuffixLen + 1;
-  // 就是: marker(1) + data + fmt_len(2) + prefix + '\0' + normal(1) + rem_len(2) + suffix + end(1)
-}
+  uint32_t getRecordSize() const {    // 完整协议记录大小
+    unsigned ds = getDataSize();
+    return 1 + ds + 2 + prefixBytes + 1 + 2 + suffixBytes + 1;
+  }
+};
+
+FailureOr<PrintFormatInfo> analyzePrintFormat(StringRef format);
 ```
 
-对于格式串 `"scalar = %+08.3f\n"`，这段代码编译期算出：
-- `prefixLen = 17` （`"scalar = %+08.3f"` 含格式串前缀直到格式说明符）
-- `fmtPrefixLen = 18` （含 `'\0'`）
-- `fmtSuffixLen = 2` （`"\n\0"` 只有换行）
-- `recordSize = 30` （整个 protocol 需要 30 字节）
+对于格式串 `"scalar = %+08.3f\n"`，`analyzePrintFormat` 编译期算出：
+- `conversion = Float`
+- `prefixBytes = 18`（`"scalar = %+08.3f\0"` 共 18 字节）
+- `suffixBytes = 2`（`"\n\0"` 共 2 字节）
+- `getDataSize() = 4`（float→4 字节）
+- `getRecordSize() = 30`（整个 protocol）
 
-#### 第二段：构建 null check + overflow check
+lowering pattern 中直接使用：
 
 ```cpp
-  // 从 entry function 取 DTData 参数
+auto formatInfo = analyzePrintFormat(op.getFormat());
+if (failed(formatInfo))
+  return op.emitError("...");
+int64_t dataSize = formatInfo->getDataSize();
+int64_t fmtPrefixLen = formatInfo->prefixBytes;
+int64_t fmtSuffixLen = formatInfo->suffixBytes;
+int64_t recordSize = formatInfo->getRecordSize();
+```
+
+#### 第二段：三层嵌套 scf::IfOp 守卫
+
+从 `d362822d` 开始，print lowering 使用**嵌套 `scf::IfOp`** 替代早期的 flat `bothOk=dtNotNull&&lrNotNull` 结构。这避免了"在 null check 之前解引用 DTData"的安全问题：
+
+```cpp
   Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
 
-  // === Outer scf.if: null check ===
-  // if (DTData != null && LogWholeRegion != null)
-  auto dtNotNull = ICmpOp(NE, dtDataArg, null);
-  auto logRegion = LoadOp(dtDataArg + 0);
-  auto lrNotNull = ICmpOp(NE, logRegion, null);
-  auto bothOk = AndOp(dtNotNull, lrNotNull);
-  auto nullCheckIf = scf::IfOp(bothOk, /*withElseRegion=*/false);
+  // === 外层: DTData != null ===
+  auto dtNotNull = ICmpOp(NE, dtDataArg, nullPtr1);
+  auto outerIf = scf::IfOp(dtNotNull, /*withElseRegion=*/false);
+  // 在 then region 内:
 
-  // === Inner scf.if: overflow check ===
+  // === 中层: safe to deref — load LogWholeRegion ===
+  auto lrAddr = GEPOp(DTData, 0);          // safe: DTData 已确认非 null
+  auto logRegion = LoadOp(lrAddr);
+  auto lrNotNull = ICmpOp(NE, logRegion, null);
+  auto innerIf = scf::IfOp(lrNotNull, /*withElseRegion=*/false);
+  // 在 then region 内:
+
+  // === 内层: overflow check (with else → 溢出时只更新计数) ===
   auto newPls = AddOp(pLogSize, recordSize);
   auto overflow = ICmpOp(UGT, newPls, logBufSize);
   auto overflowIf = scf::IfOp(overflow, /*withElseRegion=*/true);
 
-  // Overflow then: 只更新 pLogSize（CCE 的安全策略）
+  // Overflow then: 只更新 pLogSize（CCE 安全策略）
   { StoreOp(newPls, logBufBase); }
 
   // Overflow else: 写入完整 protocol
-  {
-    // writePtr = logBufBase + 64 + pLogSize
-    auto writePtr = GEPOp(logBufBase, {64 + pLogSize});
+  { ... }
 ```
 
-这里用**嵌套 `scf::IfOp`** 而不是手写 CFG 的原因有两点：
-1. `scf::IfOp` 只有一个 region（`SizedRegion<1>`），但 pattern 内本来就是单一 region，够用
-2. 如果用 `splitBlock` 创建多个 BB，在 `scf.if` 的 region 内部会失败（因为 `scf.if` region 也不允许多 block）
+嵌套 `scf::IfOp` 的优点：
+1. 在 null check 之后才解引用，消除潜在的 null dereference
+2. 不需要 `splitBlock` 创建多 BB（兼容 `scf.if` 内部的 print）
+3. MLIR 自动处理 region 边界和 yield
 
-#### 第三段：展开 protocol 写入
+#### 第三段：标量编码 + protocol 写入
+
+数据值通过 `encodePrintScalar` 统一编码，同样定义在 `PrintEncoding.h`：
 
 ```cpp
-    // [0] Type marker
-    uint8_t typeMarker = isFloat ? 2 : 3;   // FLOAT=2, INT=3
-    storeI8(writePtr, 0, typeMarker);
+// 类型无关的标量编码
+auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar,
+                              formatInfo->conversion);
+// enc.bits:     i32 (float) 或 i64 (int) — ready for byte extraction
+// enc.byteWidth: 4 (float) 或 8 (int)
+// enc.marker:    2 (FLOAT) 或 3 (INT)
 
-    // [1..N] 数据值（逐字节 LE 写入）
-    if (isFloat) {
-      auto bits = BitcastOp(floatVal, i32);
-      for (int i = 0; i < 4; ++i) {
-        auto shifted = LShrOp(bits, i*8);
-        auto byte = TruncOp(shifted, i8);
-        storeI8(writePtr, 1 + i, byte);
-      }
-    } else {
-      // 整数: sign-extend to 64, then 8 bytes LE
-      for (int i = 0; i < 8; ++i) { ... }
-    }
+// [0] Type marker
+storeI8(writePtr, 0, enc->marker);
 
-    // 格式串前缀长度 (i16 LE)
-    storeI8(writePtr, fmtOff,   fmtLenLow);
-    storeI8(writePtr, fmtOff+1, fmtLenHigh);
+// [1..N] Data bytes（LE）
+for (unsigned i = 0; i < enc->byteWidth; ++i) {
+  auto shifted = LShrOp(enc->bits, i*8);
+  auto byte = TruncOp(shifted, i8);
+  storeI8(writePtr, 1 + i, byte);
+}
 
-    // 格式串前缀 bytes (从 global 逐字节 load → store)
-    for (int64_t i = 0; i < fmtPrefixLen; ++i) {
-      auto ch = LoadOp(GEPOp(fmtGlobal, i));
-      storeI8(writePtr, fmtOff + 2 + i, ch);
-    }
+// 格式串前缀长度 + 前缀字节
+storeI8(writePtr, fmtOff,   fmtLenLow);
+storeI8(writePtr, fmtOff+1, fmtLenHigh);
+for (int i = 0; i < fmtPrefixLen; ++i) {
+  auto ch = LoadOp(GEPOp(fmtGlobal, i));
+  storeI8(writePtr, fmtOff+2+i, ch);
+}
 
-    // NORMAL=1
-    storeI8(writePtr, normalOff, 1);
+// NORMAL=1 + 后缀长度 + 后缀字节
+storeI8(writePtr, normalOff, 1);
+// ...
+// END=0
+storeI8(writePtr, endOff, 0);
 
-    // 格式串后缀长度 (i16 LE)
-    storeI8(writePtr, normalOff+1, remLenLow);
-    storeI8(writePtr, normalOff+2, remLenHigh);
-
-    // 格式串后缀 bytes
-    for (int64_t i = 0; i < fmtSuffixLen; ++i) { ... }
-
-    // END=0
-    storeI8(writePtr, endOff, 0);
-
-    // 更新 pLogSize
-    StoreOp(newPls, logBufBase);
-  }
+// 更新 pLogSize
+StoreOp(newPls, logBufBase);
 ```
+
+`encodePrintScalar` 的编码规则：
+
+| 源类型 | 转换 | 输出 bits | byteWidth | marker |
+|--------|------|-----------|-----------|--------|
+| f16/bf16 | `fpext → f32 → bitcast → i32` | i32 | 4 | 2 (FLOAT) |
+| f32 | `bitcast → i32` | i32 | 4 | 2 (FLOAT) |
+| f64 | `fptrunc → f32 → bitcast → i32` | i32 | 4 | 2 (FLOAT) |
+| i8/i16/i32 | `sext → i64` (SignedInt) 或 `zext → i64` (UnsignedInt) | i64 | 8 | 3 (INT) |
+| i64 | 无扩展 | i64 | 8 | 3 (INT) |
+
+> **注意**：i64 当前被 verifier 禁用，因 DebugTunnel 协议仅传输低 32 位（`%d` 格式期望 4 字节 int）。等协议升级后重新启用。
 
 ### 4.4 injectPrintPrologue：入口初始化
 
-代码位置：`VPTOCANN900LLVMEmitter.cpp:4355-4428`
+代码位置：`VPTOLLVMEmitter.cpp:4335-4412`（两个 emitter 共享同一份实现）
 
 Dialect conversion 后，entry function 已经是 `LLVM::LLVMFuncOp`。我们在函数体最前面注入：
 
@@ -982,7 +996,7 @@ define void @print_scalar_kernel_mix_aiv(float %0, ptr addrspace(1) %1) {
 
 ### 4.6 LowerTPrintOpPattern：Tile 数据打印
 
-代码位置：`VPTOCANN900LLVMEmitter.cpp:9572-9754`
+代码位置：`VPTOLLVMEmitter.cpp:9510-9683`（两个 emitter 共享同一份实现）
 
 对标 EmitC 的 `TPRINT` 宏，VPTO 路径在 MLIR 层直接生成嵌套循环 + 逐元素 DebugTunnel 写入。核心策略与 `LowerPrintOpPattern` 一致——**编译期内联**，但不展开循环（保留 `scf.for` 结构避免大 tile 时代码膨胀）。
 
@@ -1058,15 +1072,17 @@ auto elemPtr = rewriter.create<LLVM::GEPOp>(loc, ptr6Type,
 Value elemVal = rewriter.create<LLVM::LoadOp>(loc, elemType, elemPtr);
 ```
 
-#### 数据写入：f16 符号扩展处理
+#### 数据写入：统一编码
 
-对于 f16 元素，VPTO 先 `BitcastOp` 到 i16，再 `ZExtOp` 到 i32，然后按 4 字节 LE 写入（与 `LowerPrintOpPattern` 中的 f32 写入共用同一条代码路径）：
+TPrint 复用与 PrintOp 相同的 `encodePrintScalar` 辅助函数（`PrintEncoding.h`），实现类型无关的协议编码。f16 通过 `FPExtOp → f32 → BitcastOp → i32` 写入 4 字节，i32 通过 `SExtOp → i64` 写入 8 字节：
 
 ```cpp
-if (elemType.isF16()) {
-  auto f16Bits = rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), elemVal);
-  bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, f16Bits.getResult());
-}
+Value elemVal = rewriter.create<LLVM::LoadOp>(loc, elemType, elemPtr);
+// 复用 print/scalar 的编码逻辑
+auto enc = encodePrintScalar(rewriter, loc, elemType, elemVal);
+if (failed(enc)) return failure();
+// enc->marker → store i8
+// enc->bits  → lshr + trunc × N 字节 LE
 ```
 
 #### 与 LowerPrintOpPattern 的关键差异
@@ -1185,28 +1201,50 @@ static bool compileHostStubToObject(...) {
 }
 ```
 
-### 6.3 窄整数符号扩展
+### 6.3 整数符号扩展与 PrintConversionKind
 
-CCE 的 print payload 解析器期望所有整数都是 **8 字节**（i64）。对于 `i8`、`i16`、`i32` 类型的 print 参数，需要先 sign-extend 到 `i64` 再写入 protocol。这个修复在 `LowerPrintOpPattern` 中：
+CCE 的 print payload 解析器期望所有整数都是 **8 字节**（i64）。对于 `i8`、`i16`、`i32` 类型的 print 参数，需要先扩展到 `i64` 再写入。**符号扩展还是零扩展取决于格式说明符**：
 
 ```cpp
-if (auto it = dyn_cast<IntegerType>(scalar.getType())) {
-  if (it.getWidth() < 64) {
-    if (it.isUnsigned())
-      intVal = rewriter.create<LLVM::ZExtOp>(loc, i64Type, scalar);
+// PrintEncoding.h
+inline FailureOr<PrintScalarEncoding>
+encodePrintScalar(ConversionPatternRewriter &rewriter, Location loc,
+                  Type scalarType, Value scalar,
+                  PrintConversionKind kind = PrintConversionKind::SignedInt) {
+  // ...
+  if (w < 64) {
+    if (kind == PrintConversionKind::UnsignedInt)
+      enc.bits = rewriter.create<LLVM::ZExtOp>(loc, i64Type, scalar);  // %u/%x/%o
     else
-      intVal = rewriter.create<LLVM::SExtOp>(loc, i64Type, scalar);
+      enc.bits = rewriter.create<LLVM::SExtOp>(loc, i64Type, scalar);  // %d/%i
   }
 }
 ```
 
-### 6.4 格式串不完整解析的 tradeoff
+| 格式说明符 | PrintConversionKind | 扩展方式 | i8=0xff 结果 |
+|-----------|--------------------|----------|-------------|
+| `%d`, `%i` | SignedInt | `sext → i64` | -1 (正确) |
+| `%u`, `%x`, `%X`, `%o` | UnsignedInt | `zext → i64` | 255 (正确) |
 
-VPTO 路径的格式串解析是**简化版**的——只识别 `%` 的位置和格式说明符，不解析 flags、width、precision 的具体语义。这是因为：
+> **注意**：MLIR 的 integer type 默认为 signless，`IntegerType::isUnsigned()` 对 signless integer 恒返回 `false`。因此不能依赖 MLIR 的类型属性来决定扩展方式，必须由格式串解析出的 `PrintConversionKind` 驱动。
 
-1. VPTO 只需要知道 `%` 在哪里（确定前缀/后缀的分割点）和格式说明符的类型（确定 FLOAT/INT marker）
-2. flags、width、precision 的语义由 **Host 端的 `printf`** 负责解析——VPTO 只需要按协议格式把格式串原样传给 Host
-3. 这部分字符串作为"格式串前缀"原封不动地写入 protocol 字节流
+当前 verifier 禁用了 i64 类型——DebugTunnel 协议中 `%d` 格式仅传输低 32 位，64 位整数会被截断。等协议升级到支持 64 位后再重新启用。
+
+### 6.4 统一格式解析：analyzePrintFormat
+
+VPTO 路径最初在 verifier 和 lowering 各维护一套独立的格式串 parser，存在 ~~两处重复代码~~ 和 `%%` 处理不一致的 bug。当前版本已提取为共享函数 `analyzePrintFormat`：
+
+```cpp
+// PrintEncoding.h — verifier、pre-scan、lowering 共用
+FailureOr<PrintFormatInfo> analyzePrintFormat(StringRef format);
+```
+
+**统一前**：verifier（~60 行）+ VPTOLLVMEmitter（~30 行）+ VPTOCANN900LLVMEmitter（~30 行）≈ 120 行重复代码
+**统一后**：`analyzePrintFormat`（~40 行），三处各 ~5 行调用
+
+`PrintFormatInfo` 编译期确定所有 layout 参数（prefixBytes, suffixBytes, recordSize），消除了运行时格式串扫描。Host 端 `printf` 仍然负责 flags/width/precision 的语义——VPTO 只需按协议格式把格式串原样写入字节流。
+
+### 6.5 多 block print 的独立性
 
 ### 6.5 多 block print 的独立性
 
@@ -1221,6 +1259,72 @@ LogWholeRegion (HBM 中的基址)
 ```
 
 VPTO 通过 `get_block_idx() * stride` 计算每个 block 的偏移，各 block 写各自区域，互不干扰。这个逻辑和 EmitC 的 `Write()` 完全一致。
+
+### 6.6 使用要点与常见陷阱
+
+#### 6.6.1 格式串约束
+
+- **恰好一个转换说明符**：`pto.print` 只能有一个 `%d`/`%f` 等占位符（`%%` 不算）
+- **类型匹配**：float 值用 `%f/%e/%g`，int 值用 `%d/%i/%u/%x/%o`
+- **i64 暂不支持**：DebugTunnel 协议仅传输低 32 位，待协议升级
+
+```mlir
+// ✅ 正确
+pto.print ins("value = %+08.3f\n", %val : f32)
+pto.print ins("idx = %d\n", %idx : i32)
+
+// ❌ 错误：两个转换说明符
+pto.print ins("[block %d] value = %f\n", %val : f32)
+// → 拆成两个 pto.print
+
+// ❌ 错误：零转换说明符
+pto.print ins("inside loop\n", %mode : i32)
+// → 改为 pto.print ins("inside loop, mode=%d\n", %mode : i32)
+```
+
+#### 6.6.2 Kernel 至少需要一个用户参数
+
+CCE runtime 只在 kernel 有 ≥1 个用户参数时才自动注入 DTData 隐藏参数。零参数 kernel 的 `pto.print`/`pto.tprint` 不会有输出：
+
+```mlir
+// ❌ 零参数 — DTData 不会被注入，print 无输出
+func.func @my_kernel() attributes {pto.entry} { ... }
+
+// ✅ 至少一个参数
+func.func @my_kernel(%dummy: f32) attributes {pto.entry} { ... }
+```
+
+#### 6.6.3 主机端 ACL 初始化
+
+使用 `run_vpto_tprint_validation.sh` 或 `run_host_vpto_validation.sh` 时，host runner 必须调用 `aclInit()` + `aclrtSetDevice(0)` + `aclrtCreateStream()` 来初始化 ACL runtime。缺少 ACL 初始化会导致 `PrintPayloadData` 和 `DebugTunnelData` 设备内存分配失败，打印输出为空。
+
+#### 6.6.4 TileLib daemon 环境变量
+
+使用 `pto.alloc_tile` / `pto.get_block_idx` 等 PTODSL op 的测试需要 TileLib daemon。如果 Python MLIR 绑定不在默认路径，需要设置：
+
+```bash
+export MLIR_PYTHON_ROOT="/path/to/llvm-project/build-shared/tools/mlir/python_packages/mlir_core"
+export PTO_INSTALL_DIR="/path/to/PTOAS/install"
+export PYTHONPATH="$MLIR_PYTHON_ROOT:$PTO_INSTALL_DIR:$PYTHONPATH"
+```
+
+#### 6.6.5 GEP `nuw` 兼容性
+
+MLIR（基于 LLVM 21）输出的 `getelementptr inbounds nuw` 不被 bisheng（基于 LLVM 15）识别。E2E 脚本第 127 行有自动 workaround：
+```bash
+sed -i 's/inbounds nuw/inbounds/g' "${OUT_DIR}/kernel.ll"
+```
+
+#### 6.6.6 类型支持矩阵
+
+| 类型 | `pto.print` | `pto.tprint` | 备注 |
+|------|:---:|:---:|------|
+| f16 | ✅ | ✅ | fpext→f32→4B |
+| bf16 | ✅ | ❌ | fpext→f32→4B, tile 待硬件验证 |
+| f32 | ✅ | ✅ | bitcast→4B |
+| f64 | ✅ | ❌ | fptrunc→f32→4B |
+| i8/i16/i32 | ✅ | ✅ (i32) | sext/zext→i64→8B |
+| i64 | ❌ | — | 协议截断，暂禁用 |
 
 ---
 
