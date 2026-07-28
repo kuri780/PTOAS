@@ -248,15 +248,22 @@ if [[ "${SIM_RC}" -ne 0 ]]; then
   die "simulator exited with code ${SIM_RC}"
 fi
 
-# Collect expected substrings from print format strings in kernel.pto
-EXPECTED_STRS=()
-for fmt in $(grep -oP 'pto\.print ins\("\K[^"]+' "${CASE_DIR}/kernel.pto"); do
-  # Extract the plain text before the first % in the format string
-  plain="$(echo "${fmt}" | sed 's/%.*//')"
-  if [[ -n "${plain}" ]]; then
-    EXPECTED_STRS+=("${plain}")
-  fi
-done
+# Build expected-value table from kernel.pto:
+#   Format "f16=%f\n" + constant 1.5        → expect "f16=1.500000"
+#   Format "f64=%f\n" + constant 2.718281828 → expect "f64=2.718282"
+#   Format "i32=%d\n" + constant -42        → expect "i32=-42"
+#   Format "i64=%d\n" + constant 1234567890123 → expect "i64=1234567890123"
+#
+# Float values are checked with a tolerant regex to accommodate
+# minor CCE printf formatting differences.
+
+declare -A EXPECTED_PATTERNS
+EXPECTED_PATTERNS=(
+  ["f16"]="f16=1\.5[0-9]*"
+  ["f64"]="f64=2\.718[0-9]*"
+  ["i32"]="i32=-42"
+  ["i64"]="i64=1234567890123"
+)
 
 PASSED=true
 echo ""
@@ -264,11 +271,12 @@ echo "--- HiIPU Print (from simulator log) ---"
 sed -n '/---HiIPU Print---/,/^$/p' "${SIM_LOG}" | head -20
 echo ""
 
-for expected in "${EXPECTED_STRS[@]}"; do
-  if grep -qF "${expected}" "${SIM_LOG}"; then
-    log "  ✅ found: '${expected}'"
+for key in "${!EXPECTED_PATTERNS[@]}"; do
+  pattern="${EXPECTED_PATTERNS[${key}]}"
+  if grep -qPE "${pattern}" "${SIM_LOG}"; then
+    log "  ✅ found: ${key} (matched '${pattern}')"
   else
-    log "  ❌ missing: '${expected}'"
+    log "  ❌ missing: ${key} (pattern '${pattern}' not found)"
     PASSED=false
   fi
 done

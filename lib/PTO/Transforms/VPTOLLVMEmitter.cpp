@@ -9234,7 +9234,6 @@ public:
     auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
-    auto i16Type = rewriter.getI16Type();
     auto f32Type = rewriter.getF32Type();
 
     // Look up format-string global.
@@ -9402,8 +9401,8 @@ public:
         Value i32Bits;
         if (auto ft = dyn_cast<FloatType>(scalarType)) {
           if (ft.isF16() || ft.isBF16()) {
-            auto i16 = rewriter.create<LLVM::BitcastOp>(loc, i16Type, scalar);
-            i32Bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, i16);
+            auto f32val = rewriter.create<LLVM::FPExtOp>(loc, f32Type, scalar);
+            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
           } else if (ft.isF32()) {
             i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
           } else {
@@ -9567,8 +9566,7 @@ public:
     Type elemType = srcType.getElementType();
     bool isFloat = isa<FloatType>(elemType);
     int64_t dataSize = isFloat ? 4 : 8;
-    int64_t elemBytes = isFloat ? (elemType.isF16() ? 2 : 4)
-                                : (elemType.getIntOrFloatBitWidth() / 8);
+    int64_t elemBytes = elemType.getIntOrFloatBitWidth() / 8;
     std::string valFmtName = isFloat ? state.tprintFmtValF32 : state.tprintFmtValInt;
     int64_t fmtPrefixLen = isFloat ? 6 : 4;
     int64_t elemRecordSize = 1 + dataSize + 2 + fmtPrefixLen + 1;
@@ -9665,8 +9663,8 @@ public:
           if (isFloat) {
             Value bits;
             if (elemType.isF16() || elemType.isBF16()) {
-              auto f16Bits = rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), elemVal);
-              bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, f16Bits.getResult());
+              auto f32Val = rewriter.create<LLVM::FPExtOp>(loc, f32Type, elemVal);
+              bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32Val);
             } else if (elemType.isF32()) {
               auto f32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, elemVal);
               bits = f32Bits.getResult();
