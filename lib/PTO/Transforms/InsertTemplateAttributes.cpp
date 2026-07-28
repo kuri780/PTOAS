@@ -947,6 +947,10 @@ struct InsertTemplateAttributesPass
     module.walk([&](Operation *operation) {
       if (isa<pto::TReshapeOp>(operation))
         return;
+      // Debug ops (print, tprint) are lowered directly by the VPTO/EmitC
+      // backend and do not need TileLib template expansion.
+      if (isa<pto::PrintOp>(operation) || isa<pto::TPrintOp>(operation))
+        return;
       if (isa<pto::OpPipeInterface>(operation))
         tileOperations.push_back(operation);
     });

@@ -1,0 +1,57 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// SPDX-License-Identifier: CANN-OSL-2.0
+
+// -----------------------------------------------------------------------------
+// case: kernels/print-if-else
+// family: kernels
+// target_ops: pto.print, scf.if, pto.mte_gm_ub, pto.mte_ub_gm
+// scenarios: print-inside-if-else, conditional-debug-print, outline-helper
+//
+// Verifies that pto.print works inside scf.if/then/else branches via the
+// helper-function outline mechanism.  Two if-branches each print different
+// messages based on a mode parameter, then do GM→UB→GM passthrough.
+// -----------------------------------------------------------------------------
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @print_if_else_kernel(%input: !pto.ptr<f32, gm>,
+                                   %output: !pto.ptr<f32, gm>,
+                                   %mode: i32,
+                                   %n: i32) attributes {pto.entry} {
+    %c0 = arith.constant 0 : index
+    %c0_i64 = arith.constant 0 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %c256_i64 = arith.constant 256 : i64
+    %c0_i32 = arith.constant 0 : i32
+
+    %ub_buf = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+
+    // Load input from GM to UB
+    pto.mte_gm_ub %input, %ub_buf, %c0_i64, %c256_i64
+      nburst(%c1_i64, %c256_i64, %c256_i64)
+      : !pto.ptr<f32, gm>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64
+
+    pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+    pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+
+    // Conditional: if mode > 0, print "positive"; else print "non-positive"
+    %is_pos = arith.cmpi sgt, %mode, %c0_i32 : i32
+    scf.if %is_pos {
+      pto.print ins("branch = positive\n", %mode : i32)
+    } else {
+      pto.print ins("branch = non-positive\n", %mode : i32)
+    }
+
+    // Print element count
+    pto.print ins("n = %d\n", %n : i32)
+
+    // Store result from UB to GM output
+    pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+    pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+
+    pto.mte_ub_gm %ub_buf, %output, %c256_i64
+      nburst(%c1_i64, %c256_i64, %c256_i64)
+      : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+
+    pto.barrier #pto.pipe<PIPE_ALL>
+    return
+  }
+}

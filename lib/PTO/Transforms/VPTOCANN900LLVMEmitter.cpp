@@ -200,6 +200,10 @@ static Value materializeVPTOCast(OpBuilder &builder, Type resultType,
 class VPTOTypeConverter final : public TypeConverter {
 public:
   explicit VPTOTypeConverter(MLIRContext *context) {
+    addConversion([context](Type type) -> std::optional<Type> {
+      if (isa<pto::TileBufType>(type)) return LLVM::LLVMPointerType::get(context, 6);
+      return std::nullopt;
+    });
     addConversion([](Type type) { return type; });
     addConversion([](Type type) -> Type {
       // The conversion callback outlives this constructor, so build on demand
@@ -231,6 +235,20 @@ struct LoweringState {
   std::string dcciFuncName;
   // Name of the get-block-idx intrinsic declaration (created lazily).
   std::string blockIdxFuncName;
+  std::string sysVaBaseFuncName;
+  std::string tprintFmtHeader;
+  std::string tprintFmtShape;
+  std::string tprintFmtValF32;
+  std::string tprintFmtValInt;
+  std::string tprintFmtSpace;
+  std::string tprintFmtNewline;
+  std::string tprintFmtSep;
+  std::string tprintFmtDash;
+  std::string tprintDtypeF32;
+  std::string tprintDtypeF16;
+  std::string tprintDtypeInt32;
+  std::string tprintLayoutND;
+  std::string tprintTileTypeVec;
 };
 
 enum class VcvtElemKind {
@@ -4274,15 +4292,26 @@ collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
     state.usesPrint = true;
   });
   // Collect hardcoded format strings used by TPrintOp lowering.
-  module.walk([&](pto::TPrintOp tprintOp) {
-    (void)tprintOp;
-    state.usesPrint = true;
-    StringRef fmt = "[tprint]\n";
-    if (seen.count(fmt)) return;
-    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
-    seen[fmt] = globalName;
-    state.stringGlobals.push_back({fmt.str(), globalName});
-  });
+  bool hasTPrint = false;
+  module.walk([&](pto::TPrintOp tprintOp) { (void)tprintOp; state.usesPrint = true; hasTPrint = true; });
+  if (hasTPrint) {
+    const std::pair<std::string, std::string &> tprintFmts[] = {
+        {"=== [TPRINT Tile] Data Type: %s, Layout: %s, TileType: %s ===\n", state.tprintFmtHeader},
+        {"  Shape: [%d, %d], Valid Shape: [%d, %d]\n", state.tprintFmtShape},
+        {"%6.2f", state.tprintFmtValF32}, {"%6d", state.tprintFmtValInt},
+        {" ", state.tprintFmtSpace}, {"\n", state.tprintFmtNewline},
+        {"|", state.tprintFmtSep}, {"------", state.tprintFmtDash},
+        {"float32", state.tprintDtypeF32}, {"float16", state.tprintDtypeF16},
+        {"int32", state.tprintDtypeInt32}, {"ND", state.tprintLayoutND},
+        {"Vec", state.tprintTileTypeVec},
+    };
+    for (auto &kv : tprintFmts) {
+      if (seen.count(kv.first)) continue;
+      std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+      seen[kv.first] = globalName;
+      state.stringGlobals.push_back({kv.first, globalName}); kv.second = globalName;
+    }
+  }
   if (state.stringGlobals.empty()) return;
 
   OpBuilder builder(module.getBodyRegion());
@@ -4331,6 +4360,9 @@ static LogicalResult addDTDataParamToEntryFunctions(ModuleOp module,
   declareFunc("llvm.hivm.GET.BLOCK.IDX",
               LLVM::LLVMFunctionType::get(i64Type, {}, false));
   state.blockIdxFuncName = "llvm.hivm.GET.BLOCK.IDX";
+  declareFunc("llvm.hivm.GET.SYS.VA.BASE",
+              LLVM::LLVMFunctionType::get(i64Type, {}, false));
+  state.sysVaBaseFuncName = "llvm.hivm.GET.SYS.VA.BASE";
 
   SmallVector<func::FuncOp> entryFuncs;
   module.walk([&](func::FuncOp func) {
@@ -9519,9 +9551,24 @@ public:
 private:
   LoweringState &state;
 };
-// Lower pto.tprint -> inline DebugTunnel debug marker via nested scf::IfOp.
-// Same scf.if-based structure as LowerPrintOpPattern to avoid violating
-// SizedRegion<1> when the tprint appears inside another scf.if.
+// Lower pto.alloc_tile -> ZeroOp null pointer (tiles are UB-placeholders in VPTO).
+class LowerAllocTileOpPattern final : public OpConversionPattern<pto::AllocTileOp> {
+public:
+  LowerAllocTileOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                         LoweringState &state)
+      : OpConversionPattern(typeConverter, context) { (void)state; }
+
+  LogicalResult
+  matchAndRewrite(pto::AllocTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptr6Type = LLVM::LLVMPointerType::get(rewriter.getContext(), 6);
+    auto nullPtr = rewriter.create<LLVM::ZeroOp>(op.getLoc(), ptr6Type);
+    rewriter.replaceOp(op, nullPtr.getResult());
+    return success();
+  }
+};
+
+// Lower pto.tprint -> inline DebugTunnel tile data dump.
 class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
 public:
   LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
@@ -9533,147 +9580,176 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *ctx = rewriter.getContext();
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
     auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
     auto i64Type = rewriter.getI64Type();
+    auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
 
-    // Get DTData from entry function.
+    auto srcType = dyn_cast<pto::TileBufType>(op.getSrc().getType());
+    if (!srcType) return op.emitError("pto.tprint: source must be a tile_buf");
+    ArrayRef<int64_t> shape = srcType.getShape();
+    if (shape.size() != 2) return op.emitError("pto.tprint: only 2D tiles supported");
+    int64_t rows = shape[0], cols = shape[1];
+    Type elemType = srcType.getElementType();
+    bool isFloat = isa<FloatType>(elemType);
+    int64_t dataSize = isFloat ? 4 : 8;
+    int64_t elemBytes = isFloat ? (elemType.isF16() ? 2 : 4)
+                                : (elemType.getIntOrFloatBitWidth() / 8);
+    std::string valFmtName = isFloat ? state.tprintFmtValF32 : state.tprintFmtValInt;
+    int64_t fmtPrefixLen = isFloat ? 6 : 4;
+    int64_t elemRecordSize = 1 + dataSize + 2 + fmtPrefixLen + 1;
+
     auto func = op->getParentOfType<func::FuncOp>();
-    if (!func || func.getNumArguments() == 0) {
-      rewriter.eraseOp(op);
-      return success();
-    }
+    if (!func || func.getNumArguments() == 0) { rewriter.eraseOp(op); return success(); }
     Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
 
-    // Pre-resolve intrinsic declarations.
     ModuleOp moduleOp = op->getParentOfType<ModuleOp>();
-    auto blockIdxFunc =
-        moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
-    auto dcciFunc =
-        moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
-    if (!blockIdxFunc || !dcciFunc) {
-      rewriter.eraseOp(op);
-      return success();
-    }
+    auto blockIdxFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
+    auto dcciFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+    if (!blockIdxFunc || !dcciFunc) { rewriter.eraseOp(op); return success(); }
 
-    // NORMAL section: "[tprint]\n\0" = 10 bytes, total record = 14 bytes
-    int64_t recordSize = 1 + 2 + 10 + 1;
+    auto valFmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type, valFmtName);
 
-    // ---- Outer scf.if: null check (no else → skip on null) ----
     auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
-    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(
-        loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
-
-    auto lrAddr = rewriter.create<LLVM::GEPOp>(
-        loc, ptr1Type, i8Type, dtDataArg,
-        ValueRange{getI64Constant(rewriter, loc, 0)});
+    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+    auto lrAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 0)});
     auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
     auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
-    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(
-        loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
-
-    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type,
-                                                dtNotNull.getResult(),
-                                                lrNotNull.getResult());
-
-    auto nullCheckIf = rewriter.create<scf::IfOp>(loc, bothOk.getResult(),
-                                                   /*withElseRegion=*/false);
+    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
+    auto bothOk = rewriter.create<LLVM::AndOp>(loc, i1Type, dtNotNull.getResult(), lrNotNull.getResult());
+    auto nullCheckIf = rewriter.create<scf::IfOp>(loc, bothOk.getResult(), /*withElseRegion=*/false);
     rewriter.setInsertionPointToStart(&nullCheckIf.getThenRegion().front());
 
-    // --- Null check then: DTData and LogRegion are valid ---
-
-    // Load LogBufferSize, compute per-block stride and buffer base.
-    auto lbsAddr = rewriter.create<LLVM::GEPOp>(
-        loc, ptr1Type, i8Type, dtDataArg,
-        ValueRange{getI64Constant(rewriter, loc, 16)});
+    auto lbsAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 16)});
     auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
-    auto stride64 = rewriter.create<LLVM::ConstantOp>(
-        loc, i64Type, rewriter.getI64IntegerAttr(64));
-    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type,
-                                               logBufSize.getResult(),
-                                               stride64.getResult());
+    auto stride64 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type, logBufSize.getResult(), stride64.getResult());
+    auto blockIdxCall = rewriter.create<LLVM::CallOp>(loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
+    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type, blockIdxCall.getResult(), stride.getResult());
+    auto logBufBase = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, logRegion.getResult(), ValueRange{blockOff.getResult()});
 
-    auto blockIdxCall = rewriter.create<LLVM::CallOp>(
-        loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
-    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type,
-                                                  blockIdxCall.getResult(),
-                                                  stride.getResult());
-    auto logBufBase = rewriter.create<LLVM::GEPOp>(
-        loc, ptr1Type, i8Type, logRegion.getResult(),
-        ValueRange{blockOff.getResult()});
+    auto sysVaBaseFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.sysVaBaseFuncName);
+    auto ptr6Type = LLVM::LLVMPointerType::get(ctx, 6);
+    Value ubBaseElemOffset;
+    if (sysVaBaseFunc) {
+      auto sysva = rewriter.create<LLVM::CallOp>(loc, i64Type, sysVaBaseFunc.getSymName(), ValueRange{});
+      auto ubOff = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(0x80000));
+      auto baseAddr = rewriter.create<LLVM::AddOp>(loc, i64Type, sysva.getResult(), ubOff);
+      auto elemSizeVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+      ubBaseElemOffset = rewriter.create<LLVM::UDivOp>(loc, i64Type, baseAddr.getResult(), elemSizeVal);
+    } else {
+      ubBaseElemOffset = getI64Constant(rewriter, loc, 0);
+    }
+    auto tileDataBase = rewriter.create<LLVM::ZeroOp>(loc, ptr6Type);
+
+    auto elemRecSizeVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(elemRecordSize));
+    auto cols64 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(cols));
+    auto numElements = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(rows * cols));
+    auto totalRecSize = rewriter.create<LLVM::MulOp>(loc, i64Type, numElements.getResult(), elemRecSizeVal.getResult());
+
     auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
-
-    // ---- Inner scf.if: overflow check (with else) ----
-    auto recSizeVal = rewriter.create<LLVM::ConstantOp>(
-        loc, i64Type, rewriter.getI64IntegerAttr(recordSize));
-    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type,
-                                               pLogSize.getResult(),
-                                               recSizeVal.getResult());
-    auto overflow = rewriter.create<LLVM::ICmpOp>(
-        loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(),
-        logBufSize.getResult());
-
-    auto overflowIf = rewriter.create<scf::IfOp>(loc, overflow.getResult(),
-                                                  /*withElseRegion=*/true);
-
-    // Overflow then: just update pLogSize (overflow guard).
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type, pLogSize.getResult(), totalRecSize.getResult());
+    auto overflow = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(), logBufSize.getResult());
+    auto overflowIf = rewriter.create<scf::IfOp>(loc, overflow.getResult(), /*withElseRegion=*/true);
     {
       rewriter.setInsertionPointToStart(&overflowIf.getThenRegion().front());
       rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
-      // yield is already created by the builder
     }
-
-    // Overflow else: write the fixed tprint marker payload.
     {
       rewriter.setInsertionPointToStart(&overflowIf.getElseRegion().front());
-
-      auto headerOff = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(64));
-      auto writeOff = rewriter.create<LLVM::AddOp>(loc, i64Type,
-                                                    headerOff.getResult(),
-                                                    pLogSize.getResult());
-      auto writePtr = rewriter.create<LLVM::GEPOp>(
-          loc, ptr1Type, i8Type, logBufBase.getResult(),
-          ValueRange{writeOff.getResult()});
-
-      auto storeI8Val = [&](Value base, int64_t offset, uint8_t val) {
-        auto off = rewriter.create<LLVM::ConstantOp>(
-            loc, i64Type, rewriter.getI64IntegerAttr(offset));
-        auto ptr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, base,
-                                                 ValueRange{off.getResult()});
-        auto v = rewriter.create<LLVM::ConstantOp>(
-            loc, i8Type, rewriter.getI8IntegerAttr(val));
-        rewriter.create<LLVM::StoreOp>(loc, v, ptr);
+      auto storeByteAt = [&](Value basePtr, Value byteOff, Value byteVal) {
+        auto gep = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, basePtr, ValueRange{byteOff});
+        rewriter.create<LLVM::StoreOp>(loc, byteVal, gep);
       };
-
-      // NORMAL section type marker + length + "[tprint]\n\0" + END
-      storeI8Val(writePtr.getResult(), 0, 1);
-      storeI8Val(writePtr.getResult(), 1, 10);
-      storeI8Val(writePtr.getResult(), 2, 0);
-      uint8_t tprintBytes[] = {'[', 't', 'p', 'r', 'i', 'n', 't', ']', '\n', '\0'};
-      for (int i = 0; i < 10; ++i)
-        storeI8Val(writePtr.getResult(), 3 + i, tprintBytes[i]);
-      storeI8Val(writePtr.getResult(), 13, 0);
-
-      // Update pLogSize
+      auto header64 = getI64Constant(rewriter, loc, 64);
+      auto curWriteOff = rewriter.create<LLVM::AddOp>(loc, i64Type, header64, pLogSize.getResult());
+      auto c0Idx = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      auto c1Idx = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      auto rowsIdx = rewriter.create<arith::ConstantIndexOp>(loc, rows);
+      auto colsIdx = rewriter.create<arith::ConstantIndexOp>(loc, cols);
+      auto rowLoop = rewriter.create<scf::ForOp>(loc, c0Idx, rowsIdx, c1Idx, ValueRange{curWriteOff.getResult()});
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(rowLoop.getBody());
+        Value row = rowLoop.getInductionVar();
+        Value writeOffRow = rowLoop.getRegionIterArgs()[0];
+        auto colLoop = rewriter.create<scf::ForOp>(loc, c0Idx, colsIdx, c1Idx, ValueRange{writeOffRow});
+        {
+          OpBuilder::InsertionGuard guard2(rewriter);
+          rewriter.setInsertionPointToStart(colLoop.getBody());
+          Value col = colLoop.getInductionVar();
+          Value writeOffCol = colLoop.getRegionIterArgs()[0];
+          auto rowI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, row);
+          auto colI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, col);
+          auto rowOff = rewriter.create<LLVM::MulOp>(loc, i64Type, rowI64, cols64);
+          auto elemIdx = rewriter.create<LLVM::AddOp>(loc, i64Type, rowOff, colI64);
+          auto virtElemOff = rewriter.create<LLVM::AddOp>(loc, i64Type, ubBaseElemOffset, elemIdx);
+          auto elemPtr = rewriter.create<LLVM::GEPOp>(loc, ptr6Type, elemType, tileDataBase, ValueRange{virtElemOff.getResult()});
+          Value elemVal = rewriter.create<LLVM::LoadOp>(loc, elemType, elemPtr);
+          auto markerConst = rewriter.create<LLVM::ConstantOp>(loc, i8Type, rewriter.getI8IntegerAttr(isFloat ? 2 : 3));
+          storeByteAt(logBufBase, writeOffCol, markerConst.getResult());
+          if (isFloat) {
+            Value bits;
+            if (elemType.isF16()) {
+              auto f16Bits = rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), elemVal);
+              bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, f16Bits.getResult());
+            } else {
+              auto f32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, elemVal);
+              bits = f32Bits.getResult();
+            }
+            for (int i = 0; i < 4; ++i) {
+              auto shift = rewriter.create<LLVM::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
+              auto shifted = rewriter.create<LLVM::LShrOp>(loc, i32Type, bits, shift);
+              auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+              auto off = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
+              storeByteAt(logBufBase, off.getResult(), byte);
+            }
+          } else {
+            Value intVal = elemVal;
+            if (auto intTy = dyn_cast<IntegerType>(elemType); intTy && intTy.getWidth() < 64)
+              intVal = rewriter.create<LLVM::SExtOp>(loc, i64Type, elemVal);
+            for (int i = 0; i < 8; ++i) {
+              auto shift = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(i * 8));
+              auto shifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, intVal, shift);
+              auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+              auto off = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
+              storeByteAt(logBufBase, off.getResult(), byte);
+            }
+          }
+          int64_t fmtOff = 1 + dataSize;
+          auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen - 1));
+          auto shift8 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(8));
+          auto fmtLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenVal);
+          auto fmtLenShifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, fmtLenVal.getResult(), shift8);
+          auto fmtLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenShifted);
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff)).getResult(), fmtLenLow);
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff + 1)).getResult(), fmtLenHigh);
+          for (int64_t i = 0; i < fmtPrefixLen - 1; ++i) {
+            auto charOff = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(i));
+            auto charPtr = rewriter.create<LLVM::GEPOp>(loc, ptr0Type, i8Type, valFmtGlobal.getResult(), ValueRange{charOff.getResult()});
+            auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+            auto dstOff = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff + 2 + i));
+            storeByteAt(logBufBase, dstOff.getResult(), ch);
+          }
+          int64_t endOff = fmtOff + 2 + fmtPrefixLen;
+          auto endMarker = rewriter.create<LLVM::ConstantOp>(loc, i8Type, rewriter.getI8IntegerAttr(0));
+          auto endOffVal = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, endOff));
+          storeByteAt(logBufBase, endOffVal.getResult(), endMarker);
+          auto nextWriteOffI64 = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, elemRecordSize));
+          rewriter.create<scf::YieldOp>(loc, ValueRange{nextWriteOffI64.getResult()});
+        }
+        rewriter.create<scf::YieldOp>(loc, colLoop.getResults());
+      }
       rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
-
-      // DCCI flush
       auto flushNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
-      auto flushOne = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(1));
-      rewriter.create<LLVM::CallOp>(loc, TypeRange{},
-                                     dcciFunc.getSymName(),
-                                     ValueRange{flushNull.getResult(),
-                                                flushOne.getResult()});
-      // yield is already created by the builder
+      auto flushOne = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(1));
+      rewriter.create<LLVM::CallOp>(loc, TypeRange{}, dcciFunc.getSymName(), ValueRange{flushNull.getResult(), flushOne.getResult()});
     }
-
     rewriter.eraseOp(op);
     return success();
   }
-
 private:
   LoweringState &state;
 };
@@ -11083,6 +11159,7 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyUbufToUbufOpPattern,
                LowerCopyCbufToUbufOpPattern,
                LowerCopyUbufToCbufOpPattern,
+               LowerAllocTileOpPattern,
                LowerPrintOpPattern,
                LowerTPrintOpPattern>(
       typeConverter, patterns.getContext(), state);
@@ -11096,6 +11173,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                          LLVM::LLVMDialect,
                          func::FuncDialect, scf::SCFDialect>();
   target.addLegalOp<UnrealizedConversionCastOp>();
+  target.addIllegalOp<pto::AllocTileOp>();
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
                       pto::CmoCacheInvalidOp, pto::FenceBarrierAllOp,

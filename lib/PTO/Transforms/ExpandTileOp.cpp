@@ -1339,6 +1339,10 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
   func.walk([&](Operation *op) {
     if (isa<pto::TReshapeOp>(op))
       return;
+    // Debug ops (print, tprint) are lowered directly by the VPTO/EmitC
+    // backend and do not need TileLib template expansion.
+    if (isa<pto::PrintOp>(op) || isa<pto::TPrintOp>(op))
+      return;
     if (isa<pto::OpPipeInterface>(op))
       tileOps.push_back(op);
   });
