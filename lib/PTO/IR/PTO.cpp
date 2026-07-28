@@ -13,6 +13,7 @@
 #include "PTO/IR/PTOMultiBuffer.h"
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/IR/PTOSyncUtils.h"
+#include "PTO/Transforms/PrintEncoding.h"
 
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -12858,68 +12859,21 @@ mlir::LogicalResult mlir::pto::PrintOp::verify() {
     return emitOpError() << "expected numeric scalar type, got " << scalarType;
   }
 
-  // Validate format string: must contain exactly one non-%% conversion
-  // specifier, and the specifier kind must match the operand type.
-  StringRef fmt = getFormat();
-  if (fmt.empty())
-    return emitOpError() << "format string must not be empty";
+  // Validate format string via shared analysis.
+  auto info = analyzePrintFormat(getFormat());
+  if (failed(info))
+    return emitOpError()
+           << "format string must contain exactly one conversion specifier: \""
+           << getFormat() << "\"";
 
+  // Check conversion kind matches operand type.
   bool isFloat = isa<FloatType>(scalarType);
-  int convCount = 0;
-  size_t pos = 0;
-  while (pos < fmt.size()) {
-    if (fmt[pos] != '%') { ++pos; continue; }
-    ++pos;
-    if (pos >= fmt.size())
-      return emitOpError() << "trailing '%' in format string";
-    if (fmt[pos] == '%') { ++pos; continue; } // skip %%
-
-    // Found a conversion specifier — skip flags, width, precision, length.
-    while (pos < fmt.size() &&
-           (fmt[pos] == '+' || fmt[pos] == '-' || fmt[pos] == '0' ||
-            fmt[pos] == '#' || fmt[pos] == ' '))
-      ++pos;
-    while (pos < fmt.size() && fmt[pos] >= '0' && fmt[pos] <= '9')
-      ++pos;
-    if (pos < fmt.size() && fmt[pos] == '.') {
-      ++pos;
-      while (pos < fmt.size() && fmt[pos] >= '0' && fmt[pos] <= '9')
-        ++pos;
-    }
-    if (pos < fmt.size() &&
-        (fmt[pos] == 'l' || fmt[pos] == 'h' || fmt[pos] == 'z'))
-      ++pos;
-    if (pos >= fmt.size())
-      return emitOpError() << "incomplete conversion specifier in format string";
-
-    char conv = fmt[pos++];
-    ++convCount;
-
-    // Check conversion character matches operand type.
-    bool convIsFloat = (conv == 'f' || conv == 'F' || conv == 'e' ||
-                        conv == 'E' || conv == 'g' || conv == 'G' ||
-                        conv == 'a' || conv == 'A');
-    bool convIsInt = (conv == 'd' || conv == 'i' || conv == 'u' ||
-                      conv == 'x' || conv == 'X' || conv == 'o');
-    if (isFloat && convIsInt)
-      return emitOpError()
-             << "float operand with integer format specifier '%"
-             << conv << "'";
-    if (!isFloat && convIsFloat)
-      return emitOpError()
-             << "integer operand with float format specifier '%"
-             << conv << "'";
-    if (!convIsFloat && !convIsInt)
-      return emitOpError() << "unsupported format specifier '%" << conv << "'";
-  }
-
-  if (convCount == 0)
+  if (isFloat && info->conversion != PrintConversionKind::Float)
     return emitOpError()
-           << "format string must contain exactly one conversion specifier";
-  if (convCount > 1)
+           << "float operand requires float format specifier (%f/%e/%g/%a)";
+  if (!isFloat && info->conversion == PrintConversionKind::Float)
     return emitOpError()
-           << "format string must contain exactly one conversion specifier, "
-           << "got " << convCount;
+           << "integer operand requires integer format specifier (%d/%i/%u/%x/%o)";
 
   return success();
 }

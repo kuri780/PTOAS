@@ -39,8 +39,10 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     // ================================================================
     // [2] Print ①: scalar float + int print with block info
     // ================================================================
-    pto.print ins("[block %d] value = %+08.3f\n", %value : f32)
-    pto.print ins("[block %d] total_elems = %d\n", %total_elems : i32)
+    pto.print ins("block %d\n", %block_idx_i32 : i32)
+    pto.print ins("value = %+08.3f\n", %value : f32)
+    pto.print ins("block %d\n", %block_idx_i32 : i32)
+    pto.print ins("total_elems = %d\n", %total_elems : i32)
 
     // ================================================================
     // [3] scf.for + Print ②: print inside a loop (executes once)

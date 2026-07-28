@@ -40,7 +40,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
     // Test print inside a loop construct (exercises control flow + print)
     scf.for %i = %c0 to %c1 step %c1 {
-      pto.print ins("inside loop body\n", %mode : i32)
+      pto.print ins("inside loop body, mode=%d\n", %mode : i32)
     }
 
     // Store result from UB to GM output

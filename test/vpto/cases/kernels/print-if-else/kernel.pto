@@ -35,9 +35,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
     // Conditional: if mode > 0, print "positive"; else print "non-positive"
     %is_pos = arith.cmpi sgt, %mode, %c0_i32 : i32
     scf.if %is_pos {
-      pto.print ins("branch = positive\n", %mode : i32)
+      pto.print ins("branch = positive, mode=%d\n", %mode : i32)
     } else {
-      pto.print ins("branch = non-positive\n", %mode : i32)
+      pto.print ins("branch = non-positive, mode=%d\n", %mode : i32)
     }
 
     // Print element count

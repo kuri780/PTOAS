@@ -9252,40 +9252,20 @@ public:
       return op.emitError("pto.print must be inside a function");
     Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
 
-    // Compute scalar metadata.
+    // Compute scalar metadata and format info (shared analysis).
     Value scalar = adaptor.getScalar();
     Type scalarType = scalar.getType();
-    bool isFloat = isa<FloatType>(scalarType);
-    int64_t dataSize = isFloat ? 4 : 8;
 
-    // Parse format string to compute record layout.
-    StringRef fmtStr = op.getFormat();
-    size_t prefixLen = 0;
-    {
-      size_t pos = 0;
-      while (pos < fmtStr.size()) {
-        if (fmtStr[pos] == '%') {
-          prefixLen = pos; pos++;
-          while (pos < fmtStr.size() &&
-                 (fmtStr[pos] == '+' || fmtStr[pos] == '-' ||
-                  fmtStr[pos] == '0' || fmtStr[pos] == '#' ||
-                  fmtStr[pos] == ' ')) pos++;
-          while (pos < fmtStr.size() && fmtStr[pos] >= '0' &&
-                 fmtStr[pos] <= '9') pos++;
-          if (pos < fmtStr.size() && fmtStr[pos] == '.') {
-            pos++;
-            while (pos < fmtStr.size() && fmtStr[pos] >= '0' &&
-                   fmtStr[pos] <= '9') pos++;
-          }
-          if (pos < fmtStr.size() &&
-              (fmtStr[pos] == 'l' || fmtStr[pos] == 'h' || fmtStr[pos] == 'z')) pos++;
-          if (pos < fmtStr.size()) { pos++; prefixLen = pos; }
-        } else { pos++; }
-      }
-    }
-    int64_t fmtPrefixLen = static_cast<int64_t>(prefixLen) + 1;
-    int64_t fmtSuffixLen = static_cast<int64_t>(fmtStr.size() - prefixLen) + 1;
-    int64_t recordSize = 1 + dataSize + 2 + fmtPrefixLen + 1 + 2 + fmtSuffixLen + 1;
+    auto formatInfo = analyzePrintFormat(op.getFormat());
+    if (failed(formatInfo))
+      return op.emitError("internal: failed to parse format string '")
+             << op.getFormat() << "'";
+    int64_t dataSize = static_cast<int64_t>(formatInfo->getDataSize());
+    int64_t fmtPrefixLen = formatInfo->prefixBytes;
+    int64_t fmtSuffixLen = formatInfo->suffixBytes;
+    int64_t recordSize = static_cast<int64_t>(formatInfo->getRecordSize());
+    // Byte offset right after the conversion specifier (used for suffix copy).
+    int64_t prefixLen = static_cast<int64_t>(formatInfo->prefixBytes) - 1;
 
     // Pre-resolve: if the block-idx intrinsic is unavailable, skip printing
     // entirely.
@@ -9390,7 +9370,8 @@ public:
 
       // [0] Type marker and [1..N] data bytes — use the shared scalar
       // encoding helper for type-agnostic DebugTunnel protocol conversion.
-      auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar);
+      auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar,
+                                   formatInfo->conversion);
       if (failed(enc)) return failure();
 
       auto markerVal = rewriter.create<LLVM::ConstantOp>(
