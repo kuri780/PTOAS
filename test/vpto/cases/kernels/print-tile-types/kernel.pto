@@ -17,7 +17,8 @@
 // DebugTunnel tile data dump protocol.
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @print_tile_types_kernel() attributes {pto.entry} {
+  // Dummy f32 arg ensures CCE runtime injects DTData for print support.
+func.func @print_tile_types_kernel(%dummy: f32) attributes {pto.entry} {
     // f16 tile: cols=16 ensures 32-byte row alignment (16 * 2 = 32)
     %tile_f16 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     pto.tprint ins(%tile_f16 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)

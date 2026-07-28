@@ -14,8 +14,8 @@
 #define AICORE [aicore]
 #endif
 
-extern "C" __global__ AICORE void print_tile_kernel_mix_aiv();
+extern "C" __global__ AICORE void print_tile_kernel_mix_aiv(float dummy);
 
 void LaunchPrintTileKernelMixAiv(void *stream) {
-  print_tile_kernel_mix_aiv<<<1, nullptr, stream>>>();
+  print_tile_kernel_mix_aiv<<<1, nullptr, stream>>>(0.0f);
 }

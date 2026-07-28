@@ -9,14 +9,15 @@
 // -----------------------------------------------------------------------------
 // case: kernels/print-scalar-types
 // target_ops: pto.print (f16, f64, i32, i64)
-// All values are kernel-side constants — no host parameters needed.
+// Dummy float arg required for CCE runtime to inject DTData for print support.
+// All print values are kernel-side constants.
 // -----------------------------------------------------------------------------
 #ifndef AICORE
 #define AICORE [aicore]
 #endif
 
-extern "C" __global__ AICORE void print_scalar_types_kernel_mix_aiv();
+extern "C" __global__ AICORE void print_scalar_types_kernel_mix_aiv(float dummy);
 
 void LaunchPrintScalarTypesKernelMixAiv(void *stream) {
-  print_scalar_types_kernel_mix_aiv<<<1, nullptr, stream>>>();
+  print_scalar_types_kernel_mix_aiv<<<1, nullptr, stream>>>(0.0f);
 }

@@ -13,7 +13,8 @@
 // scenarios: print-tile-vec, debug-tunnel, tprint-protocol
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @print_tile_kernel() attributes {pto.entry} {
+  // Dummy f32 arg ensures CCE runtime injects DTData for print support.
+  func.func @print_tile_kernel(%dummy: f32) attributes {pto.entry} {
     %0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     pto.tprint ins(%0 : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return

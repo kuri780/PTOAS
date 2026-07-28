@@ -104,13 +104,16 @@ log "[${CASE_TOKEN}] step 2/5: LLVM IR → device.o"
 # ------------------------------------------------------------------
 log "[${CASE_TOKEN}] step 3/5: host stub → fatobj"
 HOST_STUB="${OUT_DIR}/host_stub.cpp"
+# Auto-detect the launch function name from the case's launch.cpp
+LAUNCH_FN="$(grep -oP 'void \KLaunch\w+' "${CASE_DIR}/launch.cpp" | head -1 || echo "LaunchPrintTileKernelMixAiv")"
+
 cat > "${HOST_STUB}" << HOSTEOF
 #ifndef AICORE
 #define AICORE [aicore]
 #endif
-extern "C" __global__ AICORE void ${KERNEL_NAME}() {}
-extern "C" void LaunchPrintTileKernelMixAiv(void *stream) {
-    ${KERNEL_NAME}<<<1, nullptr, stream>>>();
+extern "C" __global__ AICORE void ${KERNEL_NAME}(float dummy) {}
+extern "C" void ${LAUNCH_FN}(void *stream) {
+    ${KERNEL_NAME}<<<1, nullptr, stream>>>(0.0f);
 }
 HOSTEOF
 

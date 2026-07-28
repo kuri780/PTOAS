@@ -24,7 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-extern "C" void LaunchPrint_all_features_kernel_mix_aiv(float arg0, int32_t arg1,
+void LaunchPrint_all_features_kernel_mix_aiv(float arg0, int32_t arg1,
                                                           void *stream);
 
 int main(int argc, char **argv) {
