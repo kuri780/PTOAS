@@ -9280,6 +9280,8 @@ public:
     auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
+    auto i16Type = rewriter.getI16Type();
+    auto f32Type = rewriter.getF32Type();
 
     // Look up format-string global.
     StringRef fmt = op.getFormat();
@@ -9439,13 +9441,28 @@ public:
       storeI8(writePtr.getResult(), 0, markerVal);
 
       // [1..N] Data bytes (little-endian)
+      // All float types write 4 bytes with DT_FLOAT=2 marker for protocol
+      // compatibility.  Narrow types (f16/bf16) are widened; wide types
+      // (f64) are truncated.
       if (isFloat) {
-        auto bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
+        Value i32Bits;
+        if (auto ft = dyn_cast<FloatType>(scalarType)) {
+          if (ft.isF16() || ft.isBF16()) {
+            auto i16 = rewriter.create<LLVM::BitcastOp>(loc, i16Type, scalar);
+            i32Bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, i16);
+          } else if (ft.isF32()) {
+            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
+          } else {
+            // f64 or other width: truncate to f32 first
+            auto f32val = rewriter.create<LLVM::FPTruncOp>(loc, f32Type, scalar);
+            i32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
+          }
+        }
         for (int i = 0; i < 4; ++i) {
           auto shift = rewriter.create<LLVM::ConstantOp>(
               loc, i32Type, rewriter.getI32IntegerAttr(i * 8));
           auto shifted = rewriter.create<LLVM::LShrOp>(loc, i32Type,
-                                                        bits.getResult(), shift);
+                                                        i32Bits, shift);
           auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
           storeI8(writePtr.getResult(), 1 + i, byte);
         }
@@ -9586,6 +9603,7 @@ public:
     auto i32Type = rewriter.getI32Type();
     auto i8Type = rewriter.getI8Type();
     auto i1Type = rewriter.getI1Type();
+    auto f32Type = rewriter.getF32Type();
 
     auto srcType = dyn_cast<pto::TileBufType>(op.getSrc().getType());
     if (!srcType) return op.emitError("pto.tprint: source must be a tile_buf");
@@ -9692,12 +9710,16 @@ public:
           storeByteAt(logBufBase, writeOffCol, markerConst.getResult());
           if (isFloat) {
             Value bits;
-            if (elemType.isF16()) {
+            if (elemType.isF16() || elemType.isBF16()) {
               auto f16Bits = rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI16Type(), elemVal);
               bits = rewriter.create<LLVM::ZExtOp>(loc, i32Type, f16Bits.getResult());
-            } else {
+            } else if (elemType.isF32()) {
               auto f32Bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, elemVal);
               bits = f32Bits.getResult();
+            } else {
+              // f64 or other: truncate to f32 for protocol compatibility
+              auto f32Val = rewriter.create<LLVM::FPTruncOp>(loc, f32Type, elemVal);
+              bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32Val);
             }
             for (int i = 0; i < 4; ++i) {
               auto shift = rewriter.create<LLVM::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(i * 8));

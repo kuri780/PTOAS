@@ -1,0 +1,31 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// -----------------------------------------------------------------------------
+// case: kernels/print-tile-types
+// family: kernels
+// target_ops: pto.tprint, pto.alloc_tile
+// scenarios: print-tile-f16, print-tile-i32, tprint-type-coverage
+//
+// Verifies that pto.tprint correctly lowers f16 tiles (bitcast i16 →
+// zext i32) and i32 tiles (sext i32 → i64) through the DebugTunnel
+// tile data dump protocol.
+// -----------------------------------------------------------------------------
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @print_tile_types_kernel() attributes {pto.entry} {
+    // f16 tile: cols=16 ensures 32-byte row alignment (16 * 2 = 32)
+    %tile_f16 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tprint ins(%tile_f16 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    // i32 tile: cols=8 ensures 32-byte row alignment (8 * 4 = 32)
+    %tile_i32 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tprint ins(%tile_i32 : !pto.tile_buf<loc=vec, dtype=i32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+
+    return
+  }
+}
