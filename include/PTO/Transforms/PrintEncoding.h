@@ -32,11 +32,11 @@ enum class PrintConversionKind : uint8_t {
 // ---------------------------------------------------------------------------
 struct PrintFormatInfo {
   PrintConversionKind conversion;
-  /// Number of bytes to emit for the prefix (the part up to and including
-  /// the conversion specifier), counting the null terminator.
+  uint16_t prefixOffset;
   uint16_t prefixBytes;
-  /// Number of bytes to emit for the suffix (the part after the conversion
-  /// specifier), counting the null terminator.
+  uint16_t conversionOffset;
+  uint16_t conversionBytes;
+  uint16_t suffixOffset;
   uint16_t suffixBytes;
 
   /// Protocol data size in bytes: 4 for float, 8 for integer.
@@ -44,11 +44,11 @@ struct PrintFormatInfo {
     return (conversion == PrintConversionKind::Float) ? 4 : 8;
   }
 
-  /// Total DebugTunnel protocol record size for this print op.
-  /// Layout: [type:1][data:4/8][fmt_len:2][fmt_prefix:N][NORMAL=1][rem_len:2][fmt_suffix:M][END=0]
   uint32_t getRecordSize() const {
-    unsigned ds = getDataSize();
-    return 1 + ds + 2 + prefixBytes + 1 + 2 + suffixBytes + 1;
+    unsigned size = 1 + getDataSize() + 2 + conversionBytes;
+    if (prefixBytes) size += 1 + 2 + prefixBytes;
+    if (suffixBytes) size += 1 + 2 + suffixBytes;
+    return size + 1; // END
   }
 };
 
@@ -121,11 +121,16 @@ analyzePrintFormat(llvm::StringRef format) {
       return failure(); // unsupported specifier
     }
 
-    // prefixEnd = position right after the conversion character.
-    // prefixBytes = everything up to-and-including conv + null terminator.
-    size_t prefixEnd = pos;
-    info.prefixBytes = static_cast<uint16_t>(prefixEnd + 1);
-    info.suffixBytes = static_cast<uint16_t>(format.size() - prefixEnd + 1);
+    size_t conversionEnd = pos;
+    size_t conversionStart = format.rfind('%', conversionEnd - 1);
+    info.prefixOffset = 0;
+    info.prefixBytes = static_cast<uint16_t>(conversionStart ? conversionStart + 1 : 0);
+    info.conversionOffset = static_cast<uint16_t>(conversionStart);
+    info.conversionBytes = static_cast<uint16_t>(conversionEnd - conversionStart + 1);
+    info.suffixOffset = static_cast<uint16_t>(conversionEnd);
+    info.suffixBytes = static_cast<uint16_t>(conversionEnd < format.size()
+                                                 ? format.size() - conversionEnd + 1
+                                                 : 0);
 
     // Keep scanning to detect extra conversions (which we'll reject).
   }

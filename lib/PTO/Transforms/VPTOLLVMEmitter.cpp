@@ -9260,12 +9260,7 @@ public:
     if (failed(formatInfo))
       return op.emitError("internal: failed to parse format string '")
              << op.getFormat() << "'";
-    int64_t dataSize = static_cast<int64_t>(formatInfo->getDataSize());
-    int64_t fmtPrefixLen = formatInfo->prefixBytes;
-    int64_t fmtSuffixLen = formatInfo->suffixBytes;
     int64_t recordSize = static_cast<int64_t>(formatInfo->getRecordSize());
-    // Byte offset right after the conversion specifier (used for suffix copy).
-    int64_t prefixLen = static_cast<int64_t>(formatInfo->prefixBytes) - 1;
 
     // Pre-resolve: if the block-idx intrinsic is unavailable, skip printing
     // entirely.
@@ -9368,17 +9363,42 @@ public:
         rewriter.create<LLVM::StoreOp>(loc, val, ptr);
       };
 
-      // [0] Type marker and [1..N] data bytes — use the shared scalar
-      // encoding helper for type-agnostic DebugTunnel protocol conversion.
+      auto fmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type,
+                                                           globalName);
+      int64_t cursor = 0;
+      auto emitTextNode = [&](uint16_t sourceOffset, uint16_t byteCount) {
+        if (!byteCount) return;
+        auto marker = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(1));
+        storeI8(writePtr.getResult(), cursor++, marker);
+        auto lenLow = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(byteCount & 0xff));
+        auto lenHigh = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(byteCount >> 8));
+        storeI8(writePtr.getResult(), cursor++, lenLow);
+        storeI8(writePtr.getResult(), cursor++, lenHigh);
+        for (uint16_t i = 0; i + 1 < byteCount; ++i) {
+          auto source = rewriter.create<LLVM::ConstantOp>(
+              loc, i64Type, rewriter.getI64IntegerAttr(sourceOffset + i));
+          auto charPtr = rewriter.create<LLVM::GEPOp>(
+              loc, ptr0Type, i8Type, fmtGlobal.getResult(),
+              ValueRange{source.getResult()});
+          auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+          storeI8(writePtr.getResult(), cursor++, ch);
+        }
+        auto nul = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(0));
+        storeI8(writePtr.getResult(), cursor++, nul);
+      };
+
+      emitTextNode(formatInfo->prefixOffset, formatInfo->prefixBytes);
+
       auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar,
                                    formatInfo->conversion);
       if (failed(enc)) return failure();
-
-      auto markerVal = rewriter.create<LLVM::ConstantOp>(
+      auto valueMarker = rewriter.create<LLVM::ConstantOp>(
           loc, i8Type, rewriter.getI8IntegerAttr(enc->marker));
-      storeI8(writePtr.getResult(), 0, markerVal);
-
-      // Data bytes (little-endian).
+      storeI8(writePtr.getResult(), cursor++, valueMarker);
       Type shiftType = (enc->byteWidth == 4) ? i32Type : i64Type;
       for (unsigned i = 0; i < enc->byteWidth; ++i) {
         auto shift = rewriter.create<LLVM::ConstantOp>(
@@ -9386,67 +9406,32 @@ public:
         auto shifted = rewriter.create<LLVM::LShrOp>(loc, shiftType,
                                                       enc->bits, shift);
         auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
-        storeI8(writePtr.getResult(), 1 + i, byte);
+        storeI8(writePtr.getResult(), cursor++, byte);
       }
-
-      // Format string length (i16 LE)
-      int64_t fmtOff = 1 + dataSize;
-      auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen));
-      auto shift8 = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(8));
-      auto fmtLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenVal);
-      auto fmtLenShifted = rewriter.create<LLVM::LShrOp>(
-          loc, i64Type, fmtLenVal.getResult(), shift8.getResult());
-      auto fmtLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type,
-                                                        fmtLenShifted);
-      storeI8(writePtr.getResult(), fmtOff, fmtLenLow);
-      storeI8(writePtr.getResult(), fmtOff + 1, fmtLenHigh);
-
-      // Format string bytes (copy from global)
-      auto fmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type,
-                                                           globalName);
-      for (int64_t i = 0; i < fmtPrefixLen; ++i) {
-        auto charOff = rewriter.create<LLVM::ConstantOp>(
-            loc, i64Type, rewriter.getI64IntegerAttr(i));
+      auto conversionLenLow = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(formatInfo->conversionBytes & 0xff));
+      auto conversionLenHigh = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(formatInfo->conversionBytes >> 8));
+      storeI8(writePtr.getResult(), cursor++, conversionLenLow);
+      storeI8(writePtr.getResult(), cursor++, conversionLenHigh);
+      for (uint16_t i = 0; i + 1 < formatInfo->conversionBytes; ++i) {
+        auto source = rewriter.create<LLVM::ConstantOp>(
+            loc, i64Type, rewriter.getI64IntegerAttr(
+                              formatInfo->conversionOffset + i));
         auto charPtr = rewriter.create<LLVM::GEPOp>(
             loc, ptr0Type, i8Type, fmtGlobal.getResult(),
-            ValueRange{charOff.getResult()});
+            ValueRange{source.getResult()});
         auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
-        storeI8(writePtr.getResult(), fmtOff + 2 + i, ch);
+        storeI8(writePtr.getResult(), cursor++, ch);
       }
+      auto conversionNul = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(0));
+      storeI8(writePtr.getResult(), cursor++, conversionNul);
+      emitTextNode(formatInfo->suffixOffset, formatInfo->suffixBytes);
 
-      // NORMAL=1 section
-      int64_t normalOff = fmtOff + 2 + fmtPrefixLen;
-      auto normalMarker = rewriter.create<LLVM::ConstantOp>(
-          loc, i8Type, rewriter.getI8IntegerAttr(1));
-      storeI8(writePtr.getResult(), normalOff, normalMarker);
-
-      auto remLenVal = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(fmtSuffixLen));
-      auto remLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, remLenVal);
-      auto remLenShifted2 = rewriter.create<LLVM::LShrOp>(
-          loc, i64Type, remLenVal.getResult(), shift8.getResult());
-      auto remLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type,
-                                                        remLenShifted2);
-      storeI8(writePtr.getResult(), normalOff + 1, remLenLow);
-      storeI8(writePtr.getResult(), normalOff + 2, remLenHigh);
-
-      for (int64_t i = 0; i < fmtSuffixLen; ++i) {
-        auto charOff = rewriter.create<LLVM::ConstantOp>(
-            loc, i64Type, rewriter.getI64IntegerAttr(prefixLen + i));
-        auto charPtr = rewriter.create<LLVM::GEPOp>(
-            loc, ptr0Type, i8Type, fmtGlobal.getResult(),
-            ValueRange{charOff.getResult()});
-        auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
-        storeI8(writePtr.getResult(), normalOff + 3 + i, ch);
-      }
-
-      // END=0 marker
-      int64_t endOff = normalOff + 3 + fmtSuffixLen;
       auto endMarker = rewriter.create<LLVM::ConstantOp>(
           loc, i8Type, rewriter.getI8IntegerAttr(0));
-      storeI8(writePtr.getResult(), endOff, endMarker);
+      storeI8(writePtr.getResult(), cursor, endMarker);
 
       // Update pLogSize
       rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
@@ -9519,6 +9504,19 @@ public:
     std::string valFmtName = isFloat ? state.tprintFmtValF32 : state.tprintFmtValInt;
     int64_t fmtPrefixLen = isFloat ? 6 : 4;
     int64_t elemRecordSize = 1 + dataSize + 2 + fmtPrefixLen + 1;
+    std::string dtypeName = elemType.isF16() ? "float16" :
+                            elemType.isF32() ? "float32" : "int32";
+    std::string headerText = "=== [TPRINT Tile] Data Type: " + dtypeName +
+                             ", Layout: ND, TileType: Vec ===\n";
+    std::string shapeText = "  Shape: [" + std::to_string(rows) + ", " +
+                            std::to_string(cols) + "], Valid Shape: [" +
+                            std::to_string(rows) + ", " +
+                            std::to_string(cols) + "]\n";
+    auto literalRecordSize = [](const std::string &text) {
+      return static_cast<int64_t>(1 + 2 + text.size() + 1 + 1);
+    };
+    int64_t prefixRecordSize = literalRecordSize(headerText) +
+                               literalRecordSize(shapeText);
 
     auto func = op->getParentOfType<func::FuncOp>();
     if (!func || func.getNumArguments() == 0) { rewriter.eraseOp(op); return success(); }
@@ -9571,9 +9569,12 @@ public:
     auto cols64 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(cols));
     auto numElements = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(rows * cols));
     auto totalRecSize = rewriter.create<LLVM::MulOp>(loc, i64Type, numElements.getResult(), elemRecSizeVal.getResult());
+    auto totalSizeWithPrefix = rewriter.create<LLVM::AddOp>(
+        loc, i64Type, totalRecSize.getResult(),
+        getI64Constant(rewriter, loc, prefixRecordSize));
 
     auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
-    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type, pLogSize.getResult(), totalRecSize.getResult());
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type, pLogSize.getResult(), totalSizeWithPrefix.getResult());
     auto overflow = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(), logBufSize.getResult());
     auto overflowIf = rewriter.create<scf::IfOp>(loc, overflow.getResult(), /*withElseRegion=*/true);
     {
@@ -9588,11 +9589,28 @@ public:
       };
       auto header64 = getI64Constant(rewriter, loc, 64);
       auto curWriteOff = rewriter.create<LLVM::AddOp>(loc, i64Type, header64, pLogSize.getResult());
+      auto getByteConstant = [&](uint8_t value) {
+        return rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(value)).getResult();
+      };
+      auto writeLiteralRecord = [&](Value writeOff, const std::string &text) {
+        storeByteAt(logBufBase, writeOff, getByteConstant(1));
+        int64_t payloadSize = static_cast<int64_t>(text.size() + 1);
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 1)), getByteConstant(payloadSize & 0xff));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 2)), getByteConstant((payloadSize >> 8) & 0xff));
+        for (size_t i = 0; i < text.size(); ++i)
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 3 + i)), getByteConstant(static_cast<uint8_t>(text[i])));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 3 + text.size())), getByteConstant(0));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 4 + text.size())), getByteConstant(0));
+        return rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, literalRecordSize(text))).getResult();
+      };
+      Value afterHeader = writeLiteralRecord(curWriteOff.getResult(), headerText);
+      Value firstElementOff = writeLiteralRecord(afterHeader, shapeText);
       auto c0Idx = rewriter.create<arith::ConstantIndexOp>(loc, 0);
       auto c1Idx = rewriter.create<arith::ConstantIndexOp>(loc, 1);
       auto rowsIdx = rewriter.create<arith::ConstantIndexOp>(loc, rows);
       auto colsIdx = rewriter.create<arith::ConstantIndexOp>(loc, cols);
-      auto rowLoop = rewriter.create<scf::ForOp>(loc, c0Idx, rowsIdx, c1Idx, ValueRange{curWriteOff.getResult()});
+      auto rowLoop = rewriter.create<scf::ForOp>(loc, c0Idx, rowsIdx, c1Idx, ValueRange{firstElementOff});
       {
         OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPointToStart(rowLoop.getBody());
@@ -9628,7 +9646,7 @@ public:
             storeByteAt(logBufBase, off.getResult(), byte);
           }
           int64_t fmtOff = 1 + dataSize;
-          auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen - 1));
+          auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen));
           auto shift8 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(8));
           auto fmtLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenVal);
           auto fmtLenShifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, fmtLenVal.getResult(), shift8);
@@ -9642,6 +9660,12 @@ public:
             auto dstOff = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff + 2 + i));
             storeByteAt(logBufBase, dstOff.getResult(), ch);
           }
+          auto formatNul = rewriter.create<LLVM::ConstantOp>(
+              loc, i8Type, rewriter.getI8IntegerAttr(0));
+          auto nulOffVal = rewriter.create<LLVM::AddOp>(
+              loc, i64Type, writeOffCol,
+              getI64Constant(rewriter, loc, fmtOff + 2 + fmtPrefixLen - 1));
+          storeByteAt(logBufBase, nulOffVal.getResult(), formatNul);
           int64_t endOff = fmtOff + 2 + fmtPrefixLen;
           auto endMarker = rewriter.create<LLVM::ConstantOp>(loc, i8Type, rewriter.getI8IntegerAttr(0));
           auto endOffVal = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, endOff));

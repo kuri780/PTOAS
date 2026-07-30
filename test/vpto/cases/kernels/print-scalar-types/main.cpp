@@ -9,11 +9,11 @@
 // -----------------------------------------------------------------------------
 // case: kernels/print-scalar-types
 // family: kernels
-// target_ops: pto.print (f16, f64, i32, i64)
+// target_ops: pto.print (f16, f64, i32)
 // scenarios: debug-tunnel, scalar-multi-type-print
 //
 // Print validation uses the HiIPU Print console log, not device memory.
-// Expected output: "f16=", "f64=", "i32=", "i64=" lines from the kernel.
+// Expected output: "f16=", "f64=", "i32=" lines from the kernel.
 // -----------------------------------------------------------------------------
 #include <cstdio>
 

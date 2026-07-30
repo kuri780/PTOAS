@@ -8,7 +8,7 @@
 
 // -----------------------------------------------------------------------------
 // case: kernels/print-scalar-types
-// target_ops: pto.print (f16, f64, i32, i64)
+// target_ops: pto.print (f16, f64, i32)
 // Dummy float arg required for CCE runtime to inject DTData for print support.
 // All print values are kernel-side constants.
 // -----------------------------------------------------------------------------

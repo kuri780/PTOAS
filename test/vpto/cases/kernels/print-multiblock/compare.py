@@ -13,5 +13,12 @@ def compare(gp, op, dt, eps):
     return True
 def main():
     if not compare("golden_v2.bin","v2.bin",np.float32,1e-6): print("[ERROR] compare failed"); sys.exit(2)
+    if not os.path.exists("runtime.log"):
+        print("[ERROR] missing runtime.log"); sys.exit(2)
+    with open("runtime.log", errors="replace") as f:
+        output = f.read()
+    for expected in ("block_offset = 0", "block_offset = 32"):
+        if expected not in output:
+            print(f"[ERROR] missing print output: {expected}"); sys.exit(2)
     print("[INFO] compare passed")
 if __name__=="__main__": main()

@@ -225,7 +225,6 @@ case_output_token() {
 build_launch_object() {
   local case_dir="$1"
   local out_obj="$2"
-
   "${BISHENG_BIN}" \
     -c -fPIC -xcce -fenable-matrix --cce-aicore-enable-tl \
     -fPIC -Xhost-start -Xhost-end \
@@ -394,7 +393,7 @@ if [ -f "\$ASCEND_HOME_PATH/set_env.sh" ]; then source "\$ASCEND_HOME_PATH/set_e
 LD_LIBRARY_PATH="${out_dir}:${SIM_LIB_DIR}:\$ASCEND_HOME_PATH/lib64:\${LD_LIBRARY_PATH:-}" "./${case_token}"
 EOF
 )
-  run_remote "${remote_run_cmd}"
+  run_remote "${remote_run_cmd}" 2>&1 | tee "${out_dir}/runtime.log"
 
   local remote_ldd_cmd
   remote_ldd_cmd=$(cat <<EOF

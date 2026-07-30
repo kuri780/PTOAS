@@ -7,7 +7,7 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // -----------------------------------------------------------------------------
-// case: kernels/print-all-features — VPTO print/tprint/scf.{for,if} combined
+// case: kernels/print-all-features — VPTO scalar print integration
 // -----------------------------------------------------------------------------
 #ifndef AICORE
 #define AICORE [aicore]

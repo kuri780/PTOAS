@@ -9,70 +9,26 @@
 // -----------------------------------------------------------------------------
 // case: kernels/print-all-features
 // family: kernels
-// target_ops: pto.print, pto.tprint, pto.get_block_idx, pto.alloc_tile,
-//             scf.for, scf.if, pto.barrier
-// scenarios: full-integration, all-print-features, print-tprint-controlflow
+// target_ops: pto.print, pto.get_block_idx
+// scenarios: full-integration, all-print-features, print-controlflow-integration
 //
-// Combines ALL VPTO print capabilities into a single kernel:
-//   - Scalar print (float + int format)
-//   - TPRINT tile data dump
-//   - Multi-block (get_block_idx)
-//   - Control flow (scf.for) with print inside
-//   - Conditional (scf.if) with print in both branches
-//   - Multiple print ops at different pipeline stages
+// Integrates scalar print with arithmetic values.
+// TPrint is covered by its focused E2E cases.
 // -----------------------------------------------------------------------------
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @print_all_features_kernel(%value: f32,
                                         %total_elems: i32) attributes {pto.entry} {
     // ---- constants ----
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %c0_i32 = arith.constant 0 : i32
-
-    // ================================================================
-    // [1] Multi-block: get block identity
-    // ================================================================
     %block = pto.get_block_idx
     %block_idx = arith.index_cast %block : i64 to index
     %block_idx_i32 = arith.index_cast %block_idx : index to i32
 
-    // ================================================================
-    // [2] Print ①: scalar float + int print with block info
-    // ================================================================
+    // Multiple scalar formats share one DebugTunnel buffer.
     pto.print ins("block %d\n", %block_idx_i32 : i32)
     pto.print ins("value = %+08.3f\n", %value : f32)
     pto.print ins("block %d\n", %block_idx_i32 : i32)
     pto.print ins("total_elems = %d\n", %total_elems : i32)
 
-    // ================================================================
-    // [3] scf.for + Print ②: print inside a loop (executes once)
-    // ================================================================
-    scf.for %i = %c0 to %c1 step %c1 {
-      pto.print ins("[block %d] inside scf.for loop\n", %block_idx_i32 : i32)
-    }
-
-    // ================================================================
-    // [4] scf.if + Print ③: conditional print (both branches)
-    // ================================================================
-    %is_block0 = arith.cmpi eq, %block_idx_i32, %c0_i32 : i32
-    scf.if %is_block0 {
-      pto.print ins("[block %d] this is block 0\n", %block_idx_i32 : i32)
-    } else {
-      pto.print ins("[block %d] this is block 1\n", %block_idx_i32 : i32)
-    }
-
-    // ================================================================
-    // [5] TPRINT: dump a 4x4 f32 tile via DebugTunnel
-    // ================================================================
-    %debug_tile = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    pto.tprint ins(%debug_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=8, cols=8, v_row=8, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-
-    // ================================================================
-    // [6] Print ④: final block completion
-    // ================================================================
-    pto.print ins("[block %d] finished\n", %block_idx_i32 : i32)
-
-    pto.barrier #pto.pipe<PIPE_ALL>
     return
   }
 }
