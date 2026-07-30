@@ -22,13 +22,16 @@
 ; pto.print ins("x = %+08.3f\n", 3.14)
 ; 编译后变成：
 
-store i8 2,    ptr %writePtr+0        ; FLOAT marker = 2
-store i32 0x4048F5C3, ptr %writePtr+1 ; 3.14 的 IEEE 754 表示
-store i8 17,   ptr %writePtr+5        ; 格式串长度 (i16 LE 低字节)
-store i8 0,    ptr %writePtr+6        ; 格式串长度 (高字节)
-; 逐字节复制格式串 "x = %+08.3f"
-store i8 1,    ptr %writePtr+...      ; NORMAL marker
-; 逐字节复制后缀 "\n"
+store i8 1,    ptr %writePtr+0        ; NORMAL marker（普通文本节点）
+store i16 5,   ptr %writePtr+1        ; "x = \0" 的长度
+; 逐字节复制前缀 "x = \0"
+store i8 2,    ptr %writePtr+8        ; FLOAT marker = 2
+; 逐字节写入 3.14 的 f32 IEEE 754 表示
+store i16 8,   ptr %writePtr+13       ; "%+08.3f\0" 的长度
+; 逐字节复制转换格式 "%+08.3f\0"
+store i8 1,    ptr %writePtr+23       ; NORMAL marker（后缀文本节点）
+store i16 2,   ptr %writePtr+24       ; "\n\0" 的长度
+; 逐字节复制后缀 "\n\0"
 store i8 0,    ptr %writePtr+...      ; END marker
 ; 更新已写字节计数
 ; DCCI flush — 通知 Host 端来取
@@ -66,21 +69,25 @@ block N 的 log buffer = LogWholeRegion + N * stride
 
 ### 3.3 Protocol 字节序列
 
-以打印 `printf("x=%+08.3f\n", 3.25f)` 为例：
+以打印 `printf("x=%+08.3f\n", 3.25f)` 为例。普通文本和数值是独立的协议节点；字符串长度均包含结尾的 `\0`：
 
 ```
 偏移   大小   内容
 ────────────────────────────────────────────
-[0]    1B     FLOAT = 2           ← 类型标记
-[1]    4B     0x00 0x00 0x50 0x40  ← 3.25f 的 little-endian 表示
-[5]    2B     fmt_len = 17         ← 格式串长度 (i16 LE)
-[7]    16B    "x = %+08.3f"       ← 格式串前缀（% 之前的部分）
-[23]   1B     '\0'                 ← 格式串前缀结束符
-[24]   1B     NORMAL = 1           ← 分段标记
-[25]   2B     rem_len = 2          ← 剩余部分长度 (i16 LE)
-[27]   2B     "\n\0"              ← 格式串后缀（% 之后的部分）
-[29]   1B     END = 0              ← 结束标记
+[0]    1B     NORMAL = 1           ← 前缀文本节点
+[1]    2B     text_len = 3         ← "x=\0" 的长度 (i16 LE)
+[3]    3B     "x=\0"
+[6]    1B     FLOAT = 2            ← 数值节点
+[7]    4B     0x00 0x00 0x50 0x40 ← 3.25f 的 little-endian 表示
+[11]   2B     fmt_len = 8          ← "%+08.3f\0" 的长度 (i16 LE)
+[13]   8B     "%+08.3f\0"
+[21]   1B     NORMAL = 1           ← 后缀文本节点
+[22]   2B     text_len = 2         ← "\n\0" 的长度 (i16 LE)
+[24]   2B     "\n\0"
+[26]   1B     END = 0              ← 整条 print 结束
 ```
+
+如果转换符前后没有普通文本，对应的 NORMAL 节点不会生成。格式串必须恰好包含一个受支持的转换符。当前标量类型支持 f16、bf16、f32、f64 和不超过 32 位的整数；i64 暂不开放，因为现有 DebugTunnel Host 解码会截断高 32 位。
 
 ## 4. 编译管线
 
@@ -94,11 +101,7 @@ lowerVPTOOps():
   │
   ├── [预扫描] collectAndCreatePrintfStringGlobals
   │     扫描所有 pto.print → 去重格式串 → 创建 LLVM::GlobalOp
-  │     扫描所有 pto.tprint → 收集硬编码格式串 (header/shape/val/sep/...)
-  │                           → 创建对应的 LLVM::GlobalOp
-  │
-  ├── [预扫描] createConstrainedPrintHelpers
-  │     扫描 scf.if 内的 pto.print → 创建 outline helper stub
+  │     扫描所有 pto.tprint → 收集元素值格式串 → 创建 LLVM::GlobalOp
   │
   ├── [Entry ABI] addDTDataParamToEntryFunctions
   │     声明 CCE intrinsics (GET.BLOCK.IDX, DCCI, 等)
@@ -124,15 +127,14 @@ lowerVPTOOps():
 
 | 决策 | 原因 | 效果 |
 |------|------|------|
-| 用 `LLVM::CondBrOp` 而非 `scf::IfOp` 做 CFG | scf.if 的 region 约束限制了 block 操作 | CFG 自由构造，不受 region 限制 |
+| 用嵌套 `scf::IfOp` 做空指针和溢出检查 | 保持结构化控制流，便于后续统一转换 | print 可直接出现在普通控制流 region 中 |
 | 预扫描创建 format global | 保证 `AddressOfOp` 在 pattern 运行时 symbol 已存在 | 避免 pattern 内部创建 module-level op |
-| 预创建 outline helper stub | scf.if region 是 `SizedRegion<1>`，不能 splitBlock | print 可以安全出现在 if/else 分支里 |
 | 用 `LLVM::LLVMFuncOp` 声明 intrinsic | `injectPrintPrologue` 在 type conversion 后运行，需要 LLVM 类型 | func-to-LLVM conversion 前后类型一致 |
 | `materializeDecls` 去重已有 symbol | `addDTDataParamToEntryFunctions` 已创建 LLVM func | get_block_idx + print 共存不冲突 |
 | DTData 作为函数参数注入 | 不依赖全局变量 | ABI 干净，每个 block 有独立指针 |
 | `TileBufType` → `ptr addrspace(6)` | Tile 在 UB 中通过虚拟地址访问，需要 addrspace(6) 指针 | TPrint 和 AllocTile 可统一使用 LLVM pointer 类型 |
 | `LowerAllocTileOpPattern` 产生 null ptr | alloc_tile 的物理地址由 consumer op 计算（通过 `GET.SYS.VA.BASE`），alloc 本身不需要分配 | 简化类型转换，consumer 通过虚拟地址偏移访问 |
-| TPrint 用硬编码格式串 global | TPrint 输出固定格式的表格（header + 每行元素值），不需要 pto.print 那样灵活的自定义格式串 | 预扫描时收集 TPrint 专用格式串，一次性创建 global |
+| TPrint 使用固定输出格式 | header 和 shape 在 lowering 时形成文本记录，元素值使用预创建的格式串 global | 输出稳定且无需运行时格式解析 |
 
 ## 5. 与各类 PTO Op 的集成
 
@@ -148,135 +150,25 @@ Print 在流水线同步点之间执行，不影响任何硬件 pipeline 状态�
 
 ## 6. 完整示例：print-all-features
 
-### 6.1 PTO 源码（核心步骤）
+当前 `print-all-features` 用例聚焦验证标量 Print 与算术值、多 block 启动和 DebugTunnel buffer 的共存；TPrint、循环和条件控制流由各自的独立用例覆盖。
 
 ```mlir
-func.func @print_all_features_kernel(%input, %output, %total_elems: i32)
-    attributes {pto.kernel} {
-
-  // [1] get_block_idx — 多 block 身份
+func.func @print_all_features_kernel_mix_aiv(
+    %value: f32, %total_elems: i32) attributes {pto.entry} {
   %block = pto.get_block_idx
-  %elem_offset = arith.muli %block_idx, %c64 : index
+  %block_idx = arith.index_cast %block : i64 to index
+  %block_idx_i32 = arith.index_cast %block_idx : index to i32
 
-  // [2] Print ① + get_block_idx
-  pto.print ins("block %d starting\n", %elem_offset_i32 : i32)
-
-  // [3]+[4] addptr + mte_gm_ub — 指针偏移 + 内存搬运
-  %gm_in = pto.addptr %input, %elem_offset
-  pto.mte_gm_ub %gm_in, %ub_input, 0, 256
-  pto.set_flag / pto.wait_flag                        // MTE2 ↔ V sync
-
-  // [5] scf.for + Print ② — 循环控制流 + print
-  scf.for %i = %c0 to %c1 step %c1 {
-    pto.print ins("inside scf.for loop\n", %elem_offset_i32 : i32)
-  }
-
-  // [5b] scf.if + Print — 条件控制流 + print
-  %is_block0 = arith.cmpi eq, %elem_offset_i32, %c0_i32 : i32
-  scf.if %is_block0 {
-    pto.print ins("this is block 0\n", %elem_offset_i32 : i32)
-  } else {
-    pto.print ins("this is block 1\n", %elem_offset_i32 : i32)
-  }
-
-  // [6] Vector compute — vlds → vadd → vsts
-  pto.vecscope {
-    %active = pto.pset_b32 "PAT_ALL"
-    %vec_in = pto.vlds %ub_input[%c0]
-    %doubled = pto.vadd %vec_in, %vec_in, %active       // self-add = ×2
-    pto.vsts %doubled, %ub_output[%c0], %active
-  }
-
-  // [7] Print ③ — 向量计算完成后打印
-  pto.print ins("vector compute done\n", %total_elems : i32)
-
-  // [8]+[9] mte_ub_gm + Print ④ + barrier
-  pto.mte_ub_gm %ub_output, %gm_out, 256
-  pto.print ins("block %d finished\n", %elem_offset_i32 : i32)
-  pto.barrier #pto.pipe<PIPE_ALL>
+  pto.print ins("block %d\n", %block_idx_i32 : i32)
+  pto.print ins("value = %+08.3f\n", %value : f32)
+  pto.print ins("total_elems = %d\n", %total_elems : i32)
+  return
 }
 ```
 
-### 6.2 生成的 LLVM IR 结构
+Host runner 先创建 ACL device context 和 stream，再启动 kernel 并同步 stream。验证脚本保留 simulator 输出到 `runtime.log`，检查两个 block 的编号以及格式化后的标量值。
 
-```
-@_ptoas_printf_fmt_0 = constant [19 x i8] c"block %d starting\0A\00"
-@_ptoas_printf_fmt_1 = constant [21 x i8] c"inside scf.for loop\0A\00"
-@_ptoas_printf_fmt_2 = constant [17 x i8] c"this is block 0\0A\00"
-@_ptoas_printf_fmt_3 = constant [17 x i8] c"this is block 1\0A\00"
-@_ptoas_printf_fmt_4 = constant [21 x i8] c"vector compute done\0A\00"
-@_ptoas_printf_fmt_5 = constant [19 x i8] c"block %d finished\0A\00"
-
-; CCE intrinsic declarations
-declare i64 @llvm.hivm.GET.BLOCK.IDX()
-declare void @llvm.hivm.DCCI(ptr addrspace(1), i64)
-declare <64 x float> @llvm.hivm.vldsx1.v64f32(...)
-declare <64 x float> @llvm.hivm.vadd.v64f32.x(...)
-; ... 等等
-
-; === scf.if 内 print 的 outline helper ===
-define void @_ptoas_print_if_0(ptr addrspace(1) %dtdata, i32 %val) {
-  ; null check → overflow check → 逐字节写 protocol → DCCI flush → ret
-}
-
-define void @_ptoas_print_if_1(ptr addrspace(1) %dtdata, i32 %val) {
-  ; 同上，不同的格式串
-}
-
-; === 主 kernel 函数 ===
-define void @print_all_features_kernel_mix_aiv(
-    ptr addrspace(1) %input, ptr addrspace(1) %output,
-    i32 %total_elems, ptr addrspace(1) %dtdata) {
-
-  ; --- Prologue (编译器注入) ---
-  %fix = call ptr @get.sycl.fix.stack.object()
-  ; null check → store DTData to fix stack → store kernelWriteType = AiV
-
-  ; --- [1]+[2] get_block_idx + Print ① ---
-  %blk = call i64 @GET.BLOCK.IDX()
-  %off = mul i64 %blk, 64
-  ; Print ① protocol: null check → overflow check → store bytes → DCCI
-
-  ; --- [3]+[4] addptr + mte_gm_ub ---
-  %gm_in  = getelementptr float, ptr %input, i64 %off
-  %gm_out = getelementptr float, ptr %output, i64 %off
-  call void @MOV.OUT.TO.UB(...)
-  call void @SET.FLAG(4, 1, 0) / @WAIT.FLAG(4, 1, 0)
-
-  ; --- [5] scf.for (eliminated) → Print ② 内联 ---
-  ; Print ② protocol: null check → ... → DCCI
-
-  ; --- [5b] scf.if → call outline helpers ---
-  %is_blk0 = icmp eq i32 %offset, 0
-  br i1 %is_blk0, label %then, label %else
-then:
-  call void @_ptoas_print_if_0(ptr %dtdata, i32 %offset)
-  br label %merge
-else:
-  call void @_ptoas_print_if_1(ptr %dtdata, i32 %offset)
-  br label %merge
-
-  ; --- [6] Vector compute ---
-merge:
-  br label %vecscope_loop
-vecscope_loop:
-  %mask = call <256 x i1> @pset.b32(i32 0)           ; PAT_ALL
-  %in   = call <64 x float> @vldsx1(ptr null, 0, 0, 0)
-  %out  = call <64 x float> @vadd(%in, %in, %mask)   ; self-add = ×2
-  call void @vstsx1(%out, ptr inttoptr(256), 0, 2, 0, %mask)
-
-  ; --- [7] Print ③ ---
-  ; Protocol: null check → ... → DCCI
-
-  ; --- [8]+[9] mte_ub_gm + Print ④ ---
-  call void @SET.FLAG(1, 5, 0) / @WAIT.FLAG(1, 5, 0)
-  call void @MOV.UB.TO.OUT(...)
-  ; Print ④ protocol
-  call void @BARRIER(6)
-  ret void
-}
-```
-
+控制流场景不需要 outline helper：`LowerPrintOpPattern` 直接生成嵌套 `scf.if`，因此 Print 可以保留在已有的 `scf.for` 和 `scf.if` region 中。
 
 ## 8. TPrintOp：Tile 数据打印
 
@@ -291,18 +183,15 @@ vecscope_loop:
 3. **逐元素 Protocol 写入** — 每个元素写 FLOAT/INT marker + 数据 bytes + 格式串 + END marker
 4. **末尾单次 DCCI flush** — 所有元素写入完成后集中 flush
 
-### 8.2 编译期格式串预扫描
+### 8.2 固定输出记录
 
-TPrint 的格式串是**固定的**（不像 `pto.print` 那样由用户自由指定）。当预扫描检测到模块中存在 `pto::TPrintOp` 时，自动创建以下格式串 global：
+TPrint 输出由三部分组成：
 
-```
-=== [TPRINT Tile] Data Type: %s, Layout: %s, TileType: %s ===\n   ← header
-  Shape: [%d, %d], Valid Shape: [%d, %d]\n                       ← shape
-%6.2f 或 %6d                                                      ← 元素值格式
-" "  "\n"  "|"  "------"                                         ← 分隔符
-```
+1. lowering 根据 Tile 类型和静态 shape 生成 header 文本记录，例如 `Data Type: float32, Layout: ND, TileType: Vec`。
+2. lowering 生成 shape 文本记录，包含 `Shape` 和 `Valid Shape`。
+3. 嵌套循环为每个元素生成数值记录；f16/f32 使用 `%6.2f`，i32 使用 `%6d`。
 
-这些格式串在 `LoweringState` 中通过专门的字段（`tprintFmtHeader`、`tprintFmtValF32` 等）记录，供 `LowerTPrintOpPattern` 使用。
+header 和 shape 已经是完全确定的文本，不需要运行时替换 `%s` 或 `%d`。元素格式串由预扫描创建为 LLVM global，供逐元素记录引用。buffer 容量检查同时计入两个文本记录和全部元素记录。
 
 ### 8.3 LowerAllocTileOpPattern：Tile 分配 → null ptr
 
@@ -464,7 +353,7 @@ define void @tprint_test_kernel_mix_aiv(ptr addrspace(1) %dtdata) {
 - 通过 `ptr addrspace(6)` 访问 UB（昇腾 AICORE 的 UB 地址空间）
 - 每个元素写一条完整的 DebugTunnel protocol 记录
 - 所有元素写完后仅一次 DCCI flush（而非每个元素都 flush）
-- 每个元素的 record 大小在编译期确定：`1(marker) + dataSize + 2(fmtLen) + fmtPrefixLen + 1(end)`
+- TPrint 总大小在编译期确定：两个文本记录，加上 `rows × cols × (1 + dataSize + 2 + fmtBytes + 1)`
 
 ### 8.6 TPrint 特有的设计决策
 
@@ -473,7 +362,7 @@ define void @tprint_test_kernel_mix_aiv(ptr addrspace(1) %dtdata) {
 | 嵌套 `scf.for` 而非展开所有元素 | 大 tile（如 16×64=1024 元素）全展开会生成数千条 store，代码膨胀严重 | 保留循环结构，LLVM 后端可根据 target 决定是否展开 |
 | `alloc_tile` → null ptr | 物理地址由 consumer (`tprint`) 通过虚拟地址计算，alloc 本身只做类型占位 | 避免在 lowering 阶段处理 UB 物理分配 |
 | 末尾单次 DCCI flush | 逐元素 flush 会产生 64×N 次 cache 同步，性能极差 | 一次 flush 完成所有元素数据的通知 |
-| 硬编码格式串 | TPrint 的表格输出格式固定（header + rows × cols），不需要 `pto.print` 的灵活格式串 | 预扫描时一次性创建所有 global |
+| 固定 header/shape 文本记录 | Tile 元数据在编译期已知 | Host 输出包含稳定的类型、布局和 shape 信息 |
 
 ## 7. 遇到的关键问题与解决方案
 
@@ -485,11 +374,9 @@ define void @tprint_test_kernel_mix_aiv(ptr addrspace(1) %dtdata) {
 1. `materializeDecls` 跳过已存在 `LLVM::LLVMFuncOp` 的 symbol
 2. `LowerRuntimeQueryOpPattern` 检测到已有 LLVM func 时，直接用 `LLVM::CallOp` 而非 `func::CallOp` + 延迟声明
 
-### 7.2 scf.if + print 块拆分冲突
+### 7.2 scf.if / scf.for 中的 Print
 
-**问题**：`LowerPrintOpPattern` 用 `splitBlock` 创建多 block CFG，但 scf.if region 是 `SizedRegion<1>`，不能容纳多 block。
-
-**修复**：预制 outline helper stub → pattern 运行时填充 helper body → if-region 内用 `LLVM::CallOp` 调用 helper。
+`LowerPrintOpPattern` 使用嵌套 `scf::IfOp` 完成 DTData、LogWholeRegion 和 buffer overflow 检查，不再拆分所在 block，也不再创建 outline helper。因此 Print 可以直接位于已有的 `scf.if` 或 `scf.for` region 中。
 
 ### 7.3 CC1 模式无法编译 DebugTunnel host stub
 
@@ -599,15 +486,10 @@ define void @print_scalar_kernel_mix_aiv(float %0, ptr addrspace(1) %1) {
 
   if overflow → update pLogSize, skip
 
-  ; FLOAT marker + value (4 bytes LE) + format length (i16 LE)
-  store i8 2,    ptr logBuf+0       ; FLOAT marker = 2
-  ; bitcast float → i32, lshr/trunc 逐字节写入
-  store i8 17,   ptr logBuf+5       ; 格式串前缀长度 = 17
-  store i8 0,    ptr logBuf+6
-  ; 16 字节格式串前缀 "scalar = %+08.3f" 逐字节从 global 加载 → store
-  ; NORMAL marker = 1, 剩余长度 = 2
-  ; 后缀 "\n\0" 逐字节加载 → store
-  ; END marker = 0
+  ; NORMAL 前缀节点: "scalar = \0"
+  ; FLOAT 节点: marker + 4-byte value + "%+08.3f\0"
+  ; NORMAL 后缀节点: "\n\0"
+  ; END marker
 
   store newPls to logBuf            ; 更新已写字节数
   call void @llvm.hivm.DCCI(null, 1) ; flush
@@ -653,25 +535,17 @@ switch %specifier {
 **VPTO 路径**：LowerPrintOpPattern 在编译期解析格式串，直接算出数值：
 
 ```cpp
-// 编译期解析 —— 在 LowerPrintOpPattern::matchAndRewrite 中
-size_t prefixLen = 0;
-while (pos < fmtStr.size()) {
-  if (fmtStr[pos] == '%') {
-    prefixLen = pos;  // "%" 之前的部分
-    pos++;
-    while (flags) pos++;   // '+', '-', '0', '#', ' '
-    while (digits) pos++;  // width
-    if ('.') while (digits) pos++;  // precision
-    if (length) pos++;     // l, h, z
-    pos++; prefixLen = pos;  // 跳过格式说明符
-  } else { pos++; }
-}
+// 编译期解析由 verifier 和 lowering 共用
+auto info = analyzePrintFormat(format);
 
-// 直接展开为常量 store，不需要运行时 switch
-uint8_t typeMarker = isFloat ? 2 : 3;
-storeI8(writePtr, 0, typeMarker);   // 编译期常量
-storeI8(writePtr, 5, prefixLen);    // 编译期常量
-storeI8(writePtr, 6, 0);            // 编译期常量
+// info 记录前缀、转换格式和后缀的 offset/bytes。
+// lowering 据此生成可选 NORMAL 文本节点和一个数值节点。
+auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar,
+                             info->conversion);
+emitTextNode(info->prefixOffset, info->prefixBytes);
+emitValueNode(enc, info->conversionOffset, info->conversionBytes);
+emitTextNode(info->suffixOffset, info->suffixBytes);
+emitEndNode();
 ```
 
 ### 9.4 数据写入：通用循环 vs 直线 store
