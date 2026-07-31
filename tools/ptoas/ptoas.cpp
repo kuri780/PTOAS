@@ -2977,6 +2977,12 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 
   result.vptoStubSource = std::move(stubSource);
   result.kind = PTOASCompileResultKind::VPTOObject;
+
+  // Detect whether the module uses print ops so the host stub compiler can
+  // inject --cce-enable-print flags for DebugTunnel support.
+  module.walk([&](pto::PrintOp) { result.usesPrint = true; });
+  module.walk([&](pto::TPrintOp) { result.usesPrint = true; });
+
   return 0;
 }
 

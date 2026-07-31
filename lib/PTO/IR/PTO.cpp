@@ -13,6 +13,7 @@
 #include "PTO/IR/PTOMultiBuffer.h"
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/IR/PTOSyncUtils.h"
+#include "PTO/Transforms/PrintEncoding.h"
 
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -12694,6 +12695,48 @@ mlir::LogicalResult mlir::pto::TXorSOp::verify() {
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
+// ---------------------------------------------------------------------------
+// PrintOp verifier: restrict types and validate format string.
+// ---------------------------------------------------------------------------
+mlir::LogicalResult mlir::pto::PrintOp::verify() {
+  Type scalarType = getScalar().getType();
+
+  // Check type is in the supported set.
+  if (auto ft = dyn_cast<FloatType>(scalarType)) {
+    if (!(ft.isF16() || ft.isBF16() || ft.isF32() || ft.isF64()))
+      return emitOpError()
+             << "unsupported float type for print: " << scalarType
+             << "; supported: f16, bf16, f32, f64";
+  } else if (auto it = dyn_cast<IntegerType>(scalarType)) {
+    unsigned w = it.getWidth();
+    // TODO: re-enable i64 once DebugTunnel protocol transmits full 64-bit values.
+    if (w != 8 && w != 16 && w != 32)
+      return emitOpError()
+             << "unsupported integer width for print: " << w
+             << "; supported: i8, i16, i32";
+  } else {
+    return emitOpError() << "expected numeric scalar type, got " << scalarType;
+  }
+
+  // Validate format string via shared analysis.
+  auto info = analyzePrintFormat(getFormat());
+  if (failed(info))
+    return emitOpError()
+           << "format string must contain exactly one conversion specifier: \""
+           << getFormat() << "\"";
+
+  // Check conversion kind matches operand type.
+  bool isFloat = isa<FloatType>(scalarType);
+  if (isFloat && info->conversion != PrintConversionKind::Float)
+    return emitOpError()
+           << "float operand requires float format specifier (%f/%e/%g/%a)";
+  if (!isFloat && info->conversion == PrintConversionKind::Float)
+    return emitOpError()
+           << "integer operand requires integer format specifier (%d/%i/%u/%x/%o)";
+
+  return success();
+}
+
 ParseResult mlir::pto::TPrintOp::parse(OpAsmParser &parser,
                                        OperationState &result) {
   OpAsmParser::UnresolvedOperand src;
@@ -12755,6 +12798,9 @@ mlir::LogicalResult mlir::pto::TPrintOp::verify() {
     return emitOpError() << "expects printFormat only when tmp is present";
   if (auto tb = mlir::dyn_cast<mlir::pto::TileBufType>(srcType)) {
     auto elem = tb.getElementType();
+    // NOTE: bf16 is intentionally excluded for now — the lowering code
+    // can handle it (fpext → f32), but BF16 tile TPrint semantics need
+    // hardware validation before enabling.
     if (!(elem.isF16() || elem.isF32() ||
           elem.isInteger(8) || elem.isInteger(16) || elem.isInteger(32)))
       return emitOpError() << "expects printable tile element type";

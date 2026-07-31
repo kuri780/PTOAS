@@ -129,7 +129,8 @@ LogicalResult emitFatobjLLVM(
     llvm::Module *cubeModule, llvm::Module *vectorModule,
     llvm::StringRef stubSource, llvm::StringRef outputPath,
     llvm::StringRef moduleId, const CANNToolchain &toolchain,
-    TempFileRegistry &tempFiles, llvm::raw_ostream &diagOS);
+    TempFileRegistry &tempFiles, bool usesPrint,
+    llvm::raw_ostream &diagOS);
 
 LogicalResult mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                  llvm::StringRef outObjPath,

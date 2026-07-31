@@ -10,6 +10,7 @@
 #pragma GCC diagnostic ignored "-Woverloaded-virtual"
 
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
+#include "PTO/Transforms/PrintEncoding.h"
 
 #include "PTO/IR/PTO.h"
 #include "PTO/IR/PTOTypeUtils.h"
@@ -25,7 +26,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -201,6 +201,10 @@ static Value materializeVPTOCast(OpBuilder &builder, Type resultType,
 class VPTOTypeConverter final : public TypeConverter {
 public:
   explicit VPTOTypeConverter(MLIRContext *context) {
+    addConversion([context](Type type) -> std::optional<Type> {
+      if (isa<pto::TileBufType>(type)) return LLVM::LLVMPointerType::get(context, 6);
+      return std::nullopt;
+    });
     addConversion([](Type type) { return type; });
     addConversion([](Type type) -> Type {
       // The conversion callback outlives this constructor, so build on demand
@@ -216,11 +220,36 @@ public:
 struct PlannedDecl {
   std::string name;
   FunctionType type;
-  bool writeOnlyDestination = false;
 };
 
 struct LoweringState {
   SmallVector<PlannedDecl> plannedDecls;
+  // Format-string → LLVM global symbol name (populated by pre-scan before
+  // dialect conversion so AddressOfOp references resolve against existing
+  // symbols).
+  SmallVector<std::pair<std::string, std::string>> stringGlobals;
+  // Whether the module uses pto.print / pto.tprint (set by pre-scan).
+  bool usesPrint = false;
+  // Name of the fix-stack intrinsic declaration (created lazily).
+  std::string fixStackFuncName;
+  // Name of the DCCI intrinsic declaration (created lazily).
+  std::string dcciFuncName;
+  // Name of the get-block-idx intrinsic declaration (created lazily).
+  std::string blockIdxFuncName;
+  std::string sysVaBaseFuncName;
+  std::string tprintFmtHeader;
+  std::string tprintFmtShape;
+  std::string tprintFmtValF32;
+  std::string tprintFmtValInt;
+  std::string tprintFmtSpace;
+  std::string tprintFmtNewline;
+  std::string tprintFmtSep;
+  std::string tprintFmtDash;
+  std::string tprintDtypeF32;
+  std::string tprintDtypeF16;
+  std::string tprintDtypeInt32;
+  std::string tprintLayoutND;
+  std::string tprintTileTypeVec;
 };
 
 enum class VcvtElemKind {
@@ -1513,45 +1542,6 @@ packCopyGmToUbConfig1(Operation *anchor, ValueRange operands) {
   return packLoopPair(anchor, operands[9], operands[10]);
 }
 
-static FailureOr<Value>
-packCopyGmToUbCfgV220(Operation *anchor, ValueRange operands) {
-  OpBuilder builder(anchor);
-  builder.setInsertionPoint(anchor);
-  Location loc = anchor->getLoc();
-
-  auto getI64Operand = [&](unsigned idx) -> Value {
-    return castIntegerLikeTo(anchor, operands[idx], builder.getI64Type());
-  };
-
-  Value sid = getI64Operand(2);
-  Value lenBurst = getI64Operand(4);
-  if (!sid || !lenBurst)
-    return failure();
-
-  auto shl = [&](Value value, uint64_t amount) -> Value {
-    return builder.create<arith::ShLIOp>(loc, value,
-                                         getI64Constant(builder, loc, amount));
-  };
-  auto bitOr = [&](Value lhs, Value rhs) -> Value {
-    return builder.create<arith::OrIOp>(loc, lhs, rhs);
-  };
-
-  Value cfg = sid;
-  auto oneI64 = builder
-                    .create<arith::ConstantOp>(loc,
-                                               builder.getI64IntegerAttr(1))
-                    .getResult();
-  cfg = bitOr(cfg, shl(oneI64, 4));
-  auto bytesPer32B = builder
-                         .create<arith::ConstantOp>(
-                             loc, builder.getI64IntegerAttr(5))
-                         .getResult();
-  auto lenIn32B =
-      builder.create<arith::ShRUIOp>(loc, lenBurst, bytesPer32B).getResult();
-  cfg = bitOr(cfg, shl(lenIn32B, 16));
-  return cfg;
-}
-
 [[maybe_unused]] static FailureOr<Value>
 packCopyGmToUbConfig0(Operation *anchor, Value sid, Value nBurst,
                       Value lenBurst, Value leftPadding, Value rightPadding,
@@ -1607,48 +1597,6 @@ packCopyUbToGmConfig1(Operation *anchor, ValueRange operands) {
   if (operands.size() != 8)
     return failure();
   return packLoopPair(anchor, operands[6], operands[7]);
-}
-
-static FailureOr<Value>
-packCopyUbToGmCfgV220(Operation *anchor, ValueRange operands) {
-  if (operands.size() != 8)
-    return failure();
-
-  OpBuilder builder(anchor);
-  builder.setInsertionPoint(anchor);
-  Location loc = anchor->getLoc();
-
-  auto getI64Operand = [&](unsigned idx) -> Value {
-    return castIntegerLikeTo(anchor, operands[idx], builder.getI64Type());
-  };
-
-  Value sid = getI64Operand(2);
-  Value lenBurst = getI64Operand(4);
-  if (!sid || !lenBurst)
-    return failure();
-
-  auto shl = [&](Value value, uint64_t amount) -> Value {
-    return builder.create<arith::ShLIOp>(loc, value,
-                                         getI64Constant(builder, loc, amount));
-  };
-  auto bitOr = [&](Value lhs, Value rhs) -> Value {
-    return builder.create<arith::OrIOp>(loc, lhs, rhs);
-  };
-
-  Value cfg = sid;
-  auto oneI64 = builder
-                    .create<arith::ConstantOp>(loc,
-                                               builder.getI64IntegerAttr(1))
-                    .getResult();
-  cfg = bitOr(cfg, shl(oneI64, 4));
-  auto bytesPer32B = builder
-                         .create<arith::ConstantOp>(
-                             loc, builder.getI64IntegerAttr(5))
-                         .getResult();
-  auto lenIn32B =
-      builder.create<arith::ShRUIOp>(loc, lenBurst, bytesPer32B).getResult();
-  cfg = bitOr(cfg, shl(lenIn32B, 16));
-  return cfg;
 }
 
 [[maybe_unused]] static FailureOr<Value>
@@ -3148,35 +3096,18 @@ static FailureOr<StringRef> buildExtremaPredicateCallee(MLIRContext *context,
 }
 
 static FailureOr<StringRef> buildCopyGmToUbCallee(MLIRContext *context,
-                                                  Type sourceType,
-                                                  const std::string &march,
-                                                  bool hasPadding) {
+                                                  Type sourceType) {
   auto ptrType = dyn_cast<pto::PtrType>(sourceType);
   if (!ptrType)
     return failure();
   Type elementType = ptrType.getElementType();
-
-  auto getElementSuffix = [&]() -> std::string {
-    if ((isa<IntegerType>(elementType) &&
-         cast<IntegerType>(elementType).getWidth() == 64) ||
-        elementType.isF64())
-      return "s32";
-    return getCopyElementFragment(elementType);
-  };
-
-  if (march == "dav-c220-vec") {
-    if (hasPadding) {
-      std::string elem = getElementSuffix();
-      if (elem.empty())
-        return failure();
-      return StringAttr::get(context,
-                             "llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2." + elem)
-          .getValue();
-    }
-    return StringAttr::get(context, "llvm.hivm.MOV.OUT.TO.UB.v220").getValue();
+  if ((isa<IntegerType>(elementType) &&
+       cast<IntegerType>(elementType).getWidth() == 64) ||
+      elementType.isF64()) {
+    return StringAttr::get(context, "llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV")
+        .getValue();
   }
-
-  std::string elem = getElementSuffix();
+  std::string elem = getCopyElementFragment(elementType);
   if (elem.empty())
     return failure();
   return StringAttr::get(context, "llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2." + elem +
@@ -3184,11 +3115,7 @@ static FailureOr<StringRef> buildCopyGmToUbCallee(MLIRContext *context,
       .getValue();
 }
 
-static StringRef buildCopyUbToGmCallee(MLIRContext *context,
-                                       const std::string &march) {
-  if (march == "dav-c220-vec")
-    return StringAttr::get(context, "llvm.hivm.MOV.UB.TO.OUT.v220.1")
-        .getValue();
+static StringRef buildCopyUbToGmCallee(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV")
       .getValue();
 }
@@ -3702,35 +3629,8 @@ static FailureOr<StringRef> buildVldsx2Callee(MLIRContext *context,
   return buildMemoryLaneTypedCallee(context, resultType, "vldsx2", "");
 }
 
-static FailureOr<StringRef>
-buildBlockStridedMemoryCallee(MLIRContext *context, Type vectorType,
-                              StringRef stem, bool post) {
-  Type elementType = getElementTypeFromVectorLike(vectorType);
-  auto lanes = getElementCountFromVectorLike(vectorType);
-  if (!elementType || !lanes)
-    return failure();
-
-  std::string element;
-  if (auto intType = dyn_cast<IntegerType>(elementType))
-    element = "i" + std::to_string(intType.getWidth());
-  else if (isLowpPayloadElementType(elementType))
-    element = "i8";
-  else
-    element = getMemoryElementTypeFragment(elementType);
-  if (element.empty())
-    return failure();
-
-  return StringAttr::get(context,
-                         "llvm.hivm." + stem.str() +
-                             std::string(post ? ".post" : "") + ".v" +
-                             std::to_string(*lanes) + element)
-      .getValue();
-}
-
-static FailureOr<StringRef> buildVsldbCallee(MLIRContext *context,
-                                              Type resultType) {
-  return buildBlockStridedMemoryCallee(context, resultType, "vsldb",
-                                       /*post=*/false);
+static StringRef buildVsldbCallee(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.vsldb").getValue();
 }
 
 static FailureOr<StringRef> buildVstsCallee(MLIRContext *context, Type valueType) {
@@ -3748,9 +3648,12 @@ static FailureOr<StringRef> buildVstsx2Callee(MLIRContext *context, Type valueTy
   return buildMemoryLaneTypedCallee(context, valueType, "vstsx2", "");
 }
 
-static FailureOr<StringRef> buildVsstbCallee(MLIRContext *context,
-                                             Type valueType, bool post) {
-  return buildBlockStridedMemoryCallee(context, valueType, "vsstb", post);
+static StringRef buildVsstbCallee(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.vsstb").getValue();
+}
+
+static StringRef buildVsstbPostCallee(MLIRContext *context) {
+  return StringAttr::get(context, "llvm.hivm.vsstb.post").getValue();
 }
 
 static Type getVgather2SourceElementType(Type sourceType) {
@@ -3836,10 +3739,6 @@ static FailureOr<StringRef> buildVgatherbCallee(MLIRContext *context,
 static FailureOr<StringRef> buildVscatterCallee(MLIRContext *context,
                                                 Type valueType) {
   return buildLaneTypedCallee(context, valueType, "vscatter", ".v300");
-}
-
-static FailureOr<Type> getVscatterOffsetsCarrierType(Type offsetsType) {
-  return offsetsType;
 }
 
 static FailureOr<StringRef> buildVaxpyCallee(MLIRContext *context,
@@ -4111,12 +4010,6 @@ StringRef buildUnaryConfigCallee<pto::SetFpcOp>(MLIRContext *context) {
 }
 
 template <>
-StringRef buildUnaryConfigCallee<pto::SetStoreAtomicCfgOp>(
-    MLIRContext *context) {
-  return StringAttr::get(context, "llvm.hivm.SET.ST.ATOMIC.CFG").getValue();
-}
-
-template <>
 StringRef buildNullaryConfigCallee<pto::SetAtomicS32Op>(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.SET.ATOMIC.S32").getValue();
 }
@@ -4292,21 +4185,6 @@ StringRef buildRuntimeQueryCallee<pto::GetSubBlockNumOp>(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.GET.SUBBLOCKDIM").getValue();
 }
 
-template <typename QueryOp>
-static StringRef buildSimtBlockQueryCallee(MLIRContext *context);
-
-template <>
-StringRef
-buildSimtBlockQueryCallee<pto::GetBlockIdxOp>(MLIRContext *context) {
-  return StringAttr::get(context, "llvm.hivm.tpe.get.BLOCK.IDX").getValue();
-}
-
-template <>
-StringRef
-buildSimtBlockQueryCallee<pto::GetBlockNumOp>(MLIRContext *context) {
-  return StringAttr::get(context, "llvm.hivm.tpe.get.BLOCK.NUM").getValue();
-}
-
 static LogicalResult
 materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
                  llvm::raw_ostream &diagOS) {
@@ -4321,10 +4199,215 @@ materializeDecls(ModuleOp module, ArrayRef<PlannedDecl> plannedDecls,
       }
       continue;
     }
+    // When pto.print/pto.tprint is used in the module,
+    // addDTDataParamToEntryFunctions eagerly creates LLVM::LLVMFuncOp
+    // for CCE intrinsics (GET.BLOCK.IDX, DCCI, etc.) BEFORE type
+    // conversion.  If a later pattern also pushes a PlannedDecl for the
+    // same symbol we must not create a duplicate func::FuncOp, otherwise
+    // the module symbol table will contain two ops with the same name
+    // (one LLVM::LLVMFuncOp and one func::FuncOp) and LLVM IR emission
+    // will fail with "redefinition of symbol".
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(decl.name))
+      continue;
     auto func =
         builder.create<func::FuncOp>(module.getLoc(), decl.name, decl.type);
     func.setPrivate();
   }
+  return success();
+}
+
+// Pre-scan: walk all pto::PrintOp, collect unique format strings, create
+// LLVM::GlobalOp for each BEFORE dialect conversion runs.  This way
+// LowerPrintOpPattern can safely emit LLVM::AddressOfOp references against
+// already-existing symbols.
+static void
+collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
+  llvm::StringMap<std::string> seen;
+  // Collect format strings from pto::PrintOp.
+  module.walk([&](pto::PrintOp printOp) {
+    StringRef fmt = printOp.getFormat();
+    if (fmt.empty()) fmt = "%f";
+    if (seen.count(fmt)) return;
+    std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+    seen[fmt] = globalName;
+    state.stringGlobals.push_back({fmt.str(), globalName});
+    state.usesPrint = true;
+  });
+  // Collect hardcoded format strings used by TPrintOp lowering.
+  bool hasTPrint = false;
+  module.walk([&](pto::TPrintOp tprintOp) { (void)tprintOp; state.usesPrint = true; hasTPrint = true; });
+  if (hasTPrint) {
+    const std::pair<std::string, std::string &> tprintFmts[] = {
+        {"=== [TPRINT Tile] Data Type: %s, Layout: %s, TileType: %s ===\n", state.tprintFmtHeader},
+        {"  Shape: [%d, %d], Valid Shape: [%d, %d]\n", state.tprintFmtShape},
+        {"%6.2f", state.tprintFmtValF32}, {"%6d", state.tprintFmtValInt},
+        {" ", state.tprintFmtSpace}, {"\n", state.tprintFmtNewline},
+        {"|", state.tprintFmtSep}, {"------", state.tprintFmtDash},
+        {"float32", state.tprintDtypeF32}, {"float16", state.tprintDtypeF16},
+        {"int32", state.tprintDtypeInt32}, {"ND", state.tprintLayoutND},
+        {"Vec", state.tprintTileTypeVec},
+    };
+    for (auto &kv : tprintFmts) {
+      if (seen.count(kv.first)) continue;
+      std::string globalName = "_ptoas_printf_fmt_" + std::to_string(seen.size());
+      seen[kv.first] = globalName;
+      state.stringGlobals.push_back({kv.first, globalName}); kv.second = globalName;
+    }
+  }
+  if (state.stringGlobals.empty()) return;
+
+  OpBuilder builder(module.getBodyRegion());
+  builder.setInsertionPointToStart(&module.getBodyRegion().front());
+  auto i8Type = IntegerType::get(module.getContext(), 8);
+  for (auto &kv : state.stringGlobals) {
+    SmallVector<Attribute> elements;
+    for (char c : kv.first)
+      elements.push_back(IntegerAttr::get(i8Type, c));
+    elements.push_back(IntegerAttr::get(i8Type, 0)); // null terminator
+    auto arrayType = LLVM::LLVMArrayType::get(i8Type, elements.size());
+    builder.create<LLVM::GlobalOp>(
+        module.getLoc(), arrayType,
+        /*isConstant=*/true, LLVM::Linkage::Private, kv.second,
+        ArrayAttr::get(module.getContext(), elements));
+  }
+}
+
+// Add a hidden ptr addrspace(1) (DTData) parameter to every pto.entry function
+// and declare the CCE intrinsics required by print lowering.  Must run before
+// dialect conversion so the type converter can handle the new function signature.
+static LogicalResult addDTDataParamToEntryFunctions(ModuleOp module,
+                                                    LoweringState &state) {
+  if (!state.usesPrint)
+    return success();
+
+  MLIRContext *ctx = module.getContext();
+  auto llvmPtr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+  auto llvmPtr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+  auto i64Type = IntegerType::get(ctx, 64);
+
+  auto declareFunc = [&](StringRef name, LLVM::LLVMFunctionType fty) {
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+      return;
+    OpBuilder b(module.getBodyRegion());
+    b.setInsertionPointToStart(&module.getBodyRegion().front());
+    auto func = b.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fty);
+    func.setPrivate();
+  };
+
+  // @llvm.hivm.get.sycl.fix.stack.object() -> !pto.ptr<0>
+  {
+    auto fty = LLVM::LLVMFunctionType::get(llvmPtr0Type, {}, false);
+    declareFunc("llvm.hivm.get.sycl.fix.stack.object", fty);
+    state.fixStackFuncName = "llvm.hivm.get.sycl.fix.stack.object";
+  }
+  // @llvm.hivm.DCCI(!pto.ptr<1>, i64) -> ()
+  {
+    auto fty = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(ctx), {llvmPtr1Type, i64Type}, false);
+    declareFunc("llvm.hivm.DCCI", fty);
+    state.dcciFuncName = "llvm.hivm.DCCI";
+  }
+  // @llvm.hivm.GET.BLOCK.IDX() -> i64
+  {
+    auto fty = LLVM::LLVMFunctionType::get(i64Type, {}, false);
+    declareFunc("llvm.hivm.GET.BLOCK.IDX", fty);
+    state.blockIdxFuncName = "llvm.hivm.GET.BLOCK.IDX";
+  }
+
+  // Add DTData parameter to every pto.entry function.
+  SmallVector<func::FuncOp> entryFuncs;
+  module.walk([&](func::FuncOp func) {
+    if (pto::isPTOEntryFunction(func))
+      entryFuncs.push_back(func);
+  });
+
+  for (func::FuncOp func : entryFuncs) {
+    unsigned idx = func.getNumArguments();
+    (void)func.insertArgument(idx, llvmPtr1Type, {}, func.getLoc());
+    SmallVector<Type> newArgTypes(func.getArgumentTypes());
+    auto newFuncType =
+        FunctionType::get(ctx, newArgTypes, func.getResultTypes());
+    (void)func.setFunctionType(newFuncType);
+  }
+
+  return success();
+}
+
+// After dialect conversion, inject the prologue (fix-stack init +
+// kernelWriteType = AiV) at the beginning of every entry function.
+static LogicalResult injectPrintPrologue(ModuleOp module,
+                                         LoweringState &state) {
+  if (!state.usesPrint)
+    return success();
+
+  MLIRContext *ctx = module.getContext();
+  auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+  auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+  auto i64Type = IntegerType::get(ctx, 64);
+  auto i8Type = IntegerType::get(ctx, 8);
+  auto i32Type = IntegerType::get(ctx, 32);
+  auto i1Type = IntegerType::get(ctx, 1);
+
+  SmallVector<func::FuncOp> entryFuncs;
+  module.walk([&](func::FuncOp func) {
+    if (pto::isPTOEntryFunction(func))
+      entryFuncs.push_back(func);
+  });
+
+  for (func::FuncOp func : entryFuncs) {
+    if (func.getNumArguments() == 0)
+      continue;
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+    if (dtDataArg.getType() != ptr1Type)
+      continue;
+
+    Region &body = func.getBody();
+    if (body.empty())
+      continue;
+    Block &origEntry = body.front();
+    Location loc = func.getLoc();
+
+    Block *bodyBlock = origEntry.splitBlock(origEntry.begin());
+    OpBuilder builder(&origEntry, origEntry.begin());
+
+    auto fixStackFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        state.fixStackFuncName);
+    if (!fixStackFunc)
+      return failure();
+    auto fixCall = builder.create<LLVM::CallOp>(
+        loc, ptr0Type, fixStackFunc.getSymName(), ValueRange{});
+    Value fixStackPtr = fixCall.getResult();
+
+    auto nullPtr = builder.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto nullCheck = builder.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::eq, dtDataArg, nullPtr);
+
+    Block *initBlock = builder.createBlock(bodyBlock);
+    Block *nullBlock = builder.createBlock(bodyBlock);
+    builder.setInsertionPointToEnd(&origEntry);
+    builder.create<LLVM::CondBrOp>(loc, nullCheck.getResult(), nullBlock,
+                                   initBlock);
+
+    // nullBlock: store 0 to fix stack.
+    builder.setInsertionPointToStart(nullBlock);
+    auto zeroI64 = builder.create<LLVM::ConstantOp>(loc, i64Type,
+                                                    builder.getI64IntegerAttr(0));
+    builder.create<LLVM::StoreOp>(loc, zeroI64.getResult(), fixStackPtr);
+    builder.create<LLVM::BrOp>(loc, ValueRange{}, bodyBlock);
+
+    // initBlock: store DTData to fix stack, set kernelWriteType = AiV.
+    builder.setInsertionPointToStart(initBlock);
+    auto dtI64 = builder.create<LLVM::PtrToIntOp>(loc, i64Type, dtDataArg);
+    builder.create<LLVM::StoreOp>(loc, dtI64.getResult(), fixStackPtr);
+    auto kwoff = builder.create<LLVM::ConstantOp>(loc, i64Type,
+                                                  builder.getI64IntegerAttr(24));
+    auto kwPtr = builder.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg,
+                                             ValueRange{kwoff.getResult()});
+    auto twoVal = builder.create<LLVM::ConstantOp>(loc, i32Type,
+                                                   builder.getI32IntegerAttr(2));
+    builder.create<LLVM::StoreOp>(loc, twoVal.getResult(), kwPtr.getResult());
+    builder.create<LLVM::BrOp>(loc, ValueRange{}, bodyBlock);
+  }
+
   return success();
 }
 
@@ -4731,25 +4814,17 @@ template <typename CopyOp>
 class LowerCopyOpPattern final : public OpConversionPattern<CopyOp> {
 public:
   explicit LowerCopyOpPattern(TypeConverter &typeConverter, MLIRContext *context,
-                              LoweringState &state, const std::string &march)
-      : OpConversionPattern<CopyOp>(typeConverter, context), state(state),
-        march(march) {}
+                              LoweringState &state)
+      : OpConversionPattern<CopyOp>(typeConverter, context), state(state) {}
 
   LogicalResult
   matchAndRewrite(CopyOp op, typename CopyOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    constexpr bool isGmUb = std::is_same_v<CopyOp, pto::CopyGmToUbufOp>;
-
-    bool hasPadding = false;
-    if constexpr (isGmUb)
-      hasPadding = op->hasAttr("has_pad");
-
     FailureOr<StringRef> calleeName = failure();
-    if constexpr (isGmUb)
-      calleeName = buildCopyGmToUbCallee(op.getContext(), op.getSource().getType(),
-                                         march, hasPadding);
+    if constexpr (std::is_same_v<CopyOp, pto::CopyGmToUbufOp>)
+      calleeName = buildCopyGmToUbCallee(op.getContext(), op.getSource().getType());
     else
-      calleeName = buildCopyUbToGmCallee(op.getContext(), march);
+      calleeName = buildCopyUbToGmCallee(op.getContext());
     if (failed(calleeName))
       return rewriter.notifyMatchFailure(op, "unsupported copy VPTO signature");
 
@@ -4760,37 +4835,24 @@ public:
     if (!llvmSourceType || !llvmDestType)
       return rewriter.notifyMatchFailure(op, "expected LLVM pointer copy operands");
 
-    bool isC220 = march == "dav-c220-vec" || march == "dav-c220-cube";
-    bool useA3NonPadded = isC220 && isGmUb && !hasPadding;
-    bool useA3UbGm = isC220 && !isGmUb;
-    bool useSingleConfig = useA3NonPadded || useA3UbGm;
-
     FailureOr<Value> config0 = failure();
     FailureOr<Value> config1 = failure();
-    if (useA3NonPadded)
-      config0 = packCopyGmToUbCfgV220(op, adaptor.getOperands());
-    else if (useA3UbGm)
-      config0 = packCopyUbToGmCfgV220(op, adaptor.getOperands());
-    else if constexpr (isGmUb) {
+    if constexpr (std::is_same_v<CopyOp, pto::CopyGmToUbufOp>) {
       config0 = packCopyGmToUbConfig0(op, adaptor.getOperands());
       config1 = packCopyGmToUbConfig1(op, adaptor.getOperands());
     } else {
       config0 = packCopyUbToGmConfig0(op, adaptor.getOperands());
       config1 = packCopyUbToGmConfig1(op, adaptor.getOperands());
     }
-    if (failed(config0) || (!useSingleConfig && failed(config1)))
+    if (failed(config0) || failed(config1))
       return rewriter.notifyMatchFailure(op, "failed to materialize copy config");
 
     SmallVector<Value> args{adaptor.getOperands()[1], adaptor.getOperands()[0],
-                            *config0};
-    SmallVector<Type> argTypes{llvmDestType, llvmSourceType,
-                               rewriter.getI64Type()};
-    if (!useSingleConfig) {
-      args.push_back(*config1);
-      argTypes.push_back(rewriter.getI64Type());
-    }
-
-    auto funcType = rewriter.getFunctionType(argTypes, TypeRange{});
+                            *config0, *config1};
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{llvmDestType, llvmSourceType, rewriter.getI64Type(),
+                  rewriter.getI64Type()},
+        TypeRange{});
     auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
                                               TypeRange{}, args);
     state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
@@ -4801,554 +4863,6 @@ public:
 
 private:
   LoweringState &state;
-  const std::string &march;
-};
-
-template <typename UBOp>
-class LowerUBufBinaryOpPattern final : public OpConversionPattern<UBOp> {
-public:
-  explicit LowerUBufBinaryOpPattern(TypeConverter &typeConverter,
-                                    MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<UBOp>(typeConverter, context), state(state) {}
-
-  LogicalResult
-  matchAndRewrite(UBOp op, typename UBOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc0().getType());
-    Type elemType = ptrType.getElementType();
-    std::string elemFrag = getElementTypeFragment(elemType);
-    if (elemFrag.empty())
-      return rewriter.notifyMatchFailure(
-          op, "unsupported element type for ubuf binary op");
-
-    std::string calleeName;
-    if constexpr (std::is_same_v<UBOp, pto::UBVaddOp>)
-      calleeName = "llvm.hivm.VADD." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVsubOp>)
-      calleeName = "llvm.hivm.VSUB." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVmulOp>)
-      calleeName = "llvm.hivm.VMUL." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVdivOp>)
-      calleeName = "llvm.hivm.VDIV." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVmaxOp>)
-      calleeName = "llvm.hivm.VMAX." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVminOp>)
-      calleeName = "llvm.hivm.VMIN." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVandOp>)
-      calleeName = "llvm.hivm.VAND." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVorOp>)
-      calleeName = "llvm.hivm.VOR." + elemFrag;
-    else if constexpr (std::is_same_v<UBOp, pto::UBVaddReluOp>)
-      calleeName = "llvm.hivm.VADDRELU." + elemFrag;
-    else
-      return rewriter.notifyMatchFailure(op, "unsupported ubuf binary op");
-
-    Value dst = adaptor.getDst();
-    Value src0 = adaptor.getSrc0();
-    Value src1 = adaptor.getSrc1();
-    if (!dst || !src0 || !src1 ||
-        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
-        !isa<LLVM::LLVMPointerType>(src0.getType()) ||
-        !isa<LLVM::LLVMPointerType>(src1.getType()))
-      return rewriter.notifyMatchFailure(
-          op, "unexpected converted ubuf binary operand types");
-
-    Location loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    auto getI64 = [&](Value v) -> Value {
-      return castIntegerLikeTo(op, v, i64Ty);
-    };
-    auto maskByte = [&](Value v) -> Value {
-      return rewriter.create<arith::AndIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                     loc, rewriter.getI64IntegerAttr(0xff)));
-    };
-    auto shl = [&](Value v, uint64_t amount) -> Value {
-      return rewriter.create<arith::ShLIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                       loc, rewriter.getI64IntegerAttr(amount)));
-    };
-    Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(1LL << 56));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, maskByte(getI64(adaptor.getRepeat())));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstBlockStride())), 8));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrc0BlockStride())), 16));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrc1BlockStride())), 24));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrc0RepeatStride())), 40));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrc1RepeatStride())), 48));
-
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{dst.getType(), src0.getType(), src1.getType(),
-                  rewriter.getI64Type()},
-        TypeRange{});
-    auto call = rewriter.create<func::CallOp>(
-        op.getLoc(), calleeName, TypeRange{},
-        ValueRange{dst, src0, src1, config});
-    (void)call;
-    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-template <typename ShiftOp>
-class LowerUBufShiftOpPattern final : public OpConversionPattern<ShiftOp> {
-public:
-  explicit LowerUBufShiftOpPattern(TypeConverter &typeConverter,
-                                   MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<ShiftOp>(typeConverter, context), state(state) {}
-
-  LogicalResult
-  matchAndRewrite(ShiftOp op, typename ShiftOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc().getType());
-    Type elemType = ptrType.getElementType();
-    std::string elemFrag = getElementTypeFragment(elemType);
-    if (elemFrag.empty())
-      return rewriter.notifyMatchFailure(
-          op, "unsupported element type for ubuf shift op");
-
-    if (elemFrag == "s16")
-      elemFrag = "u16";
-    else if (elemFrag == "s32")
-      elemFrag = "u32";
-
-    std::string calleeName;
-    if constexpr (std::is_same_v<ShiftOp, pto::UBVshlOp>)
-      calleeName = "llvm.hivm.VSHL." + elemFrag;
-    else if constexpr (std::is_same_v<ShiftOp, pto::UBVshrOp>)
-      calleeName = "llvm.hivm.VSHR." + elemFrag;
-    else
-      return rewriter.notifyMatchFailure(op, "unsupported ubuf shift op");
-
-    Value dst = adaptor.getDst();
-    Value src = adaptor.getSrc();
-    if (!dst || !src ||
-        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
-        !isa<LLVM::LLVMPointerType>(src.getType()))
-      return rewriter.notifyMatchFailure(
-          op, "unexpected converted ubuf shift operand types");
-
-    Location loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    auto getI64 = [&](Value v) -> Value {
-      return castIntegerLikeTo(op, v, i64Ty);
-    };
-    auto maskByte = [&](Value v) -> Value {
-      return rewriter.create<arith::AndIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                     loc, rewriter.getI64IntegerAttr(0xff)));
-    };
-    auto shl = [&](Value v, uint64_t amount) -> Value {
-      return rewriter.create<arith::ShLIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                       loc, rewriter.getI64IntegerAttr(amount)));
-    };
-    // Unary config layout (same as VABS):
-    //   repeat[63:56], dstBlkStride[15:0], srcBlkStride[31:16],
-    //   dstRepStride[39:32], srcRepStride[51:40]
-    Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, maskByte(getI64(adaptor.getDstBlockStride())));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcBlockStride())), 16));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcRepeatStride())), 40));
-
-    Value shiftDist = getI64(adaptor.getShiftDist());
-
-    if constexpr (std::is_same_v<ShiftOp, pto::UBVshlOp>) {
-      auto funcType = rewriter.getFunctionType(
-          TypeRange{dst.getType(), src.getType(), i64Ty, i64Ty},
-          TypeRange{});
-      rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                    ValueRange{dst, src, shiftDist, config});
-      state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-    } else {
-      Value roundZero = rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getI64IntegerAttr(0));
-      auto funcType = rewriter.getFunctionType(
-          TypeRange{dst.getType(), src.getType(), i64Ty, i64Ty, i64Ty},
-          TypeRange{});
-      rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                    ValueRange{dst, src, shiftDist, config,
-                                               roundZero});
-      state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-    }
-
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-// LowerUBufScalarBinaryPattern — scalar-tile binary ops (VADDS/VMULS/VMAXS/VMINS).
-// Unlike VSHL/VSHR, these have signed intrinsics (s16/s32, not u16/u32) and
-// pass the scalar as a float for f32/f16 element types.
-template <typename ScalarOp>
-class LowerUBufScalarBinaryPattern final : public OpConversionPattern<ScalarOp> {
-public:
-  explicit LowerUBufScalarBinaryPattern(TypeConverter &typeConverter,
-                                     MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<ScalarOp>(typeConverter, context), state(state) {}
-
-  LogicalResult
-  matchAndRewrite(ScalarOp op, typename ScalarOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc().getType());
-    Type elemType = ptrType.getElementType();
-    std::string elemFrag = getElementTypeFragment(elemType);
-    if (elemFrag.empty())
-      return rewriter.notifyMatchFailure(
-          op, "unsupported element type for ubuf scalar mul op");
-
-    // Scalar-tile ops keep signed intrinsic names (s16/s32).
-    std::string calleeName;
-    if constexpr (std::is_same_v<ScalarOp, pto::UBVmulSOp>)
-      calleeName = "llvm.hivm.VMULS." + elemFrag;
-    else if constexpr (std::is_same_v<ScalarOp, pto::UBVaddSOp>)
-      calleeName = "llvm.hivm.VADDS." + elemFrag;
-    else if constexpr (std::is_same_v<ScalarOp, pto::UBVmaxSOp>)
-      calleeName = "llvm.hivm.VMAXS." + elemFrag;
-    else if constexpr (std::is_same_v<ScalarOp, pto::UBVminSOp>)
-      calleeName = "llvm.hivm.VMINS." + elemFrag;
-    else
-      return rewriter.notifyMatchFailure(op, "unsupported ubuf scalar binary op");
-
-    Value dst = adaptor.getDst();
-    Value src = adaptor.getSrc();
-    if (!dst || !src ||
-        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
-        !isa<LLVM::LLVMPointerType>(src.getType()))
-      return rewriter.notifyMatchFailure(
-          op, "unexpected converted ubuf scalar binary operand types");
-
-    Location loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    auto getI64 = [&](Value v) -> Value {
-      return castIntegerLikeTo(op, v, i64Ty);
-    };
-    auto maskByte = [&](Value v) -> Value {
-      return rewriter.create<arith::AndIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                     loc, rewriter.getI64IntegerAttr(0xff)));
-    };
-    auto shl = [&](Value v, uint64_t amount) -> Value {
-      return rewriter.create<arith::ShLIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                       loc, rewriter.getI64IntegerAttr(amount)));
-    };
-    // Unary config layout (same as VABS/VSHR): repeat[63:56]
-    Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, maskByte(getI64(adaptor.getDstBlockStride())));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcBlockStride())), 16));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcRepeatStride())), 40));
-
-    Value scalarI64 = getI64(adaptor.getShiftDist());
-
-    // For float element types, the scalar was bitcast to i64 for the UB IR.
-    // Recover the float value via trunc + bitcast.
-    if (elemType.isF32() || elemType.isF16()) {
-      unsigned width = elemType.isF32() ? 32 : 16;
-      Type intTy = rewriter.getIntegerType(width);
-      Type floatTy = elemType.isF32()
-                          ? rewriter.getF32Type()
-                          : rewriter.getF16Type();
-      Value trunced = rewriter.create<arith::TruncIOp>(loc, intTy, scalarI64);
-      Value scalarFloat = rewriter.create<LLVM::BitcastOp>(loc, floatTy, trunced);
-      auto funcType = rewriter.getFunctionType(
-          TypeRange{dst.getType(), src.getType(), floatTy, i64Ty},
-          TypeRange{});
-      rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                    ValueRange{dst, src, scalarFloat, config});
-      state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-    } else {
-      // Integer: VMULS/VADDS/etc .s16/s32 takes i64 scalar directly.
-      auto funcType = rewriter.getFunctionType(
-          TypeRange{dst.getType(), src.getType(), i64Ty, i64Ty},
-          TypeRange{});
-      rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                    ValueRange{dst, src, scalarI64, config});
-      state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-    }
-
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-class LowerUBufVdupPattern final : public OpConversionPattern<pto::UBVdupOp> {
-public:
-  explicit LowerUBufVdupPattern(TypeConverter &typeConverter,
-                                MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<pto::UBVdupOp>(typeConverter, context), state(state) {}
-
-  LogicalResult
-  matchAndRewrite(pto::UBVdupOp op, pto::UBVdupOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto ptrType = mlir::cast<pto::PtrType>(op.getDst().getType());
-    Type elemType = ptrType.getElementType();
-    std::string suffix;
-    if (elemType.isF32() || elemType.isInteger(32))
-      suffix = "u32";
-    else if (elemType.isF16() || elemType.isInteger(16))
-      suffix = "u16";
-    else
-      return rewriter.notifyMatchFailure(op, "unsupported element type for ubuf vdup");
-
-    Value dst = adaptor.getDst();
-    if (!dst || !isa<LLVM::LLVMPointerType>(dst.getType()))
-      return rewriter.notifyMatchFailure(op, "unexpected converted ubuf vdup dst type");
-
-    Location loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    auto getI64 = [&](Value v) -> Value { return castIntegerLikeTo(op, v, i64Ty); };
-    auto maskByte = [&](Value v) -> Value {
-      return rewriter.create<arith::AndIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                     loc, rewriter.getI64IntegerAttr(0xff)));
-    };
-    auto shl = [&](Value v, uint64_t amount) -> Value {
-      return rewriter.create<arith::ShLIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                       loc, rewriter.getI64IntegerAttr(amount)));
-    };
-
-    Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, maskByte(getI64(adaptor.getDstBlockStride())));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcBlockStride())), 16));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcRepeatStride())), 40));
-
-    Value scalar = getI64(adaptor.getScalar());
-    std::string calleeName = "llvm.hivm.MOVEV." + suffix;
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{dst.getType(), i64Ty, i64Ty}, TypeRange{});
-    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                  ValueRange{dst, scalar, config});
-    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-template <typename UnaryOp>
-class LowerUBufUnaryOpPattern final : public OpConversionPattern<UnaryOp> {
-public:
-  explicit LowerUBufUnaryOpPattern(TypeConverter &typeConverter,
-                                   MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<UnaryOp>(typeConverter, context), state(state) {}
-
-  LogicalResult
-  matchAndRewrite(UnaryOp op, typename UnaryOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc().getType());
-    Type elemType = ptrType.getElementType();
-    std::string elemFrag = getElementTypeFragment(elemType);
-    if (elemFrag.empty())
-      return rewriter.notifyMatchFailure(
-          op, "unsupported element type for ubuf unary op");
-
-    if (elemFrag == "s16")
-      elemFrag = "u16";
-
-    std::string calleeName;
-    if constexpr (std::is_same_v<UnaryOp, pto::UBVnotOp>)
-      calleeName = "llvm.hivm.VNOT." + elemFrag;
-    else if constexpr (std::is_same_v<UnaryOp, pto::UBVabsOp>)
-      calleeName = "llvm.hivm.VABS." + elemFrag;
-    else if constexpr (std::is_same_v<UnaryOp, pto::UBVreluOp>) {
-      if (elemFrag == "u16" || elemFrag == "u32")
-        return rewriter.notifyMatchFailure(
-            op, "VRELU not available for unsigned integer types");
-      calleeName = "llvm.hivm.VRELU." + elemFrag;
-    } else if constexpr (std::is_same_v<UnaryOp, pto::UBVexpOp>)
-      calleeName = "llvm.hivm.VEXP." + elemFrag;
-    else if constexpr (std::is_same_v<UnaryOp, pto::UBVlnOp>)
-      calleeName = "llvm.hivm.VLN." + elemFrag;
-    else if constexpr (std::is_same_v<UnaryOp, pto::UBVsqrtOp>)
-      calleeName = "llvm.hivm.VSQRT." + elemFrag;
-    else if constexpr (std::is_same_v<UnaryOp, pto::UBVrsqrtOp>)
-      calleeName = "llvm.hivm.VRSQRT." + elemFrag;
-    else
-      return rewriter.notifyMatchFailure(op, "unsupported ubuf unary op");
-
-    Value dst = adaptor.getDst();
-    Value src = adaptor.getSrc();
-    if (!dst || !src ||
-        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
-        !isa<LLVM::LLVMPointerType>(src.getType()))
-      return rewriter.notifyMatchFailure(
-          op, "unexpected converted ubuf unary operand types");
-
-    Location loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    auto getI64 = [&](Value v) -> Value {
-      return castIntegerLikeTo(op, v, i64Ty);
-    };
-    auto maskByte = [&](Value v) -> Value {
-      return rewriter.create<arith::AndIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                     loc, rewriter.getI64IntegerAttr(0xff)));
-    };
-    auto shl = [&](Value v, uint64_t amount) -> Value {
-      return rewriter.create<arith::ShLIOp>(
-          loc, v, rewriter.create<arith::ConstantOp>(
-                       loc, rewriter.getI64IntegerAttr(amount)));
-    };
-    // Unary config layout (same as VABS/VSHR): repeat[63:56]
-    Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, maskByte(getI64(adaptor.getDstBlockStride())));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcBlockStride())), 16));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
-    config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(maskByte(getI64(adaptor.getSrcRepeatStride())), 40));
-
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{dst.getType(), src.getType(), i64Ty},
-        TypeRange{});
-    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                  ValueRange{dst, src, config});
-    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
-
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-class LowerUBSetMaskOpPattern final
-    : public OpConversionPattern<pto::UBSetMaskOp> {
-public:
-  explicit LowerUBSetMaskOpPattern(TypeConverter &typeConverter,
-                                   MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<pto::UBSetMaskOp>(typeConverter, context),
-        state(state) {}
-
-  LogicalResult
-  matchAndRewrite(pto::UBSetMaskOp op, typename pto::UBSetMaskOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    StringRef calleeName = "llvm.hivm.MOVEMASK";
-    Location loc = op.getLoc();
-
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{rewriter.getI64Type(), rewriter.getI64Type()}, TypeRange{});
-
-    Value c0Idx = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                  ValueRange{c0Idx, adaptor.getMask0()});
-
-    Value c1Idx = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(1));
-    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
-                                  ValueRange{c1Idx, adaptor.getMask1()});
-
-    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
-class LowerUBSetMaskCountOpPattern final
-    : public OpConversionPattern<pto::UBSetMaskCountOp> {
-public:
-  explicit LowerUBSetMaskCountOpPattern(TypeConverter &typeConverter,
-                                        MLIRContext *context)
-      : OpConversionPattern<pto::UBSetMaskCountOp>(typeConverter, context) {}
-
-  LogicalResult
-  matchAndRewrite(pto::UBSetMaskCountOp op,
-                  typename pto::UBSetMaskCountOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    Value ctrl = rewriter.create<pto::GetCtrlOp>(loc, i64Ty).getResult();
-    Value bit56 = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(56));
-    Value set = rewriter
-                    .create<pto::Sbitset1Op>(loc, i64Ty, ctrl, bit56)
-                    .getResult();
-    rewriter.create<pto::SetCtrlOp>(loc, set);
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
-class LowerUBSetMaskNormOpPattern final
-    : public OpConversionPattern<pto::UBSetMaskNormOp> {
-public:
-  explicit LowerUBSetMaskNormOpPattern(TypeConverter &typeConverter,
-                                       MLIRContext *context)
-      : OpConversionPattern<pto::UBSetMaskNormOp>(typeConverter, context) {}
-
-  LogicalResult
-  matchAndRewrite(pto::UBSetMaskNormOp op,
-                  typename pto::UBSetMaskNormOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
-    auto i64Ty = rewriter.getI64Type();
-    Value ctrl = rewriter.create<pto::GetCtrlOp>(loc, i64Ty).getResult();
-    Value bit56 = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(56));
-    Value reset = rewriter
-                      .create<pto::Sbitset0Op>(loc, i64Ty, ctrl, bit56)
-                      .getResult();
-    rewriter.create<pto::SetCtrlOp>(loc, reset);
-    rewriter.eraseOp(op);
-    return success();
-  }
 };
 
 class LowerCopyUbufToUbufOpPattern final
@@ -7417,10 +6931,7 @@ public:
     Type callResultType = getPayloadABIType(
         op.getResult().getType(), resultType, rewriter.getContext());
 
-    FailureOr<StringRef> calleeName =
-        buildVsldbCallee(op.getContext(), op.getResult().getType());
-    if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vsldb signature");
+    StringRef calleeName = buildVsldbCallee(op.getContext());
     Value zeroValue = getI32Constant(rewriter, op.getLoc(), 0);
     SmallVector<Value> args{adaptor.getSource(), packedStride, zeroValue,
                             adaptor.getMask()};
@@ -7428,9 +6939,9 @@ public:
         TypeRange{adaptor.getSource().getType(), packedStride.getType(),
                   zeroValue.getType(), adaptor.getMask().getType()},
         TypeRange{callResultType});
-    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
                                               TypeRange{callResultType}, args);
-    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
     Value result = castFromPayloadABI(
         op.getLoc(), call.getResult(0), op.getResult().getType(), resultType,
         rewriter);
@@ -7717,10 +7228,9 @@ public:
       return rewriter.notifyMatchFailure(op, "unsupported vsstb result count");
     }
 
-    FailureOr<StringRef> calleeName = buildVsstbCallee(
-        op.getContext(), op.getValue().getType(), usePostIntrinsic);
-    if (failed(calleeName))
-      return rewriter.notifyMatchFailure(op, "unsupported vsstb signature");
+    StringRef calleeName = usePostIntrinsic
+                               ? buildVsstbPostCallee(op.getContext())
+                               : buildVsstbCallee(op.getContext());
     Value zeroValue = getI32Constant(rewriter, op.getLoc(), usePostIntrinsic ? 1 : 0);
     Value value = castToPayloadABI(
         op.getLoc(), adaptor.getValue(), op.getValue().getType(), rewriter);
@@ -7731,9 +7241,9 @@ public:
                   packedStride.getType(), zeroValue.getType(),
                   adaptor.getMask().getType()},
         resultTypes);
-    auto call = rewriter.create<func::CallOp>(op.getLoc(), *calleeName,
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
                                               resultTypes, args);
-    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
     if (usePostIntrinsic)
       rewriter.replaceOp(op, call.getResults());
     else
@@ -8152,21 +7662,15 @@ public:
     if (failed(calleeName))
       return rewriter.notifyMatchFailure(op, "unsupported vscatter signature");
 
-    FailureOr<Type> offsetsCarrierType = getVscatterOffsetsCarrierType(
-        adaptor.getOffsets().getType());
-    if (failed(offsetsCarrierType))
-      return rewriter.notifyMatchFailure(op, "unsupported vscatter offsets carrier");
-
     auto funcType = rewriter.getFunctionType(
         TypeRange{adaptor.getValue().getType(), adaptor.getDestination().getType(),
-                  *offsetsCarrierType, adaptor.getMask().getType()},
+                  adaptor.getOffsets().getType(), adaptor.getMask().getType()},
         TypeRange{});
     rewriter.create<func::CallOp>(
         op.getLoc(), *calleeName, TypeRange{},
         ValueRange{adaptor.getValue(), adaptor.getDestination(),
                    adaptor.getOffsets(), adaptor.getMask()});
-    state.plannedDecls.push_back(
-        PlannedDecl{calleeName->str(), funcType, true});
+    state.plannedDecls.push_back(PlannedDecl{calleeName->str(), funcType});
     rewriter.eraseOp(op);
     return success();
   }
@@ -8928,29 +8432,27 @@ private:
   LoweringState &state;
 };
 
-struct SimtKeepResumePhysicalRegister {
-  int64_t baseRegister;
-  unsigned registerCount;
-};
-
-// TPERn names one 32-bit register, while TPERLn names the 64-bit pair whose
-// base register is R(2n). Keep uses tied inputs so the compiler models the
-// value captured by each fixed output without inline assembly instructions.
-static std::string buildSimtKeepResumeConstraints(
-    ArrayRef<SimtKeepResumePhysicalRegister> physicalRegs, bool tieInputs) {
+static std::string buildRepeatedInlineAsmConstraints(StringRef constraint,
+                                                     size_t count) {
   std::string result;
   llvm::raw_string_ostream os(result);
-  for (auto [index, physicalReg] : llvm::enumerate(physicalRegs)) {
-    if (index != 0)
+  for (size_t i = 0; i < count; ++i) {
+    if (i != 0)
       os << ",";
-    if (physicalReg.registerCount == 2)
-      os << "={TPERL" << physicalReg.baseRegister / 2 << "}";
-    else
-      os << "={TPER" << physicalReg.baseRegister << "}";
+    os << constraint;
   }
-  if (tieInputs) {
-    for (size_t index = 0; index < physicalRegs.size(); ++index)
-      os << "," << index;
+  return os.str();
+}
+
+static std::string appendSimtKeepResumeClobbers(std::string constraints,
+                                                ArrayRef<std::pair<int64_t, unsigned>> physicalRegs) {
+  llvm::raw_string_ostream os(constraints);
+  // The asm body names fixed SIMT R registers directly. Model those registers
+  // as clobbers so LLVM does not allocate a different operand/result into a
+  // slot that another keep/resume line reads or overwrites in the same asm.
+  for (auto [reg, registerCount] : physicalRegs) {
+    for (unsigned offset = 0; offset < registerCount; ++offset)
+      os << ",~{R" << (reg + offset) << "}";
   }
   return os.str();
 }
@@ -9032,12 +8534,11 @@ static unsigned getSimtKeepResumeRegisterCount(Type type) {
   return width && *width > 32 ? 2 : 1;
 }
 
-static FailureOr<SmallVector<SimtKeepResumePhysicalRegister, 4>>
-computeSimtKeepResumePhysicalRegs(
+static FailureOr<SmallVector<int64_t, 4>> computeSimtKeepResumePhysicalRegs(
     ArrayRef<std::pair<int64_t, unsigned>> logicalSlots) {
-  SmallVector<SimtKeepResumePhysicalRegister, 4> physicalRegs;
-  physicalRegs.reserve(logicalSlots.size());
-  for (auto [slot, registerCount] : logicalSlots) {
+  SmallVector<int64_t, 4> physicalRegs(logicalSlots.size(), -1);
+  for (auto [index, logicalSlot] : llvm::enumerate(logicalSlots)) {
+    auto [slot, registerCount] = logicalSlot;
     if (slot < 0 || slot >= 123)
       return failure();
     if (registerCount == 2 && ((slot % 2) != 0 || slot + 1 >= 123))
@@ -9045,10 +8546,10 @@ computeSimtKeepResumePhysicalRegs(
     // Slots are user-assigned storage words, not dense ordinals in the current
     // keep/resume group. This keeps a consumer that resumes only a subset of
     // slots from changing where the remaining slots are read from.
-    int64_t baseRegister = 4 + slot;
-    if (baseRegister + static_cast<int64_t>(registerCount) - 1 > 126)
+    int64_t reg = 4 + slot;
+    if (reg + static_cast<int64_t>(registerCount) - 1 > 126)
       return failure();
-    physicalRegs.push_back({baseRegister, registerCount});
+    physicalRegs[index] = reg;
   }
   return physicalRegs;
 }
@@ -9063,8 +8564,8 @@ static bool isValidSimtKeepResumeSlot(int64_t slot, unsigned registerCount) {
 
 class LowerKeepOpPattern final : public OpConversionPattern<pto::KeepOp> {
 public:
-  explicit LowerKeepOpPattern(TypeConverter &typeConverter,
-                              MLIRContext *context, LoweringState &)
+  explicit LowerKeepOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                              LoweringState &)
       : OpConversionPattern<pto::KeepOp>(typeConverter, context) {}
 
   LogicalResult
@@ -9077,8 +8578,9 @@ public:
 
     SmallVector<pto::KeepOp, 4> keepOps = collectConsecutiveOps(op);
     SmallVector<Value, 4> payloads;
-    SmallVector<Type, 4> asmResultTypes;
     SmallVector<std::pair<int64_t, unsigned>, 4> logicalSlots;
+    std::string asmString;
+    llvm::raw_string_ostream asmOS(asmString);
     for (pto::KeepOp keep : keepOps) {
       Value payload = rewriter.getRemappedValue(keep.getPayload());
       if (!payload)
@@ -9088,37 +8590,47 @@ public:
         return rewriter.notifyMatchFailure(
             keep, "expected integer scalar up to 64 bits or f16/bf16/f32");
       int64_t slot = keep.getSlot();
-      unsigned registerCount =
-          getSimtKeepResumeRegisterCount(payload.getType());
+      unsigned registerCount = getSimtKeepResumeRegisterCount(payload.getType());
       if (!isValidSimtKeepResumeSlot(slot, registerCount))
-        return rewriter.notifyMatchFailure(
-            keep,
-            "slot must be in range [0, 122] and 64-bit slots must be even");
+        return rewriter.notifyMatchFailure(keep,
+                                           "slot must be in range [0, 122] and 64-bit slots must be even");
       logicalSlots.push_back({slot, registerCount});
       payloads.push_back(payload);
-      asmResultTypes.push_back(payload.getType());
     }
-    FailureOr<SmallVector<SimtKeepResumePhysicalRegister, 4>> physicalRegs =
+    FailureOr<SmallVector<int64_t, 4>> physicalRegs =
         computeSimtKeepResumePhysicalRegs(logicalSlots);
     if (failed(physicalRegs))
       return rewriter.notifyMatchFailure(
           op, "keep slots must map to valid non-overlapping SIMT registers");
 
-    Type asmResultType = asmResultTypes.front();
-    if (asmResultTypes.size() > 1)
-      asmResultType =
-          LLVM::LLVMStructType::getLiteral(op.getContext(), asmResultTypes);
+    SmallVector<std::pair<int64_t, unsigned>, 4> clobbers;
+    for (auto [index, keep] : llvm::enumerate(keepOps)) {
+      (void)keep;
+      if (index != 0)
+        asmOS << "\n";
+      if (logicalSlots[index].second == 2)
+        asmOS << "IMAD.WIDE.u32 R" << (*physicalRegs)[index]
+              << ", RZ, RZ, $" << index << " wait:0b0000000 stall:1";
+      else
+        asmOS << "MOV R" << (*physicalRegs)[index] << ", $" << index
+              << " wait:0b0000000 stall:1";
+      clobbers.push_back({(*physicalRegs)[index], logicalSlots[index].second});
+    }
+    asmOS.flush();
+
     rewriter.setInsertionPoint(op);
     rewriter.create<LLVM::InlineAsmOp>(
-        op.getLoc(), TypeRange{asmResultType}, payloads, "",
-        buildSimtKeepResumeConstraints(*physicalRegs, true), true, false,
-        LLVM::tailcallkind::TailCallKind::None,
+        op.getLoc(), TypeRange{}, payloads, asmString,
+        appendSimtKeepResumeClobbers(
+            buildRepeatedInlineAsmConstraints("R", payloads.size()), clobbers),
+        true, false, LLVM::tailcallkind::TailCallKind::None,
         LLVM::AsmDialectAttr::get(op.getContext(), LLVM::AsmDialect::AD_ATT),
         ArrayAttr{});
     for (pto::KeepOp keep : llvm::reverse(keepOps))
       rewriter.eraseOp(keep);
     return success();
   }
+
 };
 
 class LowerResumeOpPattern final : public OpConversionPattern<pto::ResumeOp> {
@@ -9138,6 +8650,8 @@ public:
     SmallVector<pto::ResumeOp, 4> resumeOps = collectConsecutiveOps(op);
     SmallVector<std::pair<int64_t, unsigned>, 4> logicalSlots;
     SmallVector<Type, 4> asmResultTypes;
+    std::string asmString;
+    llvm::raw_string_ostream asmOS(asmString);
     for (pto::ResumeOp resume : resumeOps) {
       Type resultType = getTypeConverter()->convertType(resume.getType());
       if (!resultType || !getSimtKeepResumeBitWidth(resultType))
@@ -9146,18 +8660,32 @@ public:
       int64_t slot = resume.getSlot();
       unsigned registerCount = getSimtKeepResumeRegisterCount(resultType);
       if (!isValidSimtKeepResumeSlot(slot, registerCount))
-        return rewriter.notifyMatchFailure(
-            resume,
-            "slot must be in range [0, 122] and 64-bit slots must be even");
+        return rewriter.notifyMatchFailure(resume,
+                                           "slot must be in range [0, 122] and 64-bit slots must be even");
       logicalSlots.push_back({slot, registerCount});
       asmResultTypes.push_back(rewriter.getIntegerType(
           *getSimtKeepResumeBitWidth(resultType) > 32 ? 64 : 32));
     }
-    FailureOr<SmallVector<SimtKeepResumePhysicalRegister, 4>> physicalRegs =
+    FailureOr<SmallVector<int64_t, 4>> physicalRegs =
         computeSimtKeepResumePhysicalRegs(logicalSlots);
     if (failed(physicalRegs))
       return rewriter.notifyMatchFailure(
           op, "resume slots must map to valid non-overlapping SIMT registers");
+
+    SmallVector<std::pair<int64_t, unsigned>, 4> clobbers;
+    for (auto [index, resume] : llvm::enumerate(resumeOps)) {
+      (void)resume;
+      if (index != 0)
+        asmOS << "\n";
+      if (logicalSlots[index].second == 2)
+        asmOS << "IMAD.WIDE.u32 $" << index << ", RZ, RZ, R"
+              << (*physicalRegs)[index] << " wait:0b0000000 stall:1";
+      else
+        asmOS << "MOV $" << index << ", R" << (*physicalRegs)[index]
+              << " wait:0b0000000 stall:1";
+      clobbers.push_back({(*physicalRegs)[index], logicalSlots[index].second});
+    }
+    asmOS.flush();
 
     Type asmResultType = asmResultTypes.front();
     if (asmResultTypes.size() > 1) {
@@ -9166,9 +8694,10 @@ public:
     }
     rewriter.setInsertionPoint(op);
     auto asmOp = rewriter.create<LLVM::InlineAsmOp>(
-        op.getLoc(), TypeRange{asmResultType}, ValueRange{}, "",
-        buildSimtKeepResumeConstraints(*physicalRegs, false), true, false,
-        LLVM::tailcallkind::TailCallKind::None,
+        op.getLoc(), TypeRange{asmResultType}, ValueRange{}, asmString,
+        appendSimtKeepResumeClobbers(
+            buildRepeatedInlineAsmConstraints("=R", resumeOps.size()), clobbers),
+        true, false, LLVM::tailcallkind::TailCallKind::None,
         LLVM::AsmDialectAttr::get(op.getContext(), LLVM::AsmDialect::AD_ATT),
         ArrayAttr{});
 
@@ -9189,8 +8718,9 @@ public:
           resume.getLoc(), asmOp.getRes(),
           ArrayRef<int64_t>{static_cast<int64_t>(index)});
       Type resultType = getTypeConverter()->convertType(resume.getType());
-      Value result = unpackSimtKeepResumePayload(
-          resume.getLoc(), extract.getRes(), resultType, rewriter);
+      Value result = unpackSimtKeepResumePayload(resume.getLoc(),
+                                                 extract.getRes(), resultType,
+                                                 rewriter);
       if (!result)
         return rewriter.notifyMatchFailure(resume, "failed to unpack result");
       results.push_back(result);
@@ -9199,6 +8729,7 @@ public:
       rewriter.replaceOp(resume, result);
     return success();
   }
+
 };
 
 template <typename ConfigOp>
@@ -9653,6 +9184,21 @@ public:
                                          "failed to convert runtime-query result type");
 
     StringRef calleeName = buildRuntimeQueryCallee<QueryOp>(op.getContext());
+
+    // When pto.print/pto.tprint is used, addDTDataParamToEntryFunctions
+    // eagerly creates LLVM::LLVMFuncOp for CCE intrinsics BEFORE type
+    // conversion.  If such an LLVM func already exists we must emit an
+    // LLVM::CallOp directly; a func::CallOp would fail verification
+    // because the target symbol is not a func::FuncOp.
+    ModuleOp moduleOp = op->template getParentOfType<ModuleOp>();
+    if (auto llvmFunc =
+            moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(calleeName)) {
+      auto call = rewriter.create<LLVM::CallOp>(op.getLoc(), llvmFunc,
+                                                 ValueRange{});
+      rewriter.replaceOp(op, call.getResults());
+      return success();
+    }
+
     auto funcType = rewriter.getFunctionType(TypeRange{}, TypeRange{resultType});
     auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
                                               TypeRange{resultType}, ValueRange{});
@@ -9665,52 +9211,482 @@ private:
   LoweringState &state;
 };
 
-template <typename QueryOp>
-class LowerBlockRuntimeQueryOpPattern final
-    : public OpConversionPattern<QueryOp> {
+// Lower pto.print -> inline DebugTunnel protocol via nested scf::IfOp.
+//
+// Uses two nested scf::IfOp ops for null check (skip on null DTData) and
+// overflow check (skip payload write on overflow).  This avoids splitBlock /
+// new Block CFG construction and naturally works inside scf.if regions whose
+// SizedRegion<1> constraint forbids adding blocks.
+
+class LowerPrintOpPattern final : public OpConversionPattern<pto::PrintOp> {
 public:
-  explicit LowerBlockRuntimeQueryOpPattern(TypeConverter &typeConverter,
-                                           MLIRContext *context,
-                                           LoweringState &state)
-      : OpConversionPattern<QueryOp>(typeConverter, context), state(state) {}
+  LowerPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                      LoweringState &state)
+      : OpConversionPattern<pto::PrintOp>(typeConverter, context), state(state) {}
 
   LogicalResult
-  matchAndRewrite(QueryOp op, typename QueryOp::Adaptor adaptor,
+  matchAndRewrite(pto::PrintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    (void)adaptor;
-    Type resultType =
-        this->getTypeConverter()->convertType(op.getResult().getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(
-          op, "failed to convert block runtime-query result type");
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+    auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+    auto i64Type = rewriter.getI64Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i1Type = rewriter.getI1Type();
 
-    auto funcOp = op->template getParentOfType<func::FuncOp>();
-    bool isSimtEntry =
-        funcOp && funcOp->hasAttr(pto::kPTOSimtEntryAttrName);
-    if (isSimtEntry && !resultType.isInteger(64))
-      return rewriter.notifyMatchFailure(
-          op, "SIMT block runtime-query expects an i64 PTO result");
+    // Look up format-string global.
+    StringRef fmt = op.getFormat();
+    if (fmt.empty()) fmt = "%f";
+    std::string globalName;
+    for (auto &kv : state.stringGlobals) {
+      if (kv.first == fmt) { globalName = kv.second; break; }
+    }
+    if (globalName.empty())
+      return op.emitError("internal: format string not found in stringGlobals");
 
-    StringRef calleeName =
-        isSimtEntry ? buildSimtBlockQueryCallee<QueryOp>(op.getContext())
-                    : buildRuntimeQueryCallee<QueryOp>(op.getContext());
-    Type callResultType = isSimtEntry ? rewriter.getI32Type() : resultType;
-    auto funcType =
-        rewriter.getFunctionType(TypeRange{}, TypeRange{callResultType});
-    auto call = rewriter.create<func::CallOp>(
-        op.getLoc(), calleeName, TypeRange{callResultType}, ValueRange{});
-    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    // Get DTData from entry function's last argument.
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func || func.getNumArguments() == 0)
+      return op.emitError("pto.print must be inside a function");
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
 
-    Value result = call.getResult(0);
-    if (isSimtEntry)
-      result = rewriter.create<arith::ExtUIOp>(op.getLoc(), resultType, result);
-    rewriter.replaceOp(op, result);
+    // Compute scalar metadata and format info (shared analysis).
+    Value scalar = adaptor.getScalar();
+    Type scalarType = scalar.getType();
+
+    auto formatInfo = analyzePrintFormat(op.getFormat());
+    if (failed(formatInfo))
+      return op.emitError("internal: failed to parse format string '")
+             << op.getFormat() << "'";
+    int64_t recordSize = static_cast<int64_t>(formatInfo->getRecordSize());
+
+    // Pre-resolve: if the block-idx intrinsic is unavailable, skip printing
+    // entirely.
+    ModuleOp moduleOp = op->getParentOfType<ModuleOp>();
+    auto blockIdxFunc =
+        moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
+    auto dcciFunc =
+        moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+    if (!blockIdxFunc) {
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    // ---- Outer scf.if: DTData != null guard ----
+    auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+
+    auto outerIf = rewriter.create<scf::IfOp>(loc, dtNotNull.getResult(),
+                                               /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&outerIf.getThenRegion().front());
+
+    // ---- Inner scf.if: logRegion != null guard (safe to deref now) ----
+    auto lrAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 0)});
+    auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
+    auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
+
+    auto innerIf = rewriter.create<scf::IfOp>(loc, lrNotNull.getResult(),
+                                               /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&innerIf.getThenRegion().front());
+
+    // --- DTData and LogRegion are valid ---
+
+    // Load LogBufferSize, compute per-block stride and buffer base.
+    auto lbsAddr = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, dtDataArg,
+        ValueRange{getI64Constant(rewriter, loc, 16)});
+    auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
+
+    auto stride64 = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                                logBufSize.getResult(),
+                                                stride64.getResult());
+
+    auto blockIdxCall = rewriter.create<LLVM::CallOp>(
+        loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
+    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type,
+                                                  blockIdxCall.getResult(),
+                                                  stride.getResult());
+
+    auto logBufBase = rewriter.create<LLVM::GEPOp>(
+        loc, ptr1Type, i8Type, logRegion.getResult(),
+        ValueRange{blockOff.getResult()});
+
+    auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
+
+    // ---- Inner scf.if: overflow check (with else → full write vs guard) ----
+    auto recSizeVal = rewriter.create<LLVM::ConstantOp>(
+        loc, i64Type, rewriter.getI64IntegerAttr(recordSize));
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                                pLogSize.getResult(),
+                                                recSizeVal.getResult());
+    auto overflow = rewriter.create<LLVM::ICmpOp>(
+        loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(),
+        logBufSize.getResult());
+
+    auto overflowIf = rewriter.create<scf::IfOp>(loc, overflow.getResult(),
+                                                  /*withElseRegion=*/true);
+
+    // Overflow then: just update pLogSize (overflow guard from CCE).
+    {
+      rewriter.setInsertionPointToStart(&overflowIf.getThenRegion().front());
+      rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+      // yield is already created by the builder
+    }
+
+    // Overflow else: write full protocol payload.
+    {
+      rewriter.setInsertionPointToStart(&overflowIf.getElseRegion().front());
+
+      auto headerOff = rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(64));
+      auto writeOff = rewriter.create<LLVM::AddOp>(loc, i64Type,
+                                                    headerOff.getResult(),
+                                                    pLogSize.getResult());
+      auto writePtr = rewriter.create<LLVM::GEPOp>(
+          loc, ptr1Type, i8Type, logBufBase.getResult(),
+          ValueRange{writeOff.getResult()});
+
+      auto storeI8 = [&](Value base, int64_t offset, Value val) {
+        auto off = rewriter.create<LLVM::ConstantOp>(
+            loc, i64Type, rewriter.getI64IntegerAttr(offset));
+        auto ptr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, base,
+                                                 ValueRange{off.getResult()});
+        rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+      };
+
+      auto fmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type,
+                                                           globalName);
+      int64_t cursor = 0;
+      auto emitTextNode = [&](uint16_t sourceOffset, uint16_t byteCount) {
+        if (!byteCount) return;
+        auto marker = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(1));
+        storeI8(writePtr.getResult(), cursor++, marker);
+        auto lenLow = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(byteCount & 0xff));
+        auto lenHigh = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(byteCount >> 8));
+        storeI8(writePtr.getResult(), cursor++, lenLow);
+        storeI8(writePtr.getResult(), cursor++, lenHigh);
+        for (uint16_t i = 0; i + 1 < byteCount; ++i) {
+          auto source = rewriter.create<LLVM::ConstantOp>(
+              loc, i64Type, rewriter.getI64IntegerAttr(sourceOffset + i));
+          auto charPtr = rewriter.create<LLVM::GEPOp>(
+              loc, ptr0Type, i8Type, fmtGlobal.getResult(),
+              ValueRange{source.getResult()});
+          auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+          storeI8(writePtr.getResult(), cursor++, ch);
+        }
+        auto nul = rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(0));
+        storeI8(writePtr.getResult(), cursor++, nul);
+      };
+
+      emitTextNode(formatInfo->prefixOffset, formatInfo->prefixBytes);
+
+      auto enc = encodePrintScalar(rewriter, loc, scalarType, scalar,
+                                   formatInfo->conversion);
+      if (failed(enc)) return failure();
+      auto valueMarker = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(enc->marker));
+      storeI8(writePtr.getResult(), cursor++, valueMarker);
+      Type shiftType = (enc->byteWidth == 4) ? i32Type : i64Type;
+      for (unsigned i = 0; i < enc->byteWidth; ++i) {
+        auto shift = rewriter.create<LLVM::ConstantOp>(
+            loc, shiftType, rewriter.getIntegerAttr(shiftType, i * 8));
+        auto shifted = rewriter.create<LLVM::LShrOp>(loc, shiftType,
+                                                      enc->bits, shift);
+        auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+        storeI8(writePtr.getResult(), cursor++, byte);
+      }
+      auto conversionLenLow = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(formatInfo->conversionBytes & 0xff));
+      auto conversionLenHigh = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(formatInfo->conversionBytes >> 8));
+      storeI8(writePtr.getResult(), cursor++, conversionLenLow);
+      storeI8(writePtr.getResult(), cursor++, conversionLenHigh);
+      for (uint16_t i = 0; i + 1 < formatInfo->conversionBytes; ++i) {
+        auto source = rewriter.create<LLVM::ConstantOp>(
+            loc, i64Type, rewriter.getI64IntegerAttr(
+                              formatInfo->conversionOffset + i));
+        auto charPtr = rewriter.create<LLVM::GEPOp>(
+            loc, ptr0Type, i8Type, fmtGlobal.getResult(),
+            ValueRange{source.getResult()});
+        auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+        storeI8(writePtr.getResult(), cursor++, ch);
+      }
+      auto conversionNul = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(0));
+      storeI8(writePtr.getResult(), cursor++, conversionNul);
+      emitTextNode(formatInfo->suffixOffset, formatInfo->suffixBytes);
+
+      auto endMarker = rewriter.create<LLVM::ConstantOp>(
+          loc, i8Type, rewriter.getI8IntegerAttr(0));
+      storeI8(writePtr.getResult(), cursor, endMarker);
+
+      // Update pLogSize
+      rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+
+      // DCCI flush
+      if (dcciFunc) {
+        auto flushNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+        auto flushOne = rewriter.create<LLVM::ConstantOp>(
+            loc, i64Type, rewriter.getI64IntegerAttr(1));
+        rewriter.create<LLVM::CallOp>(loc, TypeRange{},
+                                       dcciFunc.getSymName(),
+                                       ValueRange{flushNull.getResult(),
+                                                  flushOne.getResult()});
+      }
+      // yield is already created by the builder
+    }
+
+    rewriter.eraseOp(op);
     return success();
   }
 
 private:
   LoweringState &state;
 };
+// Lower pto.alloc_tile -> ZeroOp null pointer (tiles are UB-placeholders in VPTO).
+class LowerAllocTileOpPattern final : public OpConversionPattern<pto::AllocTileOp> {
+public:
+  LowerAllocTileOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                         LoweringState &state)
+      : OpConversionPattern(typeConverter, context) { (void)state; }
+
+  LogicalResult
+  matchAndRewrite(pto::AllocTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptr6Type = LLVM::LLVMPointerType::get(rewriter.getContext(), 6);
+    auto nullPtr = rewriter.create<LLVM::ZeroOp>(op.getLoc(), ptr6Type);
+    rewriter.replaceOp(op, nullPtr.getResult());
+    return success();
+  }
+};
+
+// Lower pto.tprint -> inline DebugTunnel tile data dump.
+class LowerTPrintOpPattern final : public OpConversionPattern<pto::TPrintOp> {
+public:
+  LowerTPrintOpPattern(TypeConverter &typeConverter, MLIRContext *context,
+                       LoweringState &state)
+      : OpConversionPattern<pto::TPrintOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+    auto ptr1Type = LLVM::LLVMPointerType::get(ctx, 1);
+    auto i64Type = rewriter.getI64Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i1Type = rewriter.getI1Type();
+
+    auto srcType = dyn_cast<pto::TileBufType>(op.getSrc().getType());
+    if (!srcType) return op.emitError("pto.tprint: source must be a tile_buf");
+    ArrayRef<int64_t> shape = srcType.getShape();
+    if (shape.size() != 2) return op.emitError("pto.tprint: only 2D tiles supported");
+    int64_t rows = shape[0], cols = shape[1];
+    Type elemType = srcType.getElementType();
+    bool isFloat = isa<FloatType>(elemType);
+    int64_t dataSize = isFloat ? 4 : 8;
+    int64_t elemBytes = elemType.getIntOrFloatBitWidth() / 8;
+    std::string valFmtName = isFloat ? state.tprintFmtValF32 : state.tprintFmtValInt;
+    int64_t fmtPrefixLen = isFloat ? 6 : 4;
+    int64_t elemRecordSize = 1 + dataSize + 2 + fmtPrefixLen + 1;
+    std::string dtypeName = elemType.isF16() ? "float16" :
+                            elemType.isF32() ? "float32" : "int32";
+    std::string headerText = "=== [TPRINT Tile] Data Type: " + dtypeName +
+                             ", Layout: ND, TileType: Vec ===\n";
+    std::string shapeText = "  Shape: [" + std::to_string(rows) + ", " +
+                            std::to_string(cols) + "], Valid Shape: [" +
+                            std::to_string(rows) + ", " +
+                            std::to_string(cols) + "]\n";
+    auto literalRecordSize = [](const std::string &text) {
+      return static_cast<int64_t>(1 + 2 + text.size() + 1 + 1);
+    };
+    int64_t prefixRecordSize = literalRecordSize(headerText) +
+                               literalRecordSize(shapeText);
+
+    auto func = op->getParentOfType<func::FuncOp>();
+    if (!func || func.getNumArguments() == 0) { rewriter.eraseOp(op); return success(); }
+    Value dtDataArg = func.getArgument(func.getNumArguments() - 1);
+
+    ModuleOp moduleOp = op->getParentOfType<ModuleOp>();
+    auto blockIdxFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.blockIdxFuncName);
+    auto dcciFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.dcciFuncName);
+    if (!blockIdxFunc || !dcciFunc) { rewriter.eraseOp(op); return success(); }
+
+    auto valFmtGlobal = rewriter.create<LLVM::AddressOfOp>(loc, ptr0Type, valFmtName);
+
+    // ---- Outer scf.if: DTData != null guard ----
+    auto nullPtr1 = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto dtNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, dtDataArg, nullPtr1);
+    auto outerIf = rewriter.create<scf::IfOp>(loc, dtNotNull.getResult(), /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&outerIf.getThenRegion().front());
+
+    // ---- Inner scf.if: logRegion != null guard (safe to deref now) ----
+    auto lrAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 0)});
+    auto logRegion = rewriter.create<LLVM::LoadOp>(loc, ptr1Type, lrAddr);
+    auto lrNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+    auto lrNotNull = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ne, logRegion.getResult(), lrNull);
+    auto innerIf = rewriter.create<scf::IfOp>(loc, lrNotNull.getResult(), /*withElseRegion=*/false);
+    rewriter.setInsertionPointToStart(&innerIf.getThenRegion().front());
+
+    auto lbsAddr = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, dtDataArg, ValueRange{getI64Constant(rewriter, loc, 16)});
+    auto logBufSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, lbsAddr);
+    auto stride64 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(64));
+    auto stride = rewriter.create<LLVM::AddOp>(loc, i64Type, logBufSize.getResult(), stride64.getResult());
+    auto blockIdxCall = rewriter.create<LLVM::CallOp>(loc, i64Type, blockIdxFunc.getSymName(), ValueRange{});
+    auto blockOff = rewriter.create<LLVM::MulOp>(loc, i64Type, blockIdxCall.getResult(), stride.getResult());
+    auto logBufBase = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, logRegion.getResult(), ValueRange{blockOff.getResult()});
+
+    auto sysVaBaseFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(state.sysVaBaseFuncName);
+    auto ptr6Type = LLVM::LLVMPointerType::get(ctx, 6);
+    Value ubBaseElemOffset;
+    if (sysVaBaseFunc) {
+      auto sysva = rewriter.create<LLVM::CallOp>(loc, i64Type, sysVaBaseFunc.getSymName(), ValueRange{});
+      auto ubOff = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(0x80000));
+      auto baseAddr = rewriter.create<LLVM::AddOp>(loc, i64Type, sysva.getResult(), ubOff);
+      auto elemSizeVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+      ubBaseElemOffset = rewriter.create<LLVM::UDivOp>(loc, i64Type, baseAddr.getResult(), elemSizeVal);
+    } else {
+      ubBaseElemOffset = getI64Constant(rewriter, loc, 0);
+    }
+    auto tileDataBase = rewriter.create<LLVM::ZeroOp>(loc, ptr6Type);
+
+    auto elemRecSizeVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(elemRecordSize));
+    auto cols64 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(cols));
+    auto numElements = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(rows * cols));
+    auto totalRecSize = rewriter.create<LLVM::MulOp>(loc, i64Type, numElements.getResult(), elemRecSizeVal.getResult());
+    auto totalSizeWithPrefix = rewriter.create<LLVM::AddOp>(
+        loc, i64Type, totalRecSize.getResult(),
+        getI64Constant(rewriter, loc, prefixRecordSize));
+
+    auto pLogSize = rewriter.create<LLVM::LoadOp>(loc, i64Type, logBufBase);
+    auto newPls = rewriter.create<LLVM::AddOp>(loc, i64Type, pLogSize.getResult(), totalSizeWithPrefix.getResult());
+    auto overflow = rewriter.create<LLVM::ICmpOp>(loc, i1Type, LLVM::ICmpPredicate::ugt, newPls.getResult(), logBufSize.getResult());
+    auto overflowIf = rewriter.create<scf::IfOp>(loc, overflow.getResult(), /*withElseRegion=*/true);
+    {
+      rewriter.setInsertionPointToStart(&overflowIf.getThenRegion().front());
+      rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+    }
+    {
+      rewriter.setInsertionPointToStart(&overflowIf.getElseRegion().front());
+      auto storeByteAt = [&](Value basePtr, Value byteOff, Value byteVal) {
+        auto gep = rewriter.create<LLVM::GEPOp>(loc, ptr1Type, i8Type, basePtr, ValueRange{byteOff});
+        rewriter.create<LLVM::StoreOp>(loc, byteVal, gep);
+      };
+      auto header64 = getI64Constant(rewriter, loc, 64);
+      auto curWriteOff = rewriter.create<LLVM::AddOp>(loc, i64Type, header64, pLogSize.getResult());
+      auto getByteConstant = [&](uint8_t value) {
+        return rewriter.create<LLVM::ConstantOp>(
+            loc, i8Type, rewriter.getI8IntegerAttr(value)).getResult();
+      };
+      auto writeLiteralRecord = [&](Value writeOff, const std::string &text) {
+        storeByteAt(logBufBase, writeOff, getByteConstant(1));
+        int64_t payloadSize = static_cast<int64_t>(text.size() + 1);
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 1)), getByteConstant(payloadSize & 0xff));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 2)), getByteConstant((payloadSize >> 8) & 0xff));
+        for (size_t i = 0; i < text.size(); ++i)
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 3 + i)), getByteConstant(static_cast<uint8_t>(text[i])));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 3 + text.size())), getByteConstant(0));
+        storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, 4 + text.size())), getByteConstant(0));
+        return rewriter.create<LLVM::AddOp>(loc, i64Type, writeOff, getI64Constant(rewriter, loc, literalRecordSize(text))).getResult();
+      };
+      Value afterHeader = writeLiteralRecord(curWriteOff.getResult(), headerText);
+      Value firstElementOff = writeLiteralRecord(afterHeader, shapeText);
+      auto c0Idx = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      auto c1Idx = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      auto rowsIdx = rewriter.create<arith::ConstantIndexOp>(loc, rows);
+      auto colsIdx = rewriter.create<arith::ConstantIndexOp>(loc, cols);
+      auto rowLoop = rewriter.create<scf::ForOp>(loc, c0Idx, rowsIdx, c1Idx, ValueRange{firstElementOff});
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(rowLoop.getBody());
+        Value row = rowLoop.getInductionVar();
+        Value writeOffRow = rowLoop.getRegionIterArgs()[0];
+        auto colLoop = rewriter.create<scf::ForOp>(loc, c0Idx, colsIdx, c1Idx, ValueRange{writeOffRow});
+        {
+          OpBuilder::InsertionGuard guard2(rewriter);
+          rewriter.setInsertionPointToStart(colLoop.getBody());
+          Value col = colLoop.getInductionVar();
+          Value writeOffCol = colLoop.getRegionIterArgs()[0];
+          auto rowI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, row);
+          auto colI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, col);
+          auto rowOff = rewriter.create<LLVM::MulOp>(loc, i64Type, rowI64, cols64);
+          auto elemIdx = rewriter.create<LLVM::AddOp>(loc, i64Type, rowOff, colI64);
+          auto virtElemOff = rewriter.create<LLVM::AddOp>(loc, i64Type, ubBaseElemOffset, elemIdx);
+          auto elemPtr = rewriter.create<LLVM::GEPOp>(loc, ptr6Type, elemType, tileDataBase, ValueRange{virtElemOff.getResult()});
+          Value elemVal = rewriter.create<LLVM::LoadOp>(loc, elemType, elemPtr);
+          auto enc = encodePrintScalar(rewriter, loc, elemType, elemVal);
+          if (failed(enc)) return failure();
+          auto markerConst = rewriter.create<LLVM::ConstantOp>(
+              loc, i8Type, rewriter.getI8IntegerAttr(enc->marker));
+          storeByteAt(logBufBase, writeOffCol, markerConst.getResult());
+          Type shiftType = (enc->byteWidth == 4) ? i32Type : i64Type;
+          for (unsigned i = 0; i < enc->byteWidth; ++i) {
+            auto shift = rewriter.create<LLVM::ConstantOp>(
+                loc, shiftType, rewriter.getIntegerAttr(shiftType, i * 8));
+            auto shifted = rewriter.create<LLVM::LShrOp>(loc, shiftType,
+                                                          enc->bits, shift);
+            auto byte = rewriter.create<LLVM::TruncOp>(loc, i8Type, shifted);
+            auto off = rewriter.create<LLVM::AddOp>(
+                loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, 1 + i));
+            storeByteAt(logBufBase, off.getResult(), byte);
+          }
+          int64_t fmtOff = 1 + dataSize;
+          auto fmtLenVal = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(fmtPrefixLen));
+          auto shift8 = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(8));
+          auto fmtLenLow = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenVal);
+          auto fmtLenShifted = rewriter.create<LLVM::LShrOp>(loc, i64Type, fmtLenVal.getResult(), shift8);
+          auto fmtLenHigh = rewriter.create<LLVM::TruncOp>(loc, i8Type, fmtLenShifted);
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff)).getResult(), fmtLenLow);
+          storeByteAt(logBufBase, rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff + 1)).getResult(), fmtLenHigh);
+          for (int64_t i = 0; i < fmtPrefixLen - 1; ++i) {
+            auto charOff = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(i));
+            auto charPtr = rewriter.create<LLVM::GEPOp>(loc, ptr0Type, i8Type, valFmtGlobal.getResult(), ValueRange{charOff.getResult()});
+            auto ch = rewriter.create<LLVM::LoadOp>(loc, i8Type, charPtr);
+            auto dstOff = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, fmtOff + 2 + i));
+            storeByteAt(logBufBase, dstOff.getResult(), ch);
+          }
+          auto formatNul = rewriter.create<LLVM::ConstantOp>(
+              loc, i8Type, rewriter.getI8IntegerAttr(0));
+          auto nulOffVal = rewriter.create<LLVM::AddOp>(
+              loc, i64Type, writeOffCol,
+              getI64Constant(rewriter, loc, fmtOff + 2 + fmtPrefixLen - 1));
+          storeByteAt(logBufBase, nulOffVal.getResult(), formatNul);
+          int64_t endOff = fmtOff + 2 + fmtPrefixLen;
+          auto endMarker = rewriter.create<LLVM::ConstantOp>(loc, i8Type, rewriter.getI8IntegerAttr(0));
+          auto endOffVal = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, endOff));
+          storeByteAt(logBufBase, endOffVal.getResult(), endMarker);
+          auto nextWriteOffI64 = rewriter.create<LLVM::AddOp>(loc, i64Type, writeOffCol, getI64Constant(rewriter, loc, elemRecordSize));
+          rewriter.create<scf::YieldOp>(loc, ValueRange{nextWriteOffI64.getResult()});
+        }
+        rewriter.create<scf::YieldOp>(loc, colLoop.getResults());
+      }
+      rewriter.create<LLVM::StoreOp>(loc, newPls.getResult(), logBufBase);
+      auto flushNull = rewriter.create<LLVM::ZeroOp>(loc, ptr1Type);
+      auto flushOne = rewriter.create<LLVM::ConstantOp>(loc, i64Type, rewriter.getI64IntegerAttr(1));
+      rewriter.create<LLVM::CallOp>(loc, TypeRange{}, dcciFunc.getSymName(), ValueRange{flushNull.getResult(), flushOne.getResult()});
+    }
+    rewriter.eraseOp(op);
+    return success();
+  }
+private:
+  LoweringState &state;
+};
+
 
 template <typename VoteOp>
 class LowerVoteOpPattern final : public OpConversionPattern<VoteOp> {
@@ -10353,51 +10329,22 @@ public:
   matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(op, "expected single-operand single-result cast");
+      return failure();
     if (!hasVPTOConvertibleType(op->getOperandTypes()) &&
         !hasVPTOConvertibleType(op->getResultTypes()))
-      return rewriter.notifyMatchFailure(op, "no VPTO convertible types");
+      return failure();
 
     Type convertedResultType =
         getTypeConverter()->convertType(op.getResult(0).getType());
     if (!convertedResultType)
-      return rewriter.notifyMatchFailure(op, "could not convert result type");
+      return failure();
 
     Value input = adaptor.getOperands().front();
     if (input.getType() != convertedResultType)
-      return rewriter.notifyMatchFailure(op, "input type does not match converted result type");
+      return failure();
 
     rewriter.replaceOp(op, input);
     return success();
-  }
-};
-
-class ConvertPtoTileBufAddrOp final
-    : public OpConversionPattern<pto::TileBufAddrOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(pto::TileBufAddrOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Type convertedResultType =
-        getTypeConverter()->convertType(op.getResult().getType());
-    auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(convertedResultType);
-    if (!llvmPtrType)
-      return rewriter.notifyMatchFailure(op, "expected LLVM pointer result");
-
-    Value input = adaptor.getSrc();
-    if (isa<MemRefType>(input.getType())) {
-      Value alignedIdx =
-          rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
-              op.getLoc(), rewriter.getIndexType(), input);
-      Value i64 = rewriter.create<arith::IndexCastUIOp>(
-          op.getLoc(), rewriter.getI64Type(), alignedIdx);
-      rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, i64);
-      return success();
-    }
-
-    return rewriter.notifyMatchFailure(op, "unsupported tilebuf address source");
   }
 };
 
@@ -10489,19 +10436,10 @@ public:
         rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, input);
         return success();
       }
-      if (isa<MemRefType>(inputType)) {
-        Value alignedIdx =
-            rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
-                op.getLoc(), rewriter.getIndexType(), input);
-        Value i64 = rewriter.create<arith::IndexCastUIOp>(
-            op.getLoc(), rewriter.getI64Type(), alignedIdx);
-        rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, i64);
-        return success();
-      }
       auto sourcePtrType = dyn_cast<LLVM::LLVMPointerType>(inputType);
       if (!sourcePtrType)
         return rewriter.notifyMatchFailure(op,
-                                           "expected integer, memref, or LLVM pointer input");
+                                           "expected integer or LLVM pointer input");
       if (sourcePtrType.getAddressSpace() == llvmPtrType.getAddressSpace()) {
         rewriter.replaceOpWithNewOp<LLVM::BitcastOp>(op, llvmPtrType, input);
         return success();
@@ -10931,8 +10869,7 @@ public:
 
 static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                                            RewritePatternSet &patterns,
-                                           LoweringState &state,
-                                           const std::string &march) {
+                                           LoweringState &state) {
   patterns.add<LowerUnaryMaskedOpPattern<pto::VabsOp>,
                LowerUnaryMaskedOpPattern<pto::VexpOp>,
                LowerUnaryMaskedOpPattern<pto::VlnOp>,
@@ -11097,7 +11034,6 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerUnaryI64ConfigOpPattern<pto::SetMte2NzParaOp>,
                LowerUnaryI64ConfigOpPattern<pto::SetPadValOutToL1Op>,
                LowerUnaryI64ConfigOpPattern<pto::SetFpcOp>,
-               LowerUnaryI64ConfigOpPattern<pto::SetStoreAtomicCfgOp>,
                LowerNullaryConfigOpPattern<pto::SetAtomicS32Op>,
                LowerNullaryConfigOpPattern<pto::SetAtomicS8Op>,
                LowerPipeEventSyncOpPattern<pto::SetFlagOp>,
@@ -11113,9 +11049,9 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerBufSyncOpPattern<pto::RlsBufOp>,
                LowerBufDynSyncOpPattern<pto::GetBufDynOp>,
                LowerBufDynSyncOpPattern<pto::RlsBufDynOp>,
-               LowerBlockRuntimeQueryOpPattern<pto::GetBlockIdxOp>,
+               LowerRuntimeQueryOpPattern<pto::GetBlockIdxOp>,
                LowerRuntimeQueryOpPattern<pto::GetSubBlockIdxOp>,
-               LowerBlockRuntimeQueryOpPattern<pto::GetBlockNumOp>,
+               LowerRuntimeQueryOpPattern<pto::GetBlockNumOp>,
                LowerRuntimeQueryOpPattern<pto::GetSubBlockNumOp>,
                LowerVldsOpPattern, LowerVldsx2OpPattern, LowerVsldbOpPattern,
                LowerVldasOpPattern, LowerInitAlignOpPattern,
@@ -11154,94 +11090,33 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerMadRawPattern<pto::MadBiasRawOp>,
                LowerMadRawPattern<pto::MadMxRawOp>,
                LowerMadRawPattern<pto::MadMxBiasRawOp>,
+               LowerCopyOpPattern<pto::CopyGmToUbufOp>,
+               LowerCopyOpPattern<pto::CopyUbufToGmOp>,
                LowerCopyUbufToUbufOpPattern,
                LowerCopyCbufToUbufOpPattern,
-               LowerCopyUbufToCbufOpPattern>(
+               LowerCopyUbufToCbufOpPattern,
+               LowerAllocTileOpPattern,
+               LowerPrintOpPattern,
+               LowerTPrintOpPattern>(
       typeConverter, patterns.getContext(), state);
-
-  patterns.add<LowerCopyOpPattern<pto::CopyGmToUbufOp>>(
-      typeConverter, patterns.getContext(), state, march);
-  patterns.add<LowerCopyOpPattern<pto::CopyUbufToGmOp>>(
-      typeConverter, patterns.getContext(), state, march);
-
-  if (march == "dav-c220-vec") {
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVaddOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVsubOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVmulOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVdivOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVmaxOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVminOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVandOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVorOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufBinaryOpPattern<pto::UBVaddReluOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVnotOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVabsOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVreluOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVexpOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVlnOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVsqrtOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufUnaryOpPattern<pto::UBVrsqrtOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufShiftOpPattern<pto::UBVshlOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufShiftOpPattern<pto::UBVshrOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufScalarBinaryPattern<pto::UBVmulSOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufScalarBinaryPattern<pto::UBVaddSOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufScalarBinaryPattern<pto::UBVmaxSOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufScalarBinaryPattern<pto::UBVminSOp>>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBufVdupPattern>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBSetMaskOpPattern>(
-        typeConverter, patterns.getContext(), state);
-    patterns.add<LowerUBSetMaskCountOpPattern>(
-        typeConverter, patterns.getContext());
-    patterns.add<LowerUBSetMaskNormOpPattern>(
-        typeConverter, patterns.getContext());
-  }
 }
 
 static void configureVPTOOpLoweringTarget(ConversionTarget &target,
-                                          VPTOTypeConverter &typeConverter,
-                                          const std::string &march) {
+                                          VPTOTypeConverter &typeConverter) {
   (void)typeConverter;
   target.addLegalOp<ModuleOp>();
-  target.addLegalOp<func::FuncOp>();
-  target.addLegalOp<pto::TileBufAddrOp>();
-  target.addLegalOp<pto::AddPtrOp>();
   target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect,
                          LLVM::LLVMDialect,
-                          func::FuncDialect, scf::SCFDialect>();
-  target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
-      [](UnrealizedConversionCastOp op) {
-        return !hasVPTOConvertibleType(op->getOperandTypes()) &&
-               !hasVPTOConvertibleType(op->getResultTypes());
-      });
+                         func::FuncDialect, scf::SCFDialect>();
+  target.addLegalOp<UnrealizedConversionCastOp>();
+  target.addIllegalOp<pto::AllocTileOp>();
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
                       pto::CmoCacheInvalidOp, pto::FenceBarrierAllOp,
                       pto::DsbOp, pto::DcciOp,
                       pto::GetBufOp, pto::RlsBufOp,
-                      pto::GetBufDynOp, pto::RlsBufDynOp>();
+                      pto::GetBufDynOp, pto::RlsBufDynOp,
+                      pto::PrintOp, pto::TPrintOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,
                       pto::GetBlockNumOp, pto::GetSubBlockNumOp,
                       pto::GetCtrlOp, pto::GetVms4SrOp, pto::GetTidXOp,
@@ -11277,7 +11152,6 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::SetLoopSizeOutToL1Op, pto::SetMte2NzParaOp,
                       pto::SetPadValOutToL1Op, pto::SetReluAlphaOp,
                       pto::SetFixClipReluOp, pto::SetFpcOp,
-                      pto::SetStoreAtomicCfgOp,
                       pto::SetAtomicS32Op, pto::SetAtomicS8Op, pto::SetCtrlOp,
                       pto::StoreVfSimtInfoOp,
                       pto::SetMovPadValOp, pto::SetQuantPreOp>();
@@ -11337,36 +11211,6 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::MadMxAccOp, pto::MadMxBiasOp,
                       pto::MadRawOp, pto::MadBiasRawOp, pto::MadMxRawOp,
                       pto::MadMxBiasRawOp>();
-
-  if (march == "dav-c220-vec") {
-    target.addIllegalOp<pto::UBVaddOp>();
-    target.addIllegalOp<pto::UBVsubOp>();
-    target.addIllegalOp<pto::UBVmulOp>();
-    target.addIllegalOp<pto::UBVdivOp>();
-    target.addIllegalOp<pto::UBVmaxOp>();
-    target.addIllegalOp<pto::UBVminOp>();
-    target.addIllegalOp<pto::UBVandOp>();
-    target.addIllegalOp<pto::UBVorOp>();
-    target.addIllegalOp<pto::UBVaddReluOp>();
-    target.addIllegalOp<pto::UBVnotOp>();
-    target.addIllegalOp<pto::UBVabsOp>();
-    target.addIllegalOp<pto::UBVreluOp>();
-    target.addIllegalOp<pto::UBVexpOp>();
-    target.addIllegalOp<pto::UBVlnOp>();
-    target.addIllegalOp<pto::UBVsqrtOp>();
-    target.addIllegalOp<pto::UBVrsqrtOp>();
-    target.addIllegalOp<pto::UBVshlOp>();
-    target.addIllegalOp<pto::UBVshrOp>();
-    target.addIllegalOp<pto::UBVmulSOp>();
-    target.addIllegalOp<pto::UBVaddSOp>();
-    target.addIllegalOp<pto::UBVmaxSOp>();
-    target.addIllegalOp<pto::UBVminSOp>();
-    target.addIllegalOp<pto::UBVdupOp>();
-    target.addIllegalOp<pto::UBSetMaskOp>();
-    target.addIllegalOp<pto::UBSetMaskCountOp>();
-    target.addIllegalOp<pto::UBSetMaskNormOp>();
-  }
-
   target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 }
 
@@ -11402,23 +11246,36 @@ static void foldVPTOTypeCasts(ModuleOp module, TypeConverter &typeConverter) {
   }
 }
 
-static LogicalResult lowerVPTOOps(ModuleOp module,
-                                  const std::string &march,
-                                  llvm::raw_ostream &diagOS) {
+static LogicalResult lowerVPTOOps(ModuleOp module, llvm::raw_ostream &diagOS) {
   MLIRContext *context = module.getContext();
   VPTOTypeConverter typeConverter(context);
   ConversionTarget target(*context);
   RewritePatternSet patterns(context);
   LoweringState state;
 
-  configureVPTOOpLoweringTarget(target, typeConverter, march);
-  populateVPTOOpLoweringPatterns(typeConverter, patterns, state, march);
-  patterns.add<ConvertVPTOUnrealizedCastOp>(typeConverter, context);
+  configureVPTOOpLoweringTarget(target, typeConverter);
+  populateVPTOOpLoweringPatterns(typeConverter, patterns, state);
+  collectAndCreatePrintfStringGlobals(module, state);
+
+  // If the module uses print ops, add the DTData hidden parameter to every
+  // entry function BEFORE type conversion.
+  if (failed(addDTDataParamToEntryFunctions(module, state))) {
+    diagOS << "VPTO LLVM emission failed: DTData parameter injection failed\n";
+    return failure();
+  }
 
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     diagOS << "VPTO LLVM emission failed: VPTO op lowering failed\n";
     return failure();
   }
+
+  // Inject the print prologue (fix-stack init + kernelWriteType = AiV) AFTER
+  // dialect conversion so we can use LLVM dialect ops directly.
+  if (failed(injectPrintPrologue(module, state))) {
+    diagOS << "VPTO LLVM emission failed: print prologue injection failed\n";
+    return failure();
+  }
+
   if (failed(materializeDecls(module, state.plannedDecls, diagOS)))
     return failure();
   return success();
@@ -11459,8 +11316,7 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
   });
 
   populateVPTOStructuralTypePatterns(typeConverter, patterns, target);
-  patterns.add<ConvertPtoTileBufAddrOp, ConvertPtoAddPtrOp, ConvertPtoCastPtrOp,
-               ConvertPtoLoadScalarOp,
+  patterns.add<ConvertPtoAddPtrOp, ConvertPtoCastPtrOp, ConvertPtoLoadScalarOp,
                ConvertPtoStoreScalarOp>(typeConverter, context);
   patterns.add<ConvertPtoLoadOp, ConvertPtoStoreOp, ConvertPtoLdgOp,
                ConvertPtoStgOp>(
@@ -11553,12 +11409,6 @@ static VPTOEmissionOptions
 makeDeviceEmissionOptions(const VPTOEmissionOptions &baseOptions,
                           FunctionKernelKind kind) {
   VPTOEmissionOptions options = baseOptions;
-  constexpr llvm::StringLiteral kC220VecTargetFeatures =
-      "+ASAN,+ATOMIC,+AtomicForB64,+AtomicForB8 ,+FFTSBlk,"
-      "+MOVX8,+MSTX,+MathOp,+SPR7bits,+dav-c220-vec";
-  constexpr llvm::StringLiteral kC220CubeTargetFeatures =
-      "+ASAN,+ATOMIC,+AtomicForB64,+AtomicForB8 ,+FFTSBlk,"
-      "+MOVX8,+MSTX,+MathOp,+SPR7bits,+dav-c220-cube";
   constexpr llvm::StringLiteral kVecTargetFeatures =
       "+ATOMIC,+ArchV130,+AregRedefinable,+ArithmeticBf16,+AtomicForB8 ,"
       "+F8e4m3,+F8e5m2,+F8e8m0,+FFTSBlk,+Fp4e1m2x2,+Fp4e2m1x2,+LDExtRefine,"
@@ -11567,29 +11417,16 @@ makeDeviceEmissionOptions(const VPTOEmissionOptions &baseOptions,
       "+ATOMIC,+ArchV130,+AregRedefinable,+ArithmeticBf16,+AtomicForB8 ,"
       "+F8e4m3,+F8e5m2,+F8e8m0,+FFTSBlk,+Fp4e1m2x2,+Fp4e2m1x2,+LDExtRefine,"
       "+MOVX8,+SPR7bits,+SyncV,+dav-c310-cube";
-  if (options.march.empty()) {
-    if (kind == FunctionKernelKind::Vector) {
-      options.march = "dav-c310-vec";
-      options.aicoreArch = "dav-c310-vec";
-      options.defaultTargetCPU = "dav-c310-vec";
-      options.defaultTargetFeatures = kVecTargetFeatures.str();
-    } else if (kind == FunctionKernelKind::Cube) {
-      options.march = "dav-c310-cube";
-      options.aicoreArch = "dav-c310-cube";
-      options.defaultTargetCPU = "dav-c310-cube";
-      options.defaultTargetFeatures = kCubeTargetFeatures.str();
-    }
-  } else {
-    options.aicoreArch = options.march;
-    options.defaultTargetCPU = options.march;
-    if (options.march == "dav-c220-vec")
-      options.defaultTargetFeatures = kC220VecTargetFeatures.str();
-    else if (options.march == "dav-c220-cube")
-      options.defaultTargetFeatures = kC220CubeTargetFeatures.str();
-    else if (kind == FunctionKernelKind::Cube)
-      options.defaultTargetFeatures = kCubeTargetFeatures.str();
-    else
-      options.defaultTargetFeatures = kVecTargetFeatures.str();
+  if (kind == FunctionKernelKind::Vector) {
+    options.march = "dav-c310-vec";
+    options.aicoreArch = "dav-c310-vec";
+    options.defaultTargetCPU = "dav-c310-vec";
+    options.defaultTargetFeatures = kVecTargetFeatures.str();
+  } else if (kind == FunctionKernelKind::Cube) {
+    options.march = "dav-c310-cube";
+    options.aicoreArch = "dav-c310-cube";
+    options.defaultTargetCPU = "dav-c310-cube";
+    options.defaultTargetFeatures = kCubeTargetFeatures.str();
   }
   return options;
 }
@@ -11612,42 +11449,6 @@ getUniqueDeviceModuleByKernelKind(ModuleOp module, FunctionKernelKind kind,
     matched = child;
   }
   return matched;
-}
-
-static void mergeDeviceModulesByKernelKind(ModuleOp module) {
-  ModuleOp vectorModule;
-  ModuleOp cubeModule;
-  SmallVector<ModuleOp> modulesToErase;
-
-  for (ModuleOp child : module.getOps<ModuleOp>()) {
-    auto kernelKind = getKernelKind(child);
-    if (!kernelKind)
-      continue;
-
-    ModuleOp *target = nullptr;
-    if (*kernelKind == FunctionKernelKind::Vector)
-      target = &vectorModule;
-    else if (*kernelKind == FunctionKernelKind::Cube)
-      target = &cubeModule;
-    else
-      continue;
-
-    if (!*target) {
-      *target = child;
-      continue;
-    }
-
-    Block *srcBody = child.getBody();
-    Block *dstBody = (*target).getBody();
-    while (!srcBody->empty()) {
-      Operation &op = srcBody->front();
-      op.moveBefore(dstBody, dstBody->end());
-    }
-    modulesToErase.push_back(child);
-  }
-
-  for (ModuleOp child : modulesToErase)
-    child.erase();
 }
 
 static LogicalResult renameKernelFunctionsForKernelKind(ModuleOp module,
@@ -11684,9 +11485,6 @@ struct LowerVPTOOpsPass final
     : public PassWrapper<LowerVPTOOpsPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerVPTOOpsPass)
 
-  LowerVPTOOpsPass() = default;
-  explicit LowerVPTOOpsPass(std::string m) : march(std::move(m)) {}
-
   void runOnOperation() override {
     materializeVecScopeCarrierLoops(getOperation());
     // Remove dead pto.alloc_tile ops before lowering. These can appear when
@@ -11704,12 +11502,9 @@ struct LowerVPTOOpsPass final
       for (pto::AllocTileOp alloc : llvm::reverse(deadAllocs))
         alloc.erase();
     }
-    if (failed(lowerVPTOOps(getOperation(), march, llvm::errs())))
+    if (failed(lowerVPTOOps(getOperation(), llvm::errs())))
       signalPassFailure();
   }
-
-private:
-  std::string march;
 };
 
 struct LowerVPTOTypesPass final
@@ -11833,16 +11628,6 @@ emitDeviceLLVMModule(ModuleOp deviceModule, StringRef kernelKind,
   }
 
   applyArtifactVisibilityLinkage(deviceModule, *llvmModule);
-  for (llvm::Function &func : *llvmModule) {
-    if (!func.getName().starts_with("llvm.hivm.vscatter."))
-      continue;
-    // Bisheng LLVM 15 verifies these intrinsic memory effects. Record them
-    // through the LLVM 21 API here; the dispatcher rewrites the new textual
-    // memory(...) spelling before handing the IR to Bisheng.
-    func.setOnlyAccessesArgMemory();
-    func.addFnAttr(llvm::Attribute::NoUnwind);
-    func.addFnAttr(llvm::Attribute::WriteOnly);
-  }
   applySimtEntryCallingConvention(*llvmModule, simtEntryNames);
   if (failed(attachAIVectorScopeMetadata(*llvmModule, diagOS)))
     return failure();
@@ -11853,13 +11638,10 @@ emitDeviceLLVMModule(ModuleOp deviceModule, StringRef kernelKind,
 }
 
 template <typename EmitFn>
-static LogicalResult runPipeline(ModuleOp module, const std::string &march,
-                                 llvm::raw_ostream &diagOS,
+static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
                                  EmitFn &&emit) {
   OwningOpRef<Operation *> clonedOp(module->clone());
   ModuleOp clonedModule = cast<ModuleOp>(*clonedOp);
-
-  mergeDeviceModulesByKernelKind(clonedModule);
 
   if (failed(validateVPTOAuthoringIR(clonedModule, &diagOS))) {
     diagOS << "VPTO LLVM emission failed: authoring-stage VPTO legality "
@@ -11871,7 +11653,7 @@ static LogicalResult runPipeline(ModuleOp module, const std::string &march,
   pm.enableVerifier();
   auto &kernelModulePM = pm.nest<ModuleOp>();
   kernelModulePM.addPass(std::make_unique<PrepareVPTOLLVMLoweringPass>());
-  kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>(march));
+  kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>());
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
   kernelModulePM.addPass(
       std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
@@ -11907,7 +11689,7 @@ LogicalResult lowerVPTOModuleToLLVMModulesBeta1(
   cubeModule.module.reset();
   vectorModule.context.reset();
   vectorModule.module.reset();
-  return runPipeline(module, options.march, diagOS,
+  return runPipeline(module, diagOS,
                      [&](ModuleOp loweredModule) {
     auto vectorDeviceModule =
         getUniqueDeviceModuleByKernelKind(
