@@ -2955,6 +2955,17 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     return 0;
   }
 
+  // Detect whether the module uses print ops BEFORE lowering.  The VPTO
+  // lowering pipeline clones the module internally, so scanning afterwards
+  // would depend on that clone leaving the original module intact.
+  // result.usesPrint is the single carrier: it drives the host stub
+  // compilation flags (--cce-enable-print for DebugTunnel support).  The
+  // device-side lowering detects print ops on its own (the
+  // lowerPrintToDebugRuntime pre-scan inside the emitter), so no module
+  // attribute is needed.
+  module.walk([&](pto::PrintOp) { result.usesPrint = true; });
+  module.walk([&](pto::TPrintOp) { result.usesPrint = true; });
+
   pto::VPTOEmissionOptions options =
       buildVPTOEmissionOptions(
           cannVersion, resolveEffectiveTargetArch(module, ptoTargetArch));
@@ -2977,11 +2988,6 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 
   result.vptoStubSource = std::move(stubSource);
   result.kind = PTOASCompileResultKind::VPTOObject;
-
-  // Detect whether the module uses print ops so the host stub compiler can
-  // inject --cce-enable-print flags for DebugTunnel support.
-  module.walk([&](pto::PrintOp) { result.usesPrint = true; });
-  module.walk([&](pto::TPrintOp) { result.usesPrint = true; });
 
   return 0;
 }

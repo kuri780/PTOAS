@@ -12702,6 +12702,11 @@ mlir::LogicalResult mlir::pto::PrintOp::verify() {
   Type scalarType = getScalar().getType();
 
   // Check type is in the supported set.
+  // NOTE: this is the dialect-level (backend-agnostic) contract.  f64 is
+  // accepted here because the EmitC backend prints it natively; the VPTO
+  // backend rejects f64 at lowering time (DebugTunnel FLOAT records carry
+  // f32, so the value would be silently truncated) — see LowerPrintOpPattern
+  // in PTO/Transforms/PrintLowering.cpp.
   if (auto ft = dyn_cast<FloatType>(scalarType)) {
     if (!(ft.isF16() || ft.isBF16() || ft.isF32() || ft.isF64()))
       return emitOpError()

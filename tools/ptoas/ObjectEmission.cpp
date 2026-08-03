@@ -10,11 +10,15 @@
 
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -100,25 +104,75 @@ static void stripUnsupportedBishengAttrs(llvm::Module &module) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Bisheng (LLVM 15) compatibility: strip `nuw` from constant GEP expressions.
+//
+// MLIR/LLVM 21 emits `getelementptr inbounds nuw` on constant GEPs whose
+// indices are non-negative constants (e.g. the format-string byte loads in
+// print lowering), but the Bisheng LLVM 15 parser rejects `nuw` on constant
+// GEPs.  Removing the flag never changes semantics — `nuw` is a pure
+// optimization hint — so this runs unconditionally on every module written
+// for Bisheng.
+// ---------------------------------------------------------------------------
+static void collectGEPConstantExprs(llvm::Constant *c,
+                                    llvm::SmallVectorImpl<llvm::ConstantExpr *> &geps) {
+  auto *ce = llvm::dyn_cast_or_null<llvm::ConstantExpr>(c);
+  if (!ce)
+    return;
+  if (ce->getOpcode() == llvm::Instruction::GetElementPtr)
+    geps.push_back(ce);
+  for (const llvm::Use &u : ce->operands())
+    collectGEPConstantExprs(llvm::dyn_cast<llvm::Constant>(u.get()), geps);
+}
+
+static void normalizeLLVMForBisheng15(llvm::Module &module) {
+  stripUnsupportedBishengAttrs(module);
+
+  // Collect every constant GEP reachable from instructions and globals.
+  llvm::SmallVector<llvm::ConstantExpr *, 16> geps;
+  for (llvm::Function &f : module)
+    for (llvm::BasicBlock &bb : f)
+      for (llvm::Instruction &i : bb)
+        for (llvm::Use &u : i.operands())
+          collectGEPConstantExprs(llvm::dyn_cast<llvm::Constant>(u.get()), geps);
+  for (llvm::GlobalVariable &g : module.globals())
+    if (g.hasInitializer())
+      collectGEPConstantExprs(g.getInitializer(), geps);
+
+  llvm::SmallPtrSet<llvm::ConstantExpr *, 16> seen;
+  for (llvm::ConstantExpr *ce : geps) {
+    if (!seen.insert(ce).second)
+      continue;
+    // getAsInstruction() materializes the constant so we can read the GEP
+    // flags (uniqued constants have no public flag accessor).
+    llvm::Instruction *inst = ce->getAsInstruction();
+    auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(inst);
+    if (!gep) {
+      inst->deleteValue();
+      continue;
+    }
+    llvm::GEPNoWrapFlags nw = gep->getNoWrapFlags();
+    if (!nw.hasNoUnsignedWrap()) {
+      inst->deleteValue();
+      continue;
+    }
+    llvm::SmallVector<llvm::Value *> indices(ce->op_begin() + 1, ce->op_end());
+    llvm::Constant *rebuilt = llvm::ConstantExpr::getGetElementPtr(
+        gep->getSourceElementType(), llvm::cast<llvm::Constant>(ce->getOperand(0)),
+        indices, nw.withoutNoUnsignedWrap(),
+        /*InRange=*/std::nullopt, /*OnlyIfReducedTy=*/nullptr);
+    if (rebuilt != ce)
+      ce->replaceAllUsesWith(rebuilt);
+    // The old constant expression is now unreferenced and is reclaimed with
+    // the LLVMContext (LLVM 21 has no public API to delete uniqued
+    // constants directly).
+    inst->deleteValue();
+  }
+}
+
 static bool writeLLVMModuleFile(llvm::Module &module, StringRef path,
                                 llvm::raw_ostream &diagOS) {
-  // Convert to text first so we can normalize LLVM IR for bisheng (which is
-  // based on LLVM 15 and cannot parse `nuw` on constant GEP expressions).
-  std::string ir;
-  {
-    llvm::raw_string_ostream rso(ir);
-    stripUnsupportedBishengAttrs(module);
-    module.print(rso, nullptr);
-  }
-  // Strip `nuw` from GEPs: MLIR/LLVM 21 emits `inbounds nuw` on constant
-  // GEPs whose indices are non-negative constants, but LLVM 15 (bisheng)
-  // rejects `nuw` in that position.
-  static constexpr llvm::StringLiteral kNuwGep = "inbounds nuw";
-  size_t pos = 0;
-  while ((pos = ir.find(kNuwGep, pos)) != std::string::npos) {
-    ir.replace(pos, kNuwGep.size(), "inbounds");
-    pos += 8; // advance past "inbounds"
-  }
+  normalizeLLVMForBisheng15(module);
 
   std::error_code ec;
   llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
@@ -127,7 +181,7 @@ static bool writeLLVMModuleFile(llvm::Module &module, StringRef path,
            << ec.message() << "\n";
     return false;
   }
-  os << ir;
+  module.print(os, nullptr);
   os.flush();
   if (os.has_error()) {
     diagOS << "Error: failed to write LLVM module to " << path << "\n";

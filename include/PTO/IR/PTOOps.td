@@ -3041,6 +3041,67 @@ def PrintOp : PTO_Op<"print", [MemoryEffects<[MemRead, MemWrite]>]> {
   let hasVerifier = 1;
 }
 
+// ---------------------------------------------------------------------------
+// Internal DebugTunnel lowering ops.
+//
+// These ops are transient: they are created by LowerPTOPrintToDebugRuntime
+// (semantic layer) right before dialect conversion and lowered to inline
+// DebugTunnel protocol writes by the shared VPTO print lowering patterns.
+// They are NOT part of the public dialect surface (no python bindings, no
+// assembly format guarantees) — the split exists so that the semantic work
+// (format analysis, record layout, tile traversal) is decoupled from the
+// runtime-ABI work (DTData addressing, guards, cache commit).
+//
+// The write-pointer chain: every write op returns the next write offset
+// (or the null pointer it received, propagating the "no-op" signal from
+// DebugReserveOp), and DebugCommitOp terminates the chain.
+// ---------------------------------------------------------------------------
+
+// Reserve log space: computes the per-block log buffer address, runs the
+// overflow check, updates pLogSize, and yields the write pointer (or null
+// when the DebugTunnel context is invalid / the buffer overflows).
+def DebugReserveOp : PTO_Op<"debug.reserve", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Reserve DebugTunnel log space and compute the write pointer.";
+  let arguments = (ins I64Attr:$record_size);
+  let results = (outs AnyType:$write_ptr);
+}
+
+// Append a literal text record (marker + len16 + text + NUL) at the write
+// pointer.  The text bytes are loaded from the pre-created LLVM global
+// named by `global`; `bytes` is the record length field (text + NUL).
+def DebugWriteTextOp : PTO_Op<"debug.write_text", [MemoryEffects<[MemWrite]>]> {
+  let summary = "Append a literal-text DebugTunnel record.";
+  let arguments = (ins AnyType:$ptr, StrAttr:$global, I64Attr:$bytes);
+  let results = (outs AnyType:$next_ptr);
+}
+
+// Append a scalar value record (marker + raw value + spec + NUL) at the
+// write pointer.  `kind` is "float" / "signed" / "unsigned" and selects the
+// protocol marker and sign/zero extension; `global` names the LLVM global
+// holding the conversion specifier.
+def DebugWriteScalarOp : PTO_Op<"debug.write_scalar", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Append a scalar-value DebugTunnel record.";
+  let arguments = (ins AnyType:$ptr, AnyType:$value, StrAttr:$global, I64Attr:$bytes, StrAttr:$kind);
+  let results = (outs AnyType:$next_ptr);
+}
+
+// Terminate the record chain: writes the END marker and flushes the log
+// buffer (DCCI).  No-op when the pointer is null.
+def DebugCommitOp : PTO_Op<"debug.commit", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Terminate a DebugTunnel record chain and flush.";
+  let arguments = (ins AnyType:$ptr);
+  let results = (outs);
+}
+
+// Tile dump support: compute the UB (addrspace(6)) element-offset base for
+// the tile space, translating the runtime virtual-address base into an
+// element index usable for tile element loads.
+def DebugGetTileBaseOp : PTO_Op<"debug.get_tile_base"> {
+  let summary = "Compute the UB tile-space element-offset base.";
+  let arguments = (ins I64Attr:$elem_bytes);
+  let results = (outs I64:$base_offset);
+}
+
 def TrapOp : PTO_Op<"trap", [MicroOpInterface, SimtOpInterface]> {
   let summary = "Trap: abort execution (no operands).";
   let description = [{
