@@ -8,55 +8,54 @@
 
 // RUN: ptoas --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
 
-// Verify that pto.print is lowered to inline DebugTunnel protocol via LLVM
-// CFG (not @printf) when using the VPTO backend.
+// Verify that pto.print is lowered to calls of the cce::printf wrapper shims
+// (pto_print_f32 / pto_print_i64 / pto_print_u64 / pto_print_str) plus the
+// pto_print_init/finish pair around each entry.  The shims live in
+// tools/ptoas/cce/pt_print.cpp and are llvm-linked into the device module by
+// the fatobj pipeline; no inline DebugTunnel protocol is emitted here.
 // Test coverage: f32, f16, bf16, f64, i64, i32 scalar types.
 
 // CHECK: @_ptoas_printf_fmt_0 = private constant [18 x i8] c"scalar = %+08.3f\0A\00"
 
-// CHECK: declare i64 @llvm.hivm.GET.BLOCK.IDX()
-// CHECK: declare void @llvm.hivm.DCCI(ptr addrspace(1), i64)
-// CHECK: declare ptr @llvm.hivm.get.sycl.fix.stack.object()
+// CHECK: declare void @pto_print_finish(ptr addrspace(1)) #0
+// CHECK: declare void @pto_print_init(ptr addrspace(1)) #0
+// CHECK: declare void @pto_print_u64(ptr, i64) #0
+// CHECK: declare void @pto_print_i64(ptr, i64) #0
+// CHECK: declare void @pto_print_f32(ptr, float) #0
+// CHECK: declare void @pto_print_str(ptr) #0
 
-// --- f32 scalar: bitcast f32 -> i32, 4 bytes ---
+// --- f32 scalar: direct wrapper call, init at entry, finish before return ---
 // CHECK: define void @print_scalar_kernel_mix_aiv(float
-// CHECK-SAME: ptr addrspace(1) %1
-// CHECK: bitcast float %0 to i32
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_init(ptr addrspace(1) %1)
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_0, float %0)
+// CHECK: call void @pto_print_finish(ptr addrspace(1) %1)
 
-// --- f16 scalar: fpext f16 -> f32, bitcast -> i32, 4 bytes ---
+// --- f16 scalar: fpext f16 -> f32 ---
 // CHECK: define void @print_f16_kernel_mix_aiv(half
 // CHECK: fpext half %0 to float
-// CHECK: bitcast float {{.*}} to i32
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_1, float {{.*}})
 
-// --- bf16 scalar: fpext bf16 -> f32, bitcast -> i32, 4 bytes ---
+// --- bf16 scalar: fpext bf16 -> f32 ---
 // CHECK: define void @print_bf16_kernel_mix_aiv(bfloat
 // CHECK: fpext bfloat %0 to float
-// CHECK: bitcast float {{.*}} to i32
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
 
-// --- f64 scalar: fptrunc f64 -> f32, bitcast -> i32, 4 bytes ---
+// --- f64 scalar: fptrunc f64 -> f32 ---
 // CHECK: define void @print_f64_kernel_mix_aiv(double
 // CHECK: fptrunc double %0 to float
-// CHECK: bitcast float {{.*}} to i32
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_3, float {{.*}})
 
-// --- i64 scalar: already 64-bit, no extension needed ---
+// --- i64 scalar: already 64-bit, no extension ---
 // CHECK: define void @print_i64_kernel_mix_aiv(i64
-// CHECK: store i8 3, ptr addrspace(1)
+// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_4, i64 %0)
 
-// --- i32 scalar: sext i32 -> i64, 8 bytes ---
+// --- i32 scalar: sext i32 -> i64 (INT records are 8 bytes) ---
 // CHECK: define void @print_i32_kernel_mix_aiv(i32
 // CHECK: sext i32 %0 to i64
-// CHECK: store i8 3, ptr addrspace(1)
-
-// CHECK: call ptr @llvm.hivm.get.sycl.fix.stack.object()
-// CHECK: store i64 {{.*}}, ptr {{.*}}, align 4
-// CHECK: store i32 2, ptr addrspace(1) {{.*}}, align 4
+// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_5, i64 {{.*}})
 
 // CHECK: !hivm.annotations = !{
-// CHECK-SAME: !"kernel", i32 1
+// CHECK: !"kernel", i32 1
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // f32 scalar print
@@ -81,7 +80,9 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
   // i64 scalar print
   func.func @print_i64_kernel(%arg0: i64) attributes {pto.entry} {
-    pto.print ins("i64=%d\n", %arg0 : i64)
+    // %lld: the host decoder consumes 8 payload bytes only with a 64-bit
+    // length modifier (plain %d would truncate to the low 32 bits).
+    pto.print ins("i64=%lld\n", %arg0 : i64)
     return
   }
   // i32 scalar print

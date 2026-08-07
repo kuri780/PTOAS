@@ -38,6 +38,11 @@ target_compile_definitions(pto-opt PRIVATE
   PTOAS_DEFAULT_TILELANG_PATH="${CMAKE_SOURCE_DIR}/lib/TileOps"
   PTOAS_DEFAULT_TILELANG_PKG_PATH="${CMAKE_SOURCE_DIR}/tilelang-dsl/python"
   PTOAS_DEFAULT_PTODSL_PKG_PATH="${CMAKE_SOURCE_DIR}/ptodsl"
+  # Source-tree default for the cce::printf wrapper TU (tools/ptoas/cce/
+  # deliberately has no CMakeLists.txt so the LLVM source-list check leaves
+  # it alone).  ptoas compiles it with bisheng and llvm-links it into the
+  # kernel module when the input uses pto.print / pto.tprint.
+  PTOAS_DEFAULT_PRINT_WRAPPER_PATH="${CMAKE_SOURCE_DIR}/tools/ptoas/cce"
 )
 # [修改 2] 更新链接库名称
 # 原因：In-tree 时你的库叫 MLIRPTODialect，但现在 Out-of-tree 它们是你自己定义的

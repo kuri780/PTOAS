@@ -225,9 +225,18 @@ case_output_token() {
 build_launch_object() {
   local case_dir="$1"
   local out_obj="$2"
+  local -a print_flags=()
+  # pto.print / pto.tprint kernels need the host launch wrapper to open
+  # DebugTunnel and append DTData to the kernel args.  Without
+  # --cce-enable-print the kernel's pto_print_init receives a null DTData
+  # and cce::printf writes nothing.
+  if grep -qE 'pto\.(print|tprint)' "${case_dir}/kernel.pto"; then
+    print_flags=("--cce-enable-print")
+  fi
   "${BISHENG_BIN}" \
     -c -fPIC -xcce -fenable-matrix --cce-aicore-enable-tl \
     -fPIC -Xhost-start -Xhost-end \
+    "${print_flags[@]}" \
     -mllvm -cce-aicore-stack-size=0x8000 \
     -mllvm -cce-aicore-function-stack-size=0x8000 \
     -mllvm -cce-aicore-record-overflow=true \

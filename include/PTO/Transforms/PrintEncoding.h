@@ -9,17 +9,15 @@
 #ifndef MLIR_DIALECT_PTO_TRANSFORMS_PRINTENCODING_H
 #define MLIR_DIALECT_PTO_TRANSFORMS_PRINTENCODING_H
 
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Support/LogicalResult.h"
-#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace pto {
 
 // ---------------------------------------------------------------------------
-// Print conversion kind — drives sext/zext selection for integer encoding.
+// Print conversion kind — drives wrapper selection for the CCE cce::printf
+// shims: SignedInt → pto_print_i64, UnsignedInt → pto_print_u64.
 // ---------------------------------------------------------------------------
 enum class PrintConversionKind : uint8_t {
   Float,       // %f, %F, %e, %E, %g, %G, %a, %A
@@ -28,28 +26,10 @@ enum class PrintConversionKind : uint8_t {
 };
 
 // ---------------------------------------------------------------------------
-// Result of a single-pass format-string analysis.
+// Result of format-string analysis.
 // ---------------------------------------------------------------------------
 struct PrintFormatInfo {
   PrintConversionKind conversion;
-  uint16_t prefixOffset;
-  uint16_t prefixBytes;
-  uint16_t conversionOffset;
-  uint16_t conversionBytes;
-  uint16_t suffixOffset;
-  uint16_t suffixBytes;
-
-  /// Protocol data size in bytes: 4 for float, 8 for integer.
-  unsigned getDataSize() const {
-    return (conversion == PrintConversionKind::Float) ? 4 : 8;
-  }
-
-  uint32_t getRecordSize() const {
-    unsigned size = 1 + getDataSize() + 2 + conversionBytes;
-    if (prefixBytes) size += 1 + 2 + prefixBytes;
-    if (suffixBytes) size += 1 + 2 + suffixBytes;
-    return size + 1; // END
-  }
 };
 
 // ---------------------------------------------------------------------------
@@ -95,10 +75,13 @@ analyzePrintFormat(llvm::StringRef format) {
       while (pos < format.size() && format[pos] >= '0' && format[pos] <= '9')
         ++pos;
     }
-    // Skip length modifier.
+    // Skip length modifier; allow doubled forms (e.g. %lld, %hhx).
     if (pos < format.size() &&
-        (format[pos] == 'l' || format[pos] == 'h' || format[pos] == 'z'))
-      ++pos;
+        (format[pos] == 'l' || format[pos] == 'h' || format[pos] == 'z')) {
+      char lengthMod = format[pos++];
+      if (pos < format.size() && format[pos] == lengthMod)
+        ++pos;
+    }
     if (pos >= format.size())
       return failure(); // incomplete specifier
 
@@ -121,17 +104,6 @@ analyzePrintFormat(llvm::StringRef format) {
       return failure(); // unsupported specifier
     }
 
-    size_t conversionEnd = pos;
-    size_t conversionStart = format.rfind('%', conversionEnd - 1);
-    info.prefixOffset = 0;
-    info.prefixBytes = static_cast<uint16_t>(conversionStart ? conversionStart + 1 : 0);
-    info.conversionOffset = static_cast<uint16_t>(conversionStart);
-    info.conversionBytes = static_cast<uint16_t>(conversionEnd - conversionStart + 1);
-    info.suffixOffset = static_cast<uint16_t>(conversionEnd);
-    info.suffixBytes = static_cast<uint16_t>(conversionEnd < format.size()
-                                                 ? format.size() - conversionEnd + 1
-                                                 : 0);
-
     // Keep scanning to detect extra conversions (which we'll reject).
   }
 
@@ -139,70 +111,6 @@ analyzePrintFormat(llvm::StringRef format) {
     return failure(); // no conversion specifier
 
   return info;
-}
-
-// ---------------------------------------------------------------------------
-// Encoded scalar value ready for DebugTunnel protocol byte writing.
-// ---------------------------------------------------------------------------
-struct PrintScalarEncoding {
-  Value bits;         // i32 (float) or i64 (int) — ready for byte extraction
-  unsigned byteWidth; // protocol data bytes: 4 (DT_FLOAT) or 8 (DT_INT)
-  uint8_t marker;     // DTType marker: 2 (FLOAT) or 3 (INT)
-};
-
-// ---------------------------------------------------------------------------
-// Convert a scalar value to its DebugTunnel protocol bit pattern.
-//
-// Float:  f16/bf16 → fpext  → f32 → bitcast → i32  (4 bytes, marker=2)
-//         f32      →          bitcast → i32          (4 bytes, marker=2)
-//         f64/other→ fptrunc → f32 → bitcast → i32  (4 bytes, marker=2)
-//
-// Int:    i8..i32  → sext/zext → i64                (8 bytes, marker=3)
-//         i64      →            (no-op)              (8 bytes, marker=3)
-//
-// When 'kind' is UnsignedInt, narrow integers are zero-extended; otherwise
-// they are sign-extended (the default for %d/%i).
-// ---------------------------------------------------------------------------
-inline FailureOr<PrintScalarEncoding>
-encodePrintScalar(ConversionPatternRewriter &rewriter, Location loc,
-                  Type scalarType, Value scalar,
-                  PrintConversionKind kind = PrintConversionKind::SignedInt) {
-  PrintScalarEncoding enc{};
-  auto i32Type = rewriter.getI32Type();
-  auto i64Type = rewriter.getI64Type();
-
-  if (auto ft = dyn_cast<FloatType>(scalarType)) {
-    enc.marker = 2; // DT_FLOAT
-    enc.byteWidth = 4;
-    auto f32Type = rewriter.getF32Type();
-
-    if (ft.isF16() || ft.isBF16()) {
-      auto f32val = rewriter.create<LLVM::FPExtOp>(loc, f32Type, scalar);
-      enc.bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
-    } else if (ft.isF32()) {
-      enc.bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, scalar);
-    } else {
-      // f64 or other: truncate to f32 for protocol compatibility
-      auto f32val = rewriter.create<LLVM::FPTruncOp>(loc, f32Type, scalar);
-      enc.bits = rewriter.create<LLVM::BitcastOp>(loc, i32Type, f32val);
-    }
-  } else if (auto it = dyn_cast<IntegerType>(scalarType)) {
-    enc.marker = 3; // DT_INT
-    enc.byteWidth = 8;
-    unsigned w = it.getWidth();
-    if (w < 64) {
-      if (kind == PrintConversionKind::UnsignedInt)
-        enc.bits = rewriter.create<LLVM::ZExtOp>(loc, i64Type, scalar);
-      else
-        enc.bits = rewriter.create<LLVM::SExtOp>(loc, i64Type, scalar);
-    } else {
-      enc.bits = scalar;
-    }
-  } else {
-    return rewriter.notifyMatchFailure(
-        loc, "print encoding: expected numeric scalar type");
-  }
-  return enc;
 }
 
 } // namespace pto

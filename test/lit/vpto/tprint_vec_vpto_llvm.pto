@@ -8,44 +8,43 @@
 
 // RUN: ptoas --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
 
-// Verify that pto.tprint is lowered to inline DebugTunnel tile data dump
-// with scf.for loops over tile rows/cols and protocol byte writes.
+// Verify that pto.tprint is lowered to cce::printf wrapper calls: literal
+// header/shape records via pto_print_str, then a row/col loop nest calling
+// pto_print_f32 / pto_print_i64 per element (converted to LLVM CFG at
+// emission).  No inline DebugTunnel protocol bytes are emitted.
 // Test coverage: f32 tile, f16 tile, i32 tile.
 
 // CHECK: @_ptoas_printf_fmt_0 = private constant
 // CHECK-SAME: [TPRINT Tile]
 
-// CHECK: declare i64 @llvm.hivm.GET.BLOCK.IDX()
-// CHECK: declare void @llvm.hivm.DCCI(ptr addrspace(1), i64)
-// CHECK: declare ptr @llvm.hivm.get.sycl.fix.stack.object()
-// CHECK: declare i64 @llvm.hivm.GET.SYS.VA.BASE()
+// CHECK: declare void @pto_print_finish(ptr addrspace(1)) #0
+// CHECK: declare void @pto_print_init(ptr addrspace(1)) #0
+// CHECK: declare void @pto_print_i64(ptr, i64) #0
+// CHECK: declare void @pto_print_f32(ptr, float) #0
+// CHECK: declare void @pto_print_str(ptr) #0
 
-// --- f32 tile: bitcast f32 -> i32 ---
+// --- f32 tile: header + shape records, per-element f32 wrapper call ---
 // CHECK: define void @tprint_test_kernel_mix_aiv(
-// CHECK-SAME: ptr addrspace(1) %1
-// FLOAT marker byte for each element
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_init(ptr addrspace(1) %0)
+// CHECK: call void @pto_print_str(ptr @_ptoas_printf_fmt_0)
+// CHECK: call void @pto_print_str(ptr @_ptoas_printf_fmt_1)
+// CHECK: getelementptr float, ptr addrspace(6) null, i64 {{.*}}
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
+// CHECK: call void @pto_print_finish(ptr addrspace(1) %0)
 
-// --- f16 tile: fpext f16 -> f32, bitcast -> i32 ---
+// --- f16 tile: fpext f16 -> f32 ---
 // CHECK: define void @tprint_f16_kernel_mix_aiv(
 // CHECK: fpext half {{.*}} to float
-// CHECK: bitcast float {{.*}} to i32
-// CHECK: store i8 2, ptr addrspace(1)
+// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
 
-// --- i32 tile: sext i32 -> i64 ---
+// --- i32 tile: sext i32 -> i64 (INT records are 8 bytes) ---
 // CHECK: define void @tprint_i32_kernel_mix_aiv(
+// CHECK: getelementptr i32, ptr addrspace(6) null, i64 {{.*}}
 // CHECK: sext i32 {{.*}} to i64
-// CHECK: store i8 3, ptr addrspace(1)
-
-// CHECK: scf.for
-// CHECK: scf.for
-// CHECK: getelementptr inbounds {{.*}}, ptr addrspace(6)
-
-// DCCI flush at end
-// CHECK: call void @llvm.hivm.DCCI(ptr addrspace(1) null, i64 1)
+// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_6, i64 {{.*}})
 
 // CHECK: !hivm.annotations = !{
-// CHECK-SAME: !"kernel", i32 1
+// CHECK: !"kernel", i32 1
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // f32 tile

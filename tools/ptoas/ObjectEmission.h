@@ -45,6 +45,7 @@ public:
   std::string bishengCc1Path;
   std::string cceLdPath;
   std::string ldLldPath;
+  std::string llvmLinkPath;
   std::string resourceDirPath;
   std::string resourceIncludeDirPath;
   std::string cceStubDirPath;

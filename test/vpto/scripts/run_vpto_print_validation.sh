@@ -87,14 +87,20 @@ auto_detect() {
     local fmt
     fmt="$(grep -oP 'pto\.print ins\("\K[^"]+' "${pto_file}" | head -1 || true)"
     if [[ -n "${fmt}" ]]; then
-      # build expected output by substituting the launch value into the format
+      # build expected output by formatting the launch value with the same
+      # printf spec the kernel uses, then substituting it into the format
       EXPECTED_OUTPUT="$(python3 -c "
-import struct, sys
+import re, sys
 val = float('${LAUNCH_VALUE}')
-# crude: replace %f / %+08.3f etc with the formatted value
 fmt = '${fmt}'
-# just check that the value appears somewhere in the output
-print(f'scalar = +{val:08.3f}' if 'scalar' in fmt else f'{val}')
+m = re.search(r'%(?P<flags>[-+0#]*)(?P<width>\d*)(?P<prec>\.\d+)?[fFd]', fmt)
+if m:
+    spec = '%' + m.group('flags') + m.group('width') + (m.group('prec') or '')
+    spec += 'f' if m.group(0)[-1] in 'fF' else 'd'
+    sub = spec % (val if spec.endswith('f') else int(val))
+    print((fmt[:m.start()] + sub + fmt[m.end():]).rstrip('\n'))
+else:
+    print(f'{val}')
 " 2>/dev/null || echo "${LAUNCH_VALUE}")"
       log "auto-detected EXPECTED_OUTPUT: ${EXPECTED_OUTPUT}"
     fi
@@ -127,13 +133,34 @@ log "[${CASE_TOKEN}] step 1/4: ptoas → LLVM IR"
 sed -i 's/inbounds nuw/inbounds/g' "${OUT_DIR}/kernel.ll"
 
 # ------------------------------------------------------------------
-# step 2: compile LLVM IR → device.o
+# step 2a: cce::printf wrapper bitcode + llvm-link merge
+#   pto.print / pto.tprint lower to calls of the pto_print_* shims defined in
+#   tools/ptoas/cce/pt_print.cpp.  The shims must be merged at the bitcode
+#   level (the fatobj pipeline cannot resolve symbols across device objects).
+#   Driver mode -emit-llvm auto-manages the CCE/CANN include chains; do NOT
+#   pass -cce-enable-mix (it splits symbols into .vector/.cube variants).
 # ------------------------------------------------------------------
-log "[${CASE_TOKEN}] step 2/4: LLVM IR → device.o"
+log "[${CASE_TOKEN}] step 2a/5: wrapper bitcode → llvm-link merge"
+"${BISHENG_BIN}" -xcce --cce-aicore-only \
+  --cce-aicore-arch="${AICORE_ARCH}" \
+  -D__CCE_ENABLE_PRINT_FOUND_CANN__ --cce-enable-print \
+  -std=c++17 -c -emit-llvm -x cce \
+  "${ROOT_DIR}/tools/ptoas/cce/pt_print.cpp" \
+  -o "${OUT_DIR}/pt_print.bc"
+LLVM_LINK_BIN="${LLVM_LINK_BIN:-${ASCEND_HOME_PATH}/bin/llvm-link}"
+[[ -x "${LLVM_LINK_BIN}" ]] || LLVM_LINK_BIN="${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin/llvm-link"
+"${LLVM_LINK_BIN}" \
+  "${OUT_DIR}/kernel.ll" "${OUT_DIR}/pt_print.bc" \
+  -o "${OUT_DIR}/kernel_merged.bc"
+
+# ------------------------------------------------------------------
+# step 2: compile merged LLVM IR → device.o
+# ------------------------------------------------------------------
+log "[${CASE_TOKEN}] step 2/5: LLVM IR → device.o"
 "${BISHENG_BIN}" --cce-aicore-arch="${AICORE_ARCH}" --cce-aicore-only -O2 \
   --cce-generic-addrspace=off -cce-bitcode-is-aicore \
   -Wno-override-module -dc -c -x ir \
-  "${OUT_DIR}/kernel.ll" -o "${OUT_DIR}/kernel_device.o"
+  "${OUT_DIR}/kernel_merged.bc" -o "${OUT_DIR}/kernel_device.o"
 
 # ------------------------------------------------------------------
 # step 3: host stub + fatobj  (driver mode: auto-handles include paths)

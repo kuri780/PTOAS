@@ -91,13 +91,34 @@ log "[${CASE_TOKEN}] step 1/5: ptoas → LLVM IR"
 sed -i 's/inbounds nuw/inbounds/g' "${OUT_DIR}/kernel.ll"
 
 # ------------------------------------------------------------------
-# step 2: compile LLVM IR → device.o
+# step 2a: cce::printf wrapper bitcode + llvm-link merge
+#   pto.print / pto.tprint lower to calls of the pto_print_* shims defined in
+#   tools/ptoas/cce/pt_print.cpp.  The shims must be merged at the bitcode
+#   level (the fatobj pipeline cannot resolve symbols across device objects).
+#   Driver mode -emit-llvm auto-manages the CCE/CANN include chains; do NOT
+#   pass -cce-enable-mix (it splits symbols into .vector/.cube variants).
+# ------------------------------------------------------------------
+log "[${CASE_TOKEN}] step 2a/5: wrapper bitcode → llvm-link merge"
+"${BISHENG_BIN}" -xcce --cce-aicore-only \
+  --cce-aicore-arch="${AICORE_ARCH}" \
+  -D__CCE_ENABLE_PRINT_FOUND_CANN__ --cce-enable-print \
+  -std=c++17 -c -emit-llvm -x cce \
+  "${ROOT_DIR}/tools/ptoas/cce/pt_print.cpp" \
+  -o "${OUT_DIR}/pt_print.bc"
+LLVM_LINK_BIN="${LLVM_LINK_BIN:-${ASCEND_HOME_PATH}/bin/llvm-link}"
+[[ -x "${LLVM_LINK_BIN}" ]] || LLVM_LINK_BIN="${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin/llvm-link"
+"${LLVM_LINK_BIN}" \
+  "${OUT_DIR}/kernel.ll" "${OUT_DIR}/pt_print.bc" \
+  -o "${OUT_DIR}/kernel_merged.bc"
+
+# ------------------------------------------------------------------
+# step 2: compile merged LLVM IR → device.o
 # ------------------------------------------------------------------
 log "[${CASE_TOKEN}] step 2/5: LLVM IR → device.o"
 "${BISHENG_BIN}" --cce-aicore-arch="${AICORE_ARCH}" --cce-aicore-only -O2 \
   --cce-generic-addrspace=off -cce-bitcode-is-aicore \
   -Wno-override-module -dc -c -x ir \
-  "${OUT_DIR}/kernel.ll" -o "${OUT_DIR}/kernel_device.o"
+  "${OUT_DIR}/kernel_merged.bc" -o "${OUT_DIR}/kernel_device.o"
 
 # ------------------------------------------------------------------
 # step 3: host stub + fatobj (driver mode: auto-handles include paths)

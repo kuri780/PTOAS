@@ -98,13 +98,34 @@ log "[${CASE_TOKEN}] step 1/5: ptoas → LLVM IR"
 sed -i 's/inbounds nuw/inbounds/g' "${OUT_DIR}/kernel.ll"
 
 # ------------------------------------------------------------------
-# step 2: compile LLVM IR → device.o
+# step 2a: cce::printf wrapper bitcode + llvm-link merge
+#   pto.print / pto.tprint lower to calls of the pto_print_* shims defined in
+#   tools/ptoas/cce/pt_print.cpp.  The shims must be merged at the bitcode
+#   level (the fatobj pipeline cannot resolve symbols across device objects).
+#   Driver mode -emit-llvm auto-manages the CCE/CANN include chains; do NOT
+#   pass -cce-enable-mix (it splits symbols into .vector/.cube variants).
+# ------------------------------------------------------------------
+log "[${CASE_TOKEN}] step 2a/5: wrapper bitcode → llvm-link merge"
+"${BISHENG_BIN}" -xcce --cce-aicore-only \
+  --cce-aicore-arch="${AICORE_ARCH}" \
+  -D__CCE_ENABLE_PRINT_FOUND_CANN__ --cce-enable-print \
+  -std=c++17 -c -emit-llvm -x cce \
+  "${ROOT_DIR}/tools/ptoas/cce/pt_print.cpp" \
+  -o "${OUT_DIR}/pt_print.bc"
+LLVM_LINK_BIN="${LLVM_LINK_BIN:-${ASCEND_HOME_PATH}/bin/llvm-link}"
+[[ -x "${LLVM_LINK_BIN}" ]] || LLVM_LINK_BIN="${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin/llvm-link"
+"${LLVM_LINK_BIN}" \
+  "${OUT_DIR}/kernel.ll" "${OUT_DIR}/pt_print.bc" \
+  -o "${OUT_DIR}/kernel_merged.bc"
+
+# ------------------------------------------------------------------
+# step 2: compile merged LLVM IR → device.o
 # ------------------------------------------------------------------
 log "[${CASE_TOKEN}] step 2/5: LLVM IR → device.o"
 "${BISHENG_BIN}" --cce-aicore-arch="${AICORE_ARCH}" --cce-aicore-only -O2 \
   --cce-generic-addrspace=off -cce-bitcode-is-aicore \
   -Wno-override-module -dc -c -x ir \
-  "${OUT_DIR}/kernel.ll" -o "${OUT_DIR}/kernel_device.o"
+  "${OUT_DIR}/kernel_merged.bc" -o "${OUT_DIR}/kernel_device.o"
 
 # ------------------------------------------------------------------
 # step 3: host stub + fatobj
@@ -247,16 +268,20 @@ if [[ "${SIM_RC}" -ne 0 ]]; then
 fi
 
 # Build expected-value table from kernel.pto:
-#   Format "f16=%f\n" + constant 1.5        → expect "f16=1.500000"
+#   Format "f16=%f\n" + constant 1.5         → expect "f16=1.500000"
 #   Format "f64=%f\n" + constant 2.718281828 → expect "f64=2.718282"
-#   Format "i32=%d\n" + constant -42        → expect "i32=-42"
-# i64 is intentionally unsupported until DebugTunnel preserves all 64 bits.
+#   Format "i32=%d\n" + constant -42         → expect "i32=-42"
+#   Format "i64=%lld\n" + constant 1234567890123 → expect "i64=1234567890123"
+# The wrapper's INT node carries all 64 bits, so large i64 values print exactly
+# (the format must use a 64-bit length modifier like %lld — plain %d makes the
+# host decoder consume only the low 32 bits).
 
 declare -A EXPECTED_PATTERNS
 EXPECTED_PATTERNS=(
   ["f16"]="f16=1\.500000"
   ["f64"]="f64=2\.718282"
   ["i32"]="i32=-42"
+  ["i64"]="i64=1234567890123"
 )
 
 PASSED=true

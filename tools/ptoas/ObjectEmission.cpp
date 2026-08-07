@@ -272,6 +272,29 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef ldLldPath,
                                llvm::StringRef stderrPath,
                                llvm::raw_ostream &diagOS);
+static bool compilePrintWrapperToBitcode(
+    const mlir::pto::CANNToolchain &toolchain, llvm::StringRef targetCPU,
+    llvm::StringRef wrapperSourcePath, llvm::StringRef outBcPath,
+    llvm::StringRef stderrPath, llvm::raw_ostream &diagOS);
+static bool linkLLVMBitcode(const mlir::pto::CANNToolchain &toolchain,
+                            llvm::ArrayRef<std::string> inputBcPaths,
+                            llvm::StringRef outBcPath,
+                            llvm::StringRef stderrPath,
+                            llvm::raw_ostream &diagOS);
+static std::string getPrintWrapperSourcePath(llvm::raw_ostream &diagOS);
+
+} // namespace
+
+namespace mlir::pto {
+// Defined later in this file; VPTOFatobjArtifacts needs it before the
+// definition (it duplicates the first half of emitVPTOCubeDeviceObject so it
+// can intercept the compile with the wrapper-merged bitcode).
+mlir::LogicalResult applyVPTOLLVMABINames(llvm::Module &module,
+                                          llvm::StringRef suffix,
+                                          llvm::raw_ostream &diagOS);
+} // namespace mlir::pto
+
+namespace {
 
 static llvm::StringRef
 getTargetCPU(mlir::pto::ObjectEmissionDeviceTarget target) {
@@ -303,30 +326,90 @@ public:
     return true;
   }
 
+  // Write the kernel module to its .ll path, then (when the module uses
+  // pto.print / pto.tprint) merge the cce::printf wrapper bitcode into it
+  // with llvm-link before compiling the device object.  The merge must
+  // happen at bitcode level: the fatobj pipeline cannot resolve symbols
+  // across separate device objects.
   bool emitCubeObject(llvm::Module *module,
                       const mlir::pto::CANNToolchain &toolchain,
-                      llvm::raw_ostream &diagOS) {
+                      bool usesPrint, llvm::raw_ostream &diagOS) {
     if (!module)
       return true;
     if (failed(tempFiles.create("ptoas-device", ".ll", cubeLLPath, diagOS)))
       return false;
     if (failed(tempFiles.create("ptoas-device", ".o", cubeObjPath, diagOS)))
       return false;
-    return succeeded(mlir::pto::emitVPTOCubeDeviceObject(
-        *module, cubeLLPath, cubeObjPath, toolchain, stderrPath, diagOS));
+    if (failed(mlir::pto::applyVPTOLLVMABINames(
+            *module,
+            toolchain.vptoPublicABISuffix(
+                mlir::pto::ObjectEmissionDeviceTarget::Cube),
+            diagOS)))
+      return false;
+    if (failed(mlir::pto::writeLLVMModule(*module, cubeLLPath, diagOS)))
+      return false;
+    llvm::StringRef compileInput = cubeLLPath;
+    if (usesPrint &&
+        !mergePrintWrapper(toolchain, "dav-c310-cube", cubeLLPath,
+                           cubeMergedBcPath, compileInput, diagOS))
+      return false;
+    return compileDeviceLLVMToObject(compileInput, cubeObjPath, "dav-c310-cube",
+                                     toolchain.bishengPath, stderrPath, diagOS);
   }
 
   bool emitVectorObject(llvm::Module *module,
                         const mlir::pto::CANNToolchain &toolchain,
-                        llvm::raw_ostream &diagOS) {
+                        bool usesPrint, llvm::raw_ostream &diagOS) {
     if (!module)
       return true;
     if (failed(tempFiles.create("ptoas-device", ".ll", vectorLLPath, diagOS)))
       return false;
     if (failed(tempFiles.create("ptoas-device", ".o", vectorObjPath, diagOS)))
       return false;
-    return succeeded(mlir::pto::emitVPTOVectorDeviceObject(
-        *module, vectorLLPath, vectorObjPath, toolchain, stderrPath, diagOS));
+    if (failed(mlir::pto::applyVPTOLLVMABINames(
+            *module,
+            toolchain.vptoPublicABISuffix(
+                mlir::pto::ObjectEmissionDeviceTarget::Vector),
+            diagOS)))
+      return false;
+    if (failed(mlir::pto::writeLLVMModule(*module, vectorLLPath, diagOS)))
+      return false;
+    llvm::StringRef compileInput = vectorLLPath;
+    if (usesPrint &&
+        !mergePrintWrapper(toolchain, "dav-c310-vec", vectorLLPath,
+                           vectorMergedBcPath, compileInput, diagOS))
+      return false;
+    return compileDeviceLLVMToObject(compileInput, vectorObjPath,
+                                     "dav-c310-vec", toolchain.bishengPath,
+                                     stderrPath, diagOS);
+  }
+
+  // Compile the cce::printf wrapper for this target and llvm-link it with the
+  // kernel module.  The wrapper is compiled per target CPU (vec vs cube) so
+  // its baked-in target-cpu never contradicts the object being produced.
+  // compileInput is updated to the merged bitcode path on success.
+  bool mergePrintWrapper(const mlir::pto::CANNToolchain &toolchain,
+                         llvm::StringRef targetCPU, llvm::StringRef llPath,
+                         std::string &mergedBcPath, llvm::StringRef &compileInput,
+                         llvm::raw_ostream &diagOS) {
+    if (failed(tempFiles.create("ptoas-device-merged", ".bc", mergedBcPath,
+                                diagOS)))
+      return false;
+    std::string wrapperSourcePath = getPrintWrapperSourcePath(diagOS);
+    if (wrapperSourcePath.empty())
+      return false;
+    std::string wrapperBcPath;
+    if (failed(tempFiles.create("ptoas-print-wrapper", ".bc", wrapperBcPath,
+                                diagOS)))
+      return false;
+    if (!compilePrintWrapperToBitcode(toolchain, targetCPU, wrapperSourcePath,
+                                      wrapperBcPath, stderrPath, diagOS))
+      return false;
+    llvm::SmallVector<std::string, 2> inputs = {llPath.str(), wrapperBcPath};
+    if (!linkLLVMBitcode(toolchain, inputs, mergedBcPath, stderrPath, diagOS))
+      return false;
+    compileInput = mergedBcPath;
+    return true;
   }
 
   bool mergeDeviceObjects(const mlir::pto::CANNToolchain &toolchain,
@@ -404,6 +487,8 @@ private:
   std::string cubeObjPath;
   std::string vectorLLPath;
   std::string vectorObjPath;
+  std::string cubeMergedBcPath;
+  std::string vectorMergedBcPath;
   std::string mergedDeviceObjPath;
   std::string stderrPath;
   std::string stubPath;
@@ -470,6 +555,74 @@ static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
   };
   return runCommandWithStderr(bishengPath, args, stderrPath, diagOS,
                               "device LLVM compilation", llPath);
+}
+
+// pto.print / pto.tprint lower to calls of external shims (pto_print_f32,
+// pto_print_i64, ...) defined in pt_print.cpp.  The shims wrap cce::printf,
+// which only bisheng can instantiate (template + DebugTunnel internals), so
+// pt_print.cpp is compiled to a device bitcode and llvm-linked into the
+// kernel modules before object emission.  Driver mode with -emit-llvm is used
+// (not CC1): it resolves the CCE/CANN include chains and libstdc++ paths the
+// same way the host-stub driver mode does, and it must NOT pass
+// -cce-enable-mix (which splits symbols into .vector/.cube variants).
+static bool compilePrintWrapperToBitcode(
+    const mlir::pto::CANNToolchain &toolchain, llvm::StringRef targetCPU,
+    llvm::StringRef wrapperSourcePath, llvm::StringRef outBcPath,
+    llvm::StringRef stderrPath, llvm::raw_ostream &diagOS) {
+  llvm::SmallVector<std::string, 16> args = {
+      toolchain.bishengPath,
+      "-xcce",
+      "--cce-aicore-only",
+      std::string("--cce-aicore-arch=") + targetCPU.str(),
+      "-D__CCE_ENABLE_PRINT_FOUND_CANN__",
+      "--cce-enable-print",
+      "-std=c++17",
+      "-c",
+      "-emit-llvm",
+      "-x",
+      "cce",
+      wrapperSourcePath.str(),
+      "-o",
+      outBcPath.str(),
+  };
+  return runCommandWithStderr(toolchain.bishengPath, args, stderrPath, diagOS,
+                              "print wrapper bitcode compilation");
+}
+
+static bool linkLLVMBitcode(const mlir::pto::CANNToolchain &toolchain,
+                            llvm::ArrayRef<std::string> inputBcPaths,
+                            llvm::StringRef outBcPath,
+                            llvm::StringRef stderrPath,
+                            llvm::raw_ostream &diagOS) {
+  if (toolchain.llvmLinkPath.empty() ||
+      !llvm::sys::fs::exists(toolchain.llvmLinkPath)) {
+    diagOS << "Error: unable to locate llvm-link; pto.print requires it to "
+              "merge the wrapper bitcode into the kernel modules.\n";
+    return false;
+  }
+  llvm::SmallVector<std::string, 16> args = {toolchain.llvmLinkPath};
+  for (const std::string &path : inputBcPaths)
+    args.push_back(path);
+  args.push_back("-o");
+  args.push_back(outBcPath.str());
+  return runCommandWithStderr(toolchain.llvmLinkPath, args, stderrPath, diagOS,
+                              "print wrapper bitcode link");
+}
+
+// Locate the shipped pt_print.cpp wrapper source.  It lives in a directory
+// without a CMakeLists.txt (so the LLVM source-list check does not require it
+// to belong to a target) and its path is baked in at configure time.
+static std::string getPrintWrapperSourcePath(llvm::raw_ostream &diagOS) {
+#ifdef PTOAS_DEFAULT_PRINT_WRAPPER_PATH
+  std::string path = joinPath(PTOAS_DEFAULT_PRINT_WRAPPER_PATH, "pt_print.cpp");
+  if (llvm::sys::fs::exists(path))
+    return path;
+  diagOS << "Error: print wrapper source not found at " << path << ".\n";
+#else
+  diagOS << "Error: PTOAS_DEFAULT_PRINT_WRAPPER_PATH is not defined; cannot "
+            "locate the pt_print.cpp wrapper source.\n";
+#endif
+  return std::string();
 }
 
 static bool compileCppDeviceSourceToObject(
@@ -830,6 +983,13 @@ mlir::pto::CANNToolchain::create(llvm::raw_ostream &diagOS) {
       joinPath(toolchain.resourceIncludeDirPath, "cce_stub");
   toolchain.bishengCompilerBinDirPath =
       joinPath(toolchain.ascendHomePath, "tools/bisheng_compiler/bin");
+  // llvm-link must be the bisheng (LLVM 15) one — bitcode produced by newer
+  // LLVM versions is rejected by the CCE backend.  It is needed to merge the
+  // pto.print wrapper bitcode into the kernel modules.
+  toolchain.llvmLinkPath = joinPath(toolchain.ascendHomePath, "bin/llvm-link");
+  if (!llvm::sys::fs::exists(toolchain.llvmLinkPath))
+    toolchain.llvmLinkPath =
+        joinPath(toolchain.bishengCompilerBinDirPath, "llvm-link");
   toolchain.cannVersionString =
       discoverCANNVersion(toolchain.ascendHomePath).value_or("9.0.0-beta.1");
   llvm::SmallVector<std::string, 8> cppIncludeDirs = discoverCppIncludeDirs(
@@ -989,9 +1149,9 @@ static mlir::LogicalResult renameLLVMFunction(llvm::Module &module,
   return mlir::success();
 }
 
-static mlir::LogicalResult applyVPTOLLVMABINames(llvm::Module &module,
-                                                 llvm::StringRef suffix,
-                                                 llvm::raw_ostream &diagOS) {
+mlir::LogicalResult mlir::pto::applyVPTOLLVMABINames(llvm::Module &module,
+                                                     llvm::StringRef suffix,
+                                                     llvm::raw_ostream &diagOS) {
   for (llvm::Function &function : module) {
     if (function.isDeclaration() || !function.hasExternalLinkage())
       continue;
@@ -1009,7 +1169,7 @@ mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
     llvm::raw_ostream &diagOS) {
-  if (failed(applyVPTOLLVMABINames(
+  if (failed(mlir::pto::applyVPTOLLVMABINames(
           module,
           toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Vector),
           diagOS)))
@@ -1025,7 +1185,7 @@ mlir::LogicalResult mlir::pto::emitVPTOCubeDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
     llvm::raw_ostream &diagOS) {
-  if (failed(applyVPTOLLVMABINames(
+  if (failed(mlir::pto::applyVPTOLLVMABINames(
           module,
           toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Cube),
           diagOS)))
@@ -1053,9 +1213,9 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVM(
     return failure();
   if (!artifacts.initCommandLogs(diagOS))
     return failure();
-  if (!artifacts.emitCubeObject(cubeModule, toolchain, diagOS))
+  if (!artifacts.emitCubeObject(cubeModule, toolchain, usesPrint, diagOS))
     return failure();
-  if (!artifacts.emitVectorObject(vectorModule, toolchain, diagOS))
+  if (!artifacts.emitVectorObject(vectorModule, toolchain, usesPrint, diagOS))
     return failure();
   if (!artifacts.mergeDeviceObjects(toolchain, diagOS))
     return failure();
@@ -1119,9 +1279,11 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVMWithRuntime(
   if (!artifacts.initCommandLogs(diagOS))
     return failure();
 
-  if (!artifacts.emitCubeObject(cubeModule, *toolchain, diagOS))
+  if (!artifacts.emitCubeObject(cubeModule, *toolchain, /*usesPrint=*/false,
+                                diagOS))
     return failure();
-  if (!artifacts.emitVectorObject(vectorModule, *toolchain, diagOS))
+  if (!artifacts.emitVectorObject(vectorModule, *toolchain, /*usesPrint=*/false,
+                                  diagOS))
     return failure();
 
   if (!artifacts.mergeDeviceObjects(*toolchain, diagOS))
