@@ -29,20 +29,26 @@
 #include <ccelib/__ccelib.h>
 #include <stdint.h>
 
+extern "C" [aicore] void *pto_get_fix_stack_object()
+    asm("llvm.hivm.get.sycl.fix.stack.object");
+
 // Literal text node (no conversion): used for tprint headers and shapes.
-extern "C" [aicore] void pto_print_str(const char *fmt) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_str(__gm__ const char *fmt) {
   cce::printf(fmt);
 }
 
 // Float value: f16/bf16/f64 operands are converted to f32 by the emitter
 // before the call (the DebugTunnel FLOAT node carries 4 bytes).
-extern "C" [aicore] void pto_print_f32(const char *fmt, float v) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_f32(__gm__ const char *fmt, float v) {
   cce::printf(fmt, v);
 }
 
 // Signed integer: the INT node carries 8 bytes, so narrow operands are
 // sign-extended to i64 by the emitter.
-extern "C" [aicore] void pto_print_i64(const char *fmt, int64_t v) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_i64(__gm__ const char *fmt, int64_t v) {
   cce::printf(fmt, v);
 }
 
@@ -51,16 +57,20 @@ extern "C" [aicore] void pto_print_i64(const char *fmt, int64_t v) {
 // no 64-bit unsigned type (it stops at uint32_t), so the value is forwarded
 // as long long — the INT node still carries the same 8 bytes and the host
 // format string reinterprets them.
-extern "C" [aicore] void pto_print_u64(const char *fmt, uint64_t v) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_u64(__gm__ const char *fmt, uint64_t v) {
   cce::printf(fmt, (long long)v);
 }
 
-extern "C" [aicore] void pto_print_init(__gm__ void *dt) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_init(__gm__ void *dt) {
   cce::internal::DebugTunnel::OnKernelInitialize(
       (__gm__ cce::internal::DebugTunnelData *)dt);
+  *(uint64_t *)pto_get_fix_stack_object() = (uint64_t)dt;
 }
 
-extern "C" [aicore] void pto_print_finish(__gm__ void *dt) {
+extern "C" [aicore] __attribute__((always_inline)) void
+pto_print_finish(__gm__ void *dt) {
   cce::internal::DebugTunnel::OnKernelFinish(
       (__gm__ cce::internal::DebugTunnelData *)dt);
 }

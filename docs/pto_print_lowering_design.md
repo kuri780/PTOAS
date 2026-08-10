@@ -272,7 +272,7 @@ wrapper 必须按每个 target CPU（`dav-c310-vec` / `dav-c310-cube`）分别�
 ```text
 bisheng -xcce --cce-aicore-only --cce-aicore-arch=<cpu>
         -D__CCE_ENABLE_PRINT_FOUND_CANN__ --cce-enable-print
-        -std=c++17 -c -emit-llvm -x cce pt_print.cpp -o pt_print.bc
+        -std=c++17 -O2 -c -emit-llvm -x cce pt_print.cpp -o pt_print.bc
 ```
 
 用 **driver 模式 `-emit-llvm`** 而不是 CC1：driver 自动管理 CCE/CANN include 链，且不会把符号拆成 `.vector`/`.cube` variants（不要传 `-cce-enable-mix`）。
@@ -287,9 +287,9 @@ Not an int attribute (Producer: 'LLVM21.1.8' Reader: 'LLVM 15.0.5')
 
 `llvm-link` 同时接受 textual `.ll` 和 binary `.bc` 输入；合并后的 `.bc` 再经 `-x ir` 编译为设备 `.o` 与直接编 `.ll` 完全等价。
 
-### 6.4 E2E 验证脚本
+### 6.4 E2E 验证流程
 
-`test/vpto/scripts/run_vpto_print_validation.sh` / `run_vpto_tprint_validation.sh` / `run_vpto_print_types_validation.sh` 在“ptoas 生成 kernel.ll”之后、设备编译之前插入同样的两步：wrapper bitcode 编译 + `llvm-link` 合并。脚本先 `sed` 去掉 constant GEP 的 `nuw`（bisheng 的 LLVM 15 不支持），再编译合并后的 bitcode。
+统一使用 `test/vpto/scripts/run_host_vpto_validation.sh`。脚本直接让 PTOAS 生成包含 Print host/device ABI 接线的 fat object，再与 case 原有的 `launch.cpp` 链接；验证脚本和 case 不需要检测 `pto.print`、传递 `--cce-enable-print`，也不需要手工管理 DTData 或 DebugTunnel 生命周期。PTOAS 的 object emission 负责 wrapper bitcode 合并、Bisheng Print host stub 生成，以及 Close 前的 stream 同步。
 
 ## 7. 阅读实现时应抓住的主线
 

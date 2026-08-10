@@ -4274,10 +4274,11 @@ collectAndCreatePrintfStringGlobals(ModuleOp module, LoweringState &state) {
       elements.push_back(IntegerAttr::get(i8Type, c));
     elements.push_back(IntegerAttr::get(i8Type, 0)); // null terminator
     auto arrayType = LLVM::LLVMArrayType::get(i8Type, elements.size());
-    builder.create<LLVM::GlobalOp>(
+    auto global = builder.create<LLVM::GlobalOp>(
         module.getLoc(), arrayType,
         /*isConstant=*/true, LLVM::Linkage::Private, kv.second,
         ArrayAttr::get(module.getContext(), elements));
+    global.setAddrSpace(1);
   }
 }
 
@@ -4291,7 +4292,7 @@ static LogicalResult addDTDataParamToEntryFunctions(ModuleOp module,
 
   MLIRContext *ctx = module.getContext();
   auto llvmPtr1Type = LLVM::LLVMPointerType::get(ctx, 1);
-  auto llvmPtr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+  auto llvmPtr0Type = LLVM::LLVMPointerType::get(ctx, 1);
   auto i64Type = IntegerType::get(ctx, 64);
   auto f32Type = Float32Type::get(ctx);
   auto voidType = LLVM::LLVMVoidType::get(ctx);
@@ -9243,7 +9244,7 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *ctx = rewriter.getContext();
-    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 1);
     auto i64Type = rewriter.getI64Type();
 
     // Look up format-string global (created by the pre-scan).
@@ -9343,7 +9344,7 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     MLIRContext *ctx = rewriter.getContext();
-    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 0);
+    auto ptr0Type = LLVM::LLVMPointerType::get(ctx, 1);
     auto i64Type = rewriter.getI64Type();
 
     auto srcType = dyn_cast<pto::TileBufType>(op.getSrc().getType());

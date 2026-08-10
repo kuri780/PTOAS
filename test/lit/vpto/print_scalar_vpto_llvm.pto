@@ -15,44 +15,44 @@
 // the fatobj pipeline; no inline DebugTunnel protocol is emitted here.
 // Test coverage: f32, f16, bf16, f64, i64, i32 scalar types.
 
-// CHECK: @_ptoas_printf_fmt_0 = private constant [18 x i8] c"scalar = %+08.3f\0A\00"
+// CHECK: @_ptoas_printf_fmt_0 = private addrspace(1) constant [18 x i8] c"scalar = %+08.3f\0A\00"
 
 // CHECK: declare void @pto_print_finish(ptr addrspace(1)) #0
 // CHECK: declare void @pto_print_init(ptr addrspace(1)) #0
-// CHECK: declare void @pto_print_u64(ptr, i64) #0
-// CHECK: declare void @pto_print_i64(ptr, i64) #0
-// CHECK: declare void @pto_print_f32(ptr, float) #0
-// CHECK: declare void @pto_print_str(ptr) #0
+// CHECK: declare void @pto_print_u64(ptr addrspace(1), i64) #0
+// CHECK: declare void @pto_print_i64(ptr addrspace(1), i64) #0
+// CHECK: declare void @pto_print_f32(ptr addrspace(1), float) #0
+// CHECK: declare void @pto_print_str(ptr addrspace(1)) #0
 
 // --- f32 scalar: direct wrapper call, init at entry, finish before return ---
 // CHECK: define void @print_scalar_kernel_mix_aiv(float
 // CHECK: call void @pto_print_init(ptr addrspace(1) %1)
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_0, float %0)
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_0, float %0)
 // CHECK: call void @pto_print_finish(ptr addrspace(1) %1)
 
 // --- f16 scalar: fpext f16 -> f32 ---
 // CHECK: define void @print_f16_kernel_mix_aiv(half
 // CHECK: fpext half %0 to float
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_1, float {{.*}})
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_1, float {{.*}})
 
 // --- bf16 scalar: fpext bf16 -> f32 ---
 // CHECK: define void @print_bf16_kernel_mix_aiv(bfloat
 // CHECK: fpext bfloat %0 to float
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_2, float {{.*}})
 
 // --- f64 scalar: fptrunc f64 -> f32 ---
 // CHECK: define void @print_f64_kernel_mix_aiv(double
 // CHECK: fptrunc double %0 to float
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_3, float {{.*}})
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_3, float {{.*}})
 
 // --- i64 scalar: already 64-bit, no extension ---
 // CHECK: define void @print_i64_kernel_mix_aiv(i64
-// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_4, i64 %0)
+// CHECK: call void @pto_print_i64(ptr addrspace(1) @_ptoas_printf_fmt_4, i64 %0)
 
 // --- i32 scalar: sext i32 -> i64 (INT records are 8 bytes) ---
 // CHECK: define void @print_i32_kernel_mix_aiv(i32
 // CHECK: sext i32 %0 to i64
-// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_5, i64 {{.*}})
+// CHECK: call void @pto_print_i64(ptr addrspace(1) @_ptoas_printf_fmt_5, i64 {{.*}})
 
 // CHECK: !hivm.annotations = !{
 // CHECK: !"kernel", i32 1

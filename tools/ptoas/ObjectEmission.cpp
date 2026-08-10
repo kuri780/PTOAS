@@ -282,6 +282,7 @@ static bool linkLLVMBitcode(const mlir::pto::CANNToolchain &toolchain,
                             llvm::StringRef stderrPath,
                             llvm::raw_ostream &diagOS);
 static std::string getPrintWrapperSourcePath(llvm::raw_ostream &diagOS);
+static std::string getPrintHostWrapperSourcePath(llvm::raw_ostream &diagOS);
 
 } // namespace
 
@@ -448,9 +449,39 @@ public:
                                llvm::StringRef outputPath,
                                bool usesPrint,
                                llvm::raw_ostream &diagOS) {
-    return compileHostStubToObject(stubPath, outputPath, moduleId, targetCPU,
-                                   toolchain, mergedDeviceObjPath, stderrPath,
-                                   usesPrint, diagOS);
+    if (!usesPrint)
+      return compileHostStubToObject(stubPath, outputPath, moduleId, targetCPU,
+                                     toolchain, mergedDeviceObjPath, stderrPath,
+                                     false, diagOS);
+
+    std::string baseFatobjPath;
+    std::string closeOverrideObjPath;
+    if (failed(tempFiles.create("ptoas-print-base", ".o", baseFatobjPath,
+                                diagOS)) ||
+        failed(tempFiles.create("ptoas-print-host", ".o",
+                                closeOverrideObjPath, diagOS)))
+      return false;
+    if (!compileHostStubToObject(stubPath, baseFatobjPath, moduleId, targetCPU,
+                                 toolchain, mergedDeviceObjPath, stderrPath,
+                                 true, diagOS))
+      return false;
+
+    std::string sourcePath = getPrintHostWrapperSourcePath(diagOS);
+    if (sourcePath.empty())
+      return false;
+    llvm::SmallVector<std::string, 16> compileArgs = {
+        toolchain.bishengPath, "-xc++", "-std=c++17", "-fPIC", "-I",
+        toolchain.ascendHomePath + "/include", "-c", sourcePath, "-o",
+        closeOverrideObjPath};
+    if (!runCommandWithStderr(toolchain.bishengPath, compileArgs, stderrPath,
+                              diagOS, "Print host close override compilation"))
+      return false;
+
+    llvm::SmallVector<std::string, 8> linkArgs = {
+        toolchain.ldLldPath, "-r", baseFatobjPath, closeOverrideObjPath,
+        "-o", outputPath.str()};
+    return runCommandWithStderr(toolchain.ldLldPath, linkArgs, stderrPath,
+                                diagOS, "Print fatobj host override link");
   }
 
   bool repackFatObj(const mlir::pto::CANNToolchain &toolchain,
@@ -577,6 +608,7 @@ static bool compilePrintWrapperToBitcode(
       "-D__CCE_ENABLE_PRINT_FOUND_CANN__",
       "--cce-enable-print",
       "-std=c++17",
+      "-O2",
       "-c",
       "-emit-llvm",
       "-x",
@@ -621,6 +653,20 @@ static std::string getPrintWrapperSourcePath(llvm::raw_ostream &diagOS) {
 #else
   diagOS << "Error: PTOAS_DEFAULT_PRINT_WRAPPER_PATH is not defined; cannot "
             "locate the pt_print.cpp wrapper source.\n";
+#endif
+  return std::string();
+}
+
+static std::string getPrintHostWrapperSourcePath(llvm::raw_ostream &diagOS) {
+#ifdef PTOAS_DEFAULT_PRINT_WRAPPER_PATH
+  std::string path =
+      joinPath(PTOAS_DEFAULT_PRINT_WRAPPER_PATH, "pt_print_host.cpp");
+  if (llvm::sys::fs::exists(path))
+    return path;
+  diagOS << "Error: Print host wrapper source not found at " << path << ".\n";
+#else
+  diagOS << "Error: PTOAS_DEFAULT_PRINT_WRAPPER_PATH is not defined; cannot "
+            "locate pt_print_host.cpp.\n";
 #endif
   return std::string();
 }

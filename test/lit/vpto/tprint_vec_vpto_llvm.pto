@@ -14,34 +14,34 @@
 // emission).  No inline DebugTunnel protocol bytes are emitted.
 // Test coverage: f32 tile, f16 tile, i32 tile.
 
-// CHECK: @_ptoas_printf_fmt_0 = private constant
+// CHECK: @_ptoas_printf_fmt_0 = private addrspace(1) constant
 // CHECK-SAME: [TPRINT Tile]
 
 // CHECK: declare void @pto_print_finish(ptr addrspace(1)) #0
 // CHECK: declare void @pto_print_init(ptr addrspace(1)) #0
-// CHECK: declare void @pto_print_i64(ptr, i64) #0
-// CHECK: declare void @pto_print_f32(ptr, float) #0
-// CHECK: declare void @pto_print_str(ptr) #0
+// CHECK: declare void @pto_print_i64(ptr addrspace(1), i64) #0
+// CHECK: declare void @pto_print_f32(ptr addrspace(1), float) #0
+// CHECK: declare void @pto_print_str(ptr addrspace(1)) #0
 
 // --- f32 tile: header + shape records, per-element f32 wrapper call ---
 // CHECK: define void @tprint_test_kernel_mix_aiv(
 // CHECK: call void @pto_print_init(ptr addrspace(1) %0)
-// CHECK: call void @pto_print_str(ptr @_ptoas_printf_fmt_0)
-// CHECK: call void @pto_print_str(ptr @_ptoas_printf_fmt_1)
+// CHECK: call void @pto_print_str(ptr addrspace(1) @_ptoas_printf_fmt_0)
+// CHECK: call void @pto_print_str(ptr addrspace(1) @_ptoas_printf_fmt_1)
 // CHECK: getelementptr float, ptr addrspace(6) null, i64 {{.*}}
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_2, float {{.*}})
 // CHECK: call void @pto_print_finish(ptr addrspace(1) %0)
 
 // --- f16 tile: fpext f16 -> f32 ---
 // CHECK: define void @tprint_f16_kernel_mix_aiv(
 // CHECK: fpext half {{.*}} to float
-// CHECK: call void @pto_print_f32(ptr @_ptoas_printf_fmt_2, float {{.*}})
+// CHECK: call void @pto_print_f32(ptr addrspace(1) @_ptoas_printf_fmt_2, float {{.*}})
 
 // --- i32 tile: sext i32 -> i64 (INT records are 8 bytes) ---
 // CHECK: define void @tprint_i32_kernel_mix_aiv(
 // CHECK: getelementptr i32, ptr addrspace(6) null, i64 {{.*}}
 // CHECK: sext i32 {{.*}} to i64
-// CHECK: call void @pto_print_i64(ptr @_ptoas_printf_fmt_6, i64 {{.*}})
+// CHECK: call void @pto_print_i64(ptr addrspace(1) @_ptoas_printf_fmt_6, i64 {{.*}})
 
 // CHECK: !hivm.annotations = !{
 // CHECK: !"kernel", i32 1
