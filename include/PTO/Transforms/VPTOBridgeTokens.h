@@ -10,10 +10,9 @@
 //===----------------------------------------------------------------------===//
 //
 // Bridge-side construction of the PTO-ISA C++ template tokens used by the
-// generated VPTO bridge wrapper. These utilities are the bridge analogue of
-// EmitC's token builders: the IR-fact -> C++ spelling mapping rules are
-// shared through PTOCppTokens, while the bridge assembly rules (fully
-// qualified spellings, NoneBox trailing-argument omission) live here.
+// generated VPTO bridge wrapper. Both the IR-fact -> C++ spelling mapping
+// rules and the bridge assembly rules (fully qualified spellings, NoneBox
+// trailing-argument omission) live here.
 //
 // The tokens are fully qualified C++ type/constant spellings (e.g.
 // "pto::TPipe<0, pto::Direction::DIR_C2V, 1024, 8, 2, false>") suitable for
@@ -99,8 +98,7 @@ FailureOr<std::string> buildBridgeTileSplitToken(int64_t split);
 FailureOr<std::string> buildBridgeTileToken(TileBufType tile);
 
 /// Builds the C++ element type token (e.g. "float", "half", "int8_t") for an
-/// MLIR element type. Falls back to "float" for unrecognized types, mirroring
-/// the EmitC element token behavior.
+/// MLIR element type. Falls back to "float" for unrecognized types.
 std::string buildBridgeElementTypeToken(Type elementType);
 
 } // namespace pto

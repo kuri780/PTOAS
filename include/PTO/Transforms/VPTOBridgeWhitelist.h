@@ -231,7 +231,7 @@ constexpr llvm::StringLiteral kBuiltinBridgeWhitelistSource =
 
 /// Loads the bridge whitelist through the formal resolution chain: pass
 /// `whitelist-path` option, then PTOAS_VPTO_BRIDGE_WHITELIST, then the
-/// built-in default whitelist (pipe + matmul families) shipped with ptoas.
+/// built-in default whitelist (pipe family) shipped with ptoas.
 /// Always returns a parsed whitelist unless the explicitly configured file
 /// fails to parse. When `sourceName` is non-null it receives the resolved
 /// source name (file path or the built-in marker) for diagnostics.
