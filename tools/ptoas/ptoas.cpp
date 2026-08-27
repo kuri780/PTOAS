@@ -11,6 +11,7 @@
 #include "PTO/IR/VMIUtils.h"
 #include "PTO/IR/PTOMultiBuffer.h"
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
+#include "PTO/Transforms/VPTOBridgeTokens.h"
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
 #include "VPTOHostStubEmission.h"
@@ -3260,6 +3261,15 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     }
   }
 
+  // Pick up the rendered bridge wrapper source before LLVM translation and
+  // drop the carrier attribute so it never leaks into the emitted modules.
+  std::string bridgeWrapperSource;
+  if (auto wrapperAttr = module->getAttrOfType<StringAttr>(
+          pto::kBridgeWrapperSourceAttrName)) {
+    bridgeWrapperSource = wrapperAttr.getValue().str();
+    module->removeAttr(pto::kBridgeWrapperSourceAttrName);
+  }
+
   if (failed(
           pto::lowerVPTOModuleToLLVMModules(module, options,
                                             result.vptoCubeModule,
@@ -3270,6 +3280,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.vptoBridgeWrapperSource = std::move(bridgeWrapperSource);
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
@@ -3281,6 +3292,14 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   if (!hasTileOpsToExpand) {
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOCanonicalizeIRPass());
   }
+  // The declarative bridge pass runs before the pipe family pass: it erases
+  // the tile handles its bridged ops consume, so the pipe family pass only
+  // sees the tile handles that remain in the function.
+  pm.addNestedPass<func::FuncOp>(pto::createPTOLowerDeclarativeBridgeOpsPass());
+  pm.addNestedPass<func::FuncOp>(pto::createPTOLowerPipeFamilyOpsPass());
+  // Render the bridge wrapper source from the spec the family pass collected
+  // before the module is split into per-kind kernel modules.
+  pm.addPass(pto::createVPTOBridgeWrapperGenPass());
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
   if (hasTileOpsToExpand) {
@@ -3400,10 +3419,6 @@ int mlir::pto::compilePTOASModule(
   }
   if (enableBufidSync && arch != "a5") {
     llvm::errs() << "Error: --enable-bufid_sync requires --pto-arch=a5.\n";
-    return 1;
-  }
-  if (vptoSchedulerMode != VPTOSchedulerCLIMode::Off && arch != "a5") {
-    llvm::errs() << "Error: --vpto-scheduler requires --pto-arch=a5.\n";
     return 1;
   }
 

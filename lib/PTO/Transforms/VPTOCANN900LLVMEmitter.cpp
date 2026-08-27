@@ -188,7 +188,10 @@ static Type convertVPTOType(Type type, Builder &builder) {
   if (isa<pto::AlignType>(type)) {
     return VectorType::get({32}, builder.getI8Type());
   }
-  if (isa<pto::StructType>(type)) {
+  if (isa<pto::TileBufType>(type)) {
+    return builder.getI64Type();
+  }
+  if (isa<pto::StructType, pto::PipeType>(type)) {
     return LLVM::LLVMPointerType::get(builder.getContext());
   }
   if (auto ptrType = dyn_cast<pto::PtrType>(type)) {
@@ -247,7 +250,7 @@ static bool hasVPTOConvertibleType(Type type) {
     return false;
   }
   if (isa<pto::VRegType, pto::MaskType, pto::AlignType, pto::PtrType,
-          pto::StructType>(type) ||
+          pto::StructType, pto::PipeType, pto::TileBufType>(type) ||
       pto::isPTOLowPrecisionType(type))
     return true;
   if (auto vecType = dyn_cast<VectorType>(type)) {
@@ -11371,6 +11374,9 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                          LLVM::LLVMDialect,
                          func::FuncDialect, scf::SCFDialect>();
   target.addLegalOp<UnrealizedConversionCastOp>();
+  target.addIllegalOp<pto::AllocTileOp, pto::DeclareTileOp,
+                      pto::InitializeL2LPipeOp, pto::TPushOp, pto::TPopOp,
+                      pto::TFreeOp, pto::TileBufAddrOp>();
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::SetIntraBlockOp, pto::WaitIntraBlockOp,
                       pto::BarrierOp, pto::MemBarOp,
@@ -11915,6 +11921,7 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
   pm.enableVerifier();
   auto &kernelModulePM = pm.nest<ModuleOp>();
   kernelModulePM.addPass(std::make_unique<PrepareVPTOLLVMLoweringPass>());
+  kernelModulePM.addPass(pto::createVPTOBridgeLoweringPass());
   kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>());
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
   kernelModulePM.addPass(
