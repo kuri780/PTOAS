@@ -1,10 +1,12 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-// CANN Open Software License Agreement Version 2.0 (the "License").
-// Please refer to the License for details. You may not use this file except in compliance with the License.
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-// See LICENSE in the root of the software repository for the full text of the License.
+// This program is free software, you can redistribute it and/or modify it under
+// the terms and conditions of CANN Open Software License Agreement Version 2.0
+// (the "License"). Please refer to the License for details. You may not use
+// this file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON
+// AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS
+// FOR A PARTICULAR PURPOSE. See LICENSE in the root of the software repository
+// for the full text of the License.
 
 //===- VPTOBridgeWhitelist.cpp - C++ bridge whitelist ---------------------===//
 //===----------------------------------------------------------------------===//
@@ -15,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PTO/Transforms/VPTOBridgeWhitelist.h"
+#include "PTO/Transforms/VPTOBridgeRegistry.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringSet.h"
@@ -28,6 +31,29 @@ using namespace mlir::pto;
 
 namespace llvm {
 namespace yaml {
+
+template <> struct MappingTraits<BridgePipeRoutePolicy> {
+  static void mapping(IO &io, BridgePipeRoutePolicy &policy) {
+    io.mapOptional("enabled", policy.enabled, false);
+  }
+};
+template <> struct MappingTraits<BridgeCubeRoutePolicy> {
+  static void mapping(IO &io, BridgeCubeRoutePolicy &policy) {
+    io.mapOptional("enabled_ops", policy.enabledOps);
+  }
+};
+template <> struct MappingTraits<BridgeRouteFamilies> {
+  static void mapping(IO &io, BridgeRouteFamilies &families) {
+    io.mapOptional("pipe", families.pipe);
+    io.mapOptional("cube", families.cube);
+  }
+};
+template <> struct MappingTraits<BridgeRoutePolicy> {
+  static void mapping(IO &io, BridgeRoutePolicy &policy) {
+    io.mapRequired("version", policy.version);
+    io.mapOptional("families", policy.families);
+  }
+};
 
 template <> struct MappingTraits<BridgeAbiArg> {
   static void mapping(IO &io, BridgeAbiArg &arg) {
@@ -136,8 +162,7 @@ std::string pto::deriveDefaultBridgeCall(llvm::StringRef opName) {
   std::string name;
   name.reserve(opName.size());
   for (char c : opName) {
-    name.push_back(c == '.' ? '_'
-                            : static_cast<char>(llvm::toUpper(c)));
+    name.push_back(c == '.' ? '_' : static_cast<char>(llvm::toUpper(c)));
   }
   return "pto::" + name;
 }
@@ -202,7 +227,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
         entry.lowering != BridgeWhitelistEntry::kLoweringCustom) {
       diagOS << "VPTO bridge whitelist: entry '" << entry.entry
              << "' declares unsupported lowering '" << entry.lowering
-             << "' in '" << sourceName << "' (supported: declarative, "
+             << "' in '" << sourceName
+             << "' (supported: declarative, "
                 "custom)\n";
       return failure();
     }
@@ -236,7 +262,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
     // The call spelling and template arguments belong to the generic
     // declarative renderer; entries owned by a dedicated pass (or a
     // wrapper-internal helper) must not carry them.
-    if (!declarativeChannel && (!entry.call.empty() || !entry.tmplArgs.empty())) {
+    if (!declarativeChannel &&
+        (!entry.call.empty() || !entry.tmplArgs.empty())) {
       diagOS << "VPTO bridge whitelist: entry '" << entry.entry
              << "' declares call/tmpl_args but is not lowered through the "
                 "declarative channel in '"
@@ -260,9 +287,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
       }
       for (const std::string &tmplArg : entry.tmplArgs) {
         if (tmplArg.empty()) {
-          diagOS << "VPTO bridge whitelist: declarative entry '"
-                 << entry.entry << "' has an empty tmpl_args item in '"
-                 << sourceName << "'\n";
+          diagOS << "VPTO bridge whitelist: declarative entry '" << entry.entry
+                 << "' has an empty tmpl_args item in '" << sourceName << "'\n";
           return failure();
         }
         // A qualified spelling is a literal template argument; anything
@@ -279,8 +305,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
           }
         }
         if (!attrFieldDeclared) {
-          diagOS << "VPTO bridge whitelist: declarative entry '"
-                 << entry.entry << "' tmpl_args item '" << tmplArg
+          diagOS << "VPTO bridge whitelist: declarative entry '" << entry.entry
+                 << "' tmpl_args item '" << tmplArg
                  << "' is neither a qualified literal nor an attr "
                     "tmpl_map field of the entry in '"
                  << sourceName << "'\n";
@@ -316,8 +342,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
         }
         if (!declarativeOperands.insert(arg.operand).second) {
           diagOS << "VPTO bridge whitelist: declarative entry '" << entry.entry
-                 << "' binds operand #" << arg.operand
-                 << " more than once in '" << sourceName << "'\n";
+                 << "' binds operand #" << arg.operand << " more than once in '"
+                 << sourceName << "'\n";
           return failure();
         }
         declarativeRoles.insert(arg.role);
@@ -337,8 +363,7 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
       }
     }
     for (const BridgeTmplMapField &field : entry.tmplMap) {
-      if (field.source.empty() || field.field.empty() ||
-          field.target.empty()) {
+      if (field.source.empty() || field.field.empty() || field.target.empty()) {
         diagOS << "VPTO bridge whitelist: tmpl_map row of entry '"
                << entry.entry << "' has an empty source/field/target in '"
                << sourceName << "'\n";
@@ -416,7 +441,8 @@ pto::parseBridgeWhitelistFromBuffer(llvm::StringRef content,
         decl.core != kBridgeWrapperCoreBoth) {
       diagOS << "VPTO bridge whitelist: wrapper '" << decl.name
              << "' declares unsupported core '" << decl.core << "' in '"
-             << sourceName << "' (supported: cube, vec, both; omit it to "
+             << sourceName
+             << "' (supported: cube, vec, both; omit it to "
                 "derive the guard from the routed tile kinds)\n";
       return failure();
     }
@@ -521,17 +547,105 @@ std::string pto::resolveBridgeWhitelistPath(llvm::StringRef optionValue) {
   return {};
 }
 
+FailureOr<BridgeRoutePolicy>
+pto::parseBridgeRoutePolicyFromBuffer(llvm::StringRef content,
+                                      llvm::StringRef sourceName,
+                                      llvm::raw_ostream &diagOS) {
+  for (llvm::StringRef key : {"entry:", "abi:", "operand:", "role:",
+                              "call:", "tmpl_args:", "tmpl_map:",
+                              "includes:", "storage_size_entry:",
+                              "bridge_ops:", "wrappers:"}) {
+    if (content.contains(key)) {
+      diagOS << "VPTO bridge policy: legacy key '" << key
+             << "' is not allowed; use families/ enabled_ops routing only\n";
+      return failure();
+    }
+  }
+  BridgeRoutePolicy policy;
+  llvm::yaml::Input input(content);
+  input >> policy;
+  if (std::error_code error = input.error()) {
+    diagOS << "VPTO bridge policy: cannot parse '" << sourceName
+           << "': " << error.message() << "\n";
+    return failure();
+  }
+  if (policy.version != 1) {
+    diagOS << "VPTO bridge policy: unsupported version " << policy.version
+           << " in '" << sourceName << "' (supported version: 1)\n";
+    return failure();
+  }
+  llvm::StringSet<> seen;
+  for (const std::string &op : policy.families.cube.enabledOps) {
+    const BridgeFunctionDesc *entry = lookupBridgeEntryForOp(op);
+    if (!entry || entry->family != BridgeFamily::Cube ||
+        !seen.insert(op).second) {
+      diagOS << "VPTO bridge policy: invalid Cube op '" << op
+             << "' in '" << sourceName << "'\n";
+      return failure();
+    }
+  }
+  return policy;
+}
+
+FailureOr<BridgeRoutePolicy>
+pto::loadBridgeRoutePolicy(llvm::StringRef optionValue,
+                           llvm::raw_ostream &diagOS,
+                           std::string *sourceName) {
+  std::string path = resolveBridgeWhitelistPath(optionValue);
+  if (sourceName)
+    *sourceName = path.empty() ? kBuiltinBridgeWhitelistSource.str() : path;
+  if (path.empty()) {
+    BridgeRoutePolicy policy;
+    policy.families.pipe.enabled = true;
+    return policy;
+  }
+  auto buffer = llvm::MemoryBuffer::getFile(path);
+  if (!buffer) {
+    diagOS << "VPTO bridge policy: cannot read '" << path << "': "
+           << buffer.getError().message() << "\n";
+    return failure();
+  }
+  return parseBridgeRoutePolicyFromBuffer(buffer.get()->getBuffer(), path,
+                                          diagOS);
+}
+
 FailureOr<BridgeWhitelist>
 pto::loadBridgeWhitelist(llvm::StringRef optionValue,
-                         llvm::raw_ostream &diagOS, std::string *sourceName) {
-  std::string path = resolveBridgeWhitelistPath(optionValue);
-  if (sourceName) {
-    *sourceName =
-        path.empty() ? kBuiltinBridgeWhitelistSource.str() : path;
+                         llvm::raw_ostream &diagOS,
+                         std::string *sourceName) {
+  auto policy = loadBridgeRoutePolicy(optionValue, diagOS, sourceName);
+  if (failed(policy))
+    return failure();
+  BridgeWhitelist routes;
+  if (policy->families.pipe.enabled) {
+    routes.bridgeOps = {
+        {"pto.initialize_l2l_pipe", "pipe", "custom", "pto_vpto_pipe_init",
+         "", {}, {{"ptr", -1, "storage", ""}, {"i32", -1, "local", ""}},
+         "pto_vpto_pipe_size", {}},
+        {"pto.tpush", "pipe", "custom", "pto_vpto_pipe_push", "", {},
+         {{"ptr", -1, "storage", ""}, {"i64", -1, "address", ""}}, "", {}},
+        {"pto.tpop", "pipe", "custom", "pto_vpto_pipe_pop", "", {},
+         {{"ptr", -1, "storage", ""}}, "", {}},
+        {"pto.tfree", "pipe", "custom", "pto_vpto_pipe_free", "", {},
+         {{"ptr", -1, "storage", ""}}, "", {}}};
   }
-  if (!path.empty()) {
-    return parseBridgeWhitelist(path, diagOS);
+  for (const std::string &op : policy->families.cube.enabledOps) {
+    const BridgeFunctionDesc *entry = lookupBridgeEntryForOp(op);
+    if (!entry)
+      continue;
+    if (entry->id == BridgeEntryId::CubeTMatmul) {
+      routes.bridgeOps.push_back(
+          {op, "cube", "declarative", entry->symbol.str(), "pto::TMATMUL",
+           {}, {{"i64", 2, "dst", "dst"}, {"i64", 0, "lhs", "lhs"},
+                {"i64", 1, "rhs", "rhs"}}, "", {}});
+    } else if (entry->id == BridgeEntryId::CubeTMatmulMx) {
+      routes.bridgeOps.push_back(
+          {op, "cube", "declarative", entry->symbol.str(),
+           "pto::TMATMUL_MX", {},
+           {{"i64", 4, "dst", "dst"}, {"i64", 0, "a", "a"},
+            {"i64", 1, "a_scale", "a_scale"}, {"i64", 2, "b", "b"},
+            {"i64", 3, "b_scale", "b_scale"}}, "", {}});
+    }
   }
-  return parseBridgeWhitelistFromBuffer(
-      kDefaultBridgeWhitelistYaml, kBuiltinBridgeWhitelistSource, diagOS);
+  return routes;
 }

@@ -49,6 +49,7 @@ std::unique_ptr<Pass> createPTOLowerPipeFamilyOpsPass();
 std::unique_ptr<Pass> createPTOLowerDeclarativeBridgeOpsPass();
 std::unique_ptr<Pass> createVPTOBridgeLoweringPass();
 std::unique_ptr<Pass> createVPTOBridgeWrapperGenPass();
+std::unique_ptr<Pass> createVPTOResolveBridgeInstancesPass();
 std::unique_ptr<Pass> createPTOVerifyTFreePass();
 
 // Creates a pass for ...

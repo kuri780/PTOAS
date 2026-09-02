@@ -1,0 +1,7 @@
+version: 1
+families:
+  pipe:
+    enabled: true
+entry: pto_vpto_pipe_init
+abi:
+  - type: ptr

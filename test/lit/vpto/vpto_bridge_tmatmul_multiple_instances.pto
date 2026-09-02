@@ -1,0 +1,45 @@
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" -pto-resolve-bridge-instances | FileCheck %s --check-prefix=INSTANCE
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" -pto-resolve-bridge-instances "-pto-emit-vpto-bridge-wrapper=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" | FileCheck %s --check-prefix=WRAP
+
+// INSTANCE-COUNT-1: pto.bridge_call "pto_vpto_tmatmul__0"
+// INSTANCE-COUNT-1: pto.bridge_call "pto_vpto_tmatmul__1"
+// WRAP: pto.vpto.bridge.wrapper_source
+// WRAP-SAME: void pto_vpto_tmatmul__0
+// WRAP-SAME: void pto_vpto_tmatmul__1
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" -pto-resolve-bridge-instances | FileCheck %s --check-prefix=INSTANCE
+
+module {
+  func.func @TMATMUL() attributes {pto.kernel} {
+    %c0 = arith.constant 0 : i64
+    %c512 = arith.constant 512 : i64
+    %c1024 = arith.constant 1024 : i64
+    %lhs = pto.alloc_tile addr = %c0
+      : !pto.tile_buf<loc=left, dtype=f16, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %rhs = pto.alloc_tile addr = %c512
+      : !pto.tile_buf<loc=right, dtype=f16, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c1024
+      : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tmatmul ins(%lhs, %rhs : !pto.tile_buf<loc=left, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=col_major, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+    return
+  }
+
+  func.func @TMATMUL_SECOND() attributes {pto.kernel} {
+    %c0 = arith.constant 0 : i64
+    %c512 = arith.constant 512 : i64
+    %c1024 = arith.constant 1024 : i64
+    %lhs = pto.alloc_tile addr = %c0
+      : !pto.tile_buf<loc=left, dtype=f32, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %rhs = pto.alloc_tile addr = %c512
+      : !pto.tile_buf<loc=right, dtype=f32, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %dst = pto.alloc_tile addr = %c1024
+      : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16,
+                      blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    pto.tmatmul ins(%lhs, %rhs : !pto.tile_buf<loc=left, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=col_major, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+    return
+  }
+}

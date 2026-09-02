@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software; you can redistribute it and/or modify it under the terms and conditions of
-// CANN Open Software License Agreement Version 2.0 (the "License"); you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// http://www.huawei.com/
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A
-// PARTICULAR PURPOSE.
-// See LICENSE in the root of the software repository for the full text of the License.
+// This program is free software; you can redistribute it and/or modify it under
+// the terms and conditions of CANN Open Software License Agreement Version 2.0
+// (the "License"); you may not use this file except in compliance with the
+// License. You may obtain a copy of the License at http://www.huawei.com/ THIS
+// SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+// EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+// MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE. See LICENSE in the root
+// of the software repository for the full text of the License.
 
 //===- VPTOBridgeTokens.cpp - C++ template token building ----------------===//
 //===----------------------------------------------------------------------===//
@@ -120,8 +120,8 @@ FailureOr<std::string> buildSLayoutToken(SLayout sLayout) {
 std::string renderTPipeSpelling(int32_t flagBase, llvm::StringRef dirTok,
                                 int32_t slotSize, int32_t slotNum,
                                 int32_t localSlotNum, bool nosplit) {
-  return (kBridgeQualifier + "TPipe<").str() + std::to_string(flagBase) +
-         ", " + dirTok.str() + ", " + std::to_string(slotSize) + ", " +
+  return (kBridgeQualifier + "TPipe<").str() + std::to_string(flagBase) + ", " +
+         dirTok.str() + ", " + std::to_string(slotSize) + ", " +
          std::to_string(slotNum) + ", " + std::to_string(localSlotNum) + ", " +
          (nosplit ? "true" : "false") + ">";
 }
@@ -150,8 +150,7 @@ std::string pto::buildBridgeElementTypeToken(Type elementType) {
   if (elementType.isF64())
     return "double";
   if (elementType.isInteger(8))
-    return (elementType.isSignlessInteger(8) ||
-            elementType.isSignedInteger(8))
+    return (elementType.isSignlessInteger(8) || elementType.isSignedInteger(8))
                ? "int8_t"
                : "uint8_t";
   if (elementType.isInteger(16))
@@ -165,8 +164,7 @@ std::string pto::buildBridgeElementTypeToken(Type elementType) {
                ? "int32_t"
                : "uint32_t";
   if (elementType.isInteger(64))
-    return cast<IntegerType>(elementType).isUnsigned() ? "uint64_t"
-                                                       : "int64_t";
+    return cast<IntegerType>(elementType).isUnsigned() ? "uint64_t" : "int64_t";
   return "float";
 }
 
@@ -183,9 +181,9 @@ FailureOr<std::string> pto::buildBridgePipeToken(InitializeL2LPipeOp init) {
   constexpr int32_t localSlotNum = 2;
   bool nosplit = init.getNosplitAttr() && init.getNosplitAttr().getValue();
 
-  return renderTPipeSpelling(
-      static_cast<int32_t>(flagBaseAttr.getInt()), *dirTok,
-      init.getSlotSize(), init.getSlotNum(), localSlotNum, nosplit);
+  return renderTPipeSpelling(static_cast<int32_t>(flagBaseAttr.getInt()),
+                             *dirTok, init.getSlotSize(), init.getSlotNum(),
+                             localSlotNum, nosplit);
 }
 
 FailureOr<std::string> pto::buildBridgeTileSplitToken(int64_t split) {
@@ -211,12 +209,12 @@ FailureOr<std::string> pto::buildBridgeTileToken(TileBufType tile) {
   if (failed(bLayoutTok))
     return failure();
 
-  std::string token =
-      "pto::Tile<" + *tileTypeTok + ", " +
-      buildBridgeElementTypeToken(tile.getElementType()) + ", " +
-      std::to_string(shape[0]) + ", " + std::to_string(shape[1]) + ", " +
-      *bLayoutTok + ", " + std::to_string(validShape[0]) + ", " +
-      std::to_string(validShape[1]);
+  std::string token = "pto::Tile<" + *tileTypeTok + ", " +
+                      buildBridgeElementTypeToken(tile.getElementType()) +
+                      ", " + std::to_string(shape[0]) + ", " +
+                      std::to_string(shape[1]) + ", " + *bLayoutTok + ", " +
+                      std::to_string(validShape[0]) + ", " +
+                      std::to_string(validShape[1]);
 
   // Boxed storage layouts carry the inner-fractal template arguments; the
   // default NoneBox layout relies on the Tile template defaults, matching the
@@ -226,8 +224,8 @@ FailureOr<std::string> pto::buildBridgeTileToken(TileBufType tile) {
     auto sLayoutTok = buildSLayoutToken(static_cast<SLayout>(sLayoutValue));
     if (failed(sLayoutTok))
       return failure();
-    token += ", " + *sLayoutTok + ", " +
-             std::to_string(tile.getSFractalSizeI32());
+    token +=
+        ", " + *sLayoutTok + ", " + std::to_string(tile.getSFractalSizeI32());
   }
   token += ">";
   return token;

@@ -1,10 +1,12 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-// CANN Open Software License Agreement Version 2.0 (the "License").
-// Please refer to the License for details. You may not use this file except in compliance with the License.
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-// See LICENSE in the root of the software repository for the full text of the License.
+// This program is free software, you can redistribute it and/or modify it under
+// the terms and conditions of CANN Open Software License Agreement Version 2.0
+// (the "License"). Please refer to the License for details. You may not use
+// this file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON
+// AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS
+// FOR A PARTICULAR PURPOSE. See LICENSE in the root of the software repository
+// for the full text of the License.
 
 //===- PTOLowerPipeFamilyOps.cpp - TPipe family bridge lowering ----------===//
 //===----------------------------------------------------------------------===//
@@ -28,7 +30,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PTO/IR/PTO.h"
-#include "PTO/Transforms/VPTOBridgeSpecCollector.h"
+#include "PTO/Transforms/VPTOBridgeRegistry.h"
 #include "PTO/Transforms/VPTOBridgeTokens.h"
 #include "PTO/Transforms/VPTOBridgeWhitelist.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -49,11 +51,14 @@ namespace {
 
 /// Emits a bridge call with no results and no synthesized storage.
 static BridgeCallOp emitVoidBridgeCall(OpBuilder &builder, Location loc,
-                                       llvm::StringRef callee,
+                                       BridgeEntryId entryId,
+                                       DictionaryAttr specialization,
                                        ValueRange args) {
+  const BridgeFunctionDesc *entry = lookupBridgeEntry(entryId);
   return builder.create<BridgeCallOp>(
-      loc, /*results=*/TypeRange{}, /*callee=*/callee,
-      /*storage_size_callee=*/nullptr, /*args=*/args);
+      loc, TypeRange{}, entry->symbol,
+      builder.getStringAttr(getBridgeEntryName(entryId)), nullptr,
+      specialization, args);
 }
 
 /// Returns the address value a tile_buf_addr operand resolves to, or nullptr
@@ -83,9 +88,6 @@ struct PTOLowerPipeFamilyOpsPass final
     func::FuncOp func = getOperation();
     OpBuilder builder(func);
     bool hadError = false;
-    // Wrapper specialization fields collected while lowering this function;
-    // merged into the module bridge spec attribute once lowering succeeds.
-    BridgeSpecCollector spec;
 
     // Collect first; rewriting during the walk would invalidate the walker.
     SmallVector<InitializeL2LPipeOp> inits;
@@ -121,48 +123,55 @@ struct PTOLowerPipeFamilyOpsPass final
       return;
     }
 
-    // The whitelist always resolves through the formal chain (pass option,
-    // PTOAS_VPTO_BRIDGE_WHITELIST, built-in default), so routing is
-    // guaranteed; `whitelistName` is only for diagnostics.
-    std::string whitelistName;
-    FailureOr<BridgeWhitelist> whitelistOr =
-        loadBridgeWhitelist(whitelistPath, llvm::errs(), &whitelistName);
-    if (failed(whitelistOr)) {
+    std::string policyName;
+    FailureOr<BridgeRoutePolicy> policy =
+        loadBridgeRoutePolicy(whitelistPath, llvm::errs(), &policyName);
+    if (failed(policy)) {
       signalPassFailure();
       return;
     }
-    const BridgeWhitelist &whitelist = *whitelistOr;
-
-    // Resolves the whitelist entry routing `op`, or nullptr after emitting
-    // a diagnostic. Pipe ops have no non-bridge VPTO lowering, so a missing
-    // routing entry is a hard error rather than a silent fallback.
-    auto routeOp = [&](Operation *op) -> const BridgeWhitelistEntry * {
-      StringRef opName = op->getName().getStringRef();
-      const BridgeWhitelistEntry *entry = whitelist.findOp(opName);
-      if (!entry) {
+    if (!policy->families.pipe.enabled) {
+      return;
+    }
+    auto requireEntry = [&](Operation *op) -> const BridgeFunctionDesc * {
+      const BridgeFunctionDesc *entry =
+          lookupBridgeEntryForOp(op->getName().getStringRef());
+      if (!entry || entry->family != BridgeFamily::Pipe) {
         op->emitError()
-            << "VPTO pipe bridge: '" << opName
-            << "' is not routed in the bridge whitelist '" << whitelistName
-            << "'";
+            << "VPTO Pipe bridge has no registered handler; policy: '"
+            << policyName << "'";
         hadError = true;
       }
       return entry;
+    };
+
+    DictionaryAttr pipeConfig;
+    DictionaryAttr producerSpec;
+    DictionaryAttr consumerSpec;
+    IntegerAttr splitSpec;
+    auto buildCallSpec = [&](OpBuilder &at) -> DictionaryAttr {
+      SmallVector<NamedAttribute> fields;
+      if (pipeConfig) {
+        fields.push_back(at.getNamedAttr("pipe", pipeConfig));
+      }
+      if (producerSpec) {
+        fields.push_back(at.getNamedAttr("producer", producerSpec));
+      }
+      if (consumerSpec) {
+        fields.push_back(at.getNamedAttr("consumer", consumerSpec));
+      }
+      if (splitSpec) {
+        fields.push_back(at.getNamedAttr("split", splitSpec));
+      }
+      return DictionaryAttr::get(at.getContext(), fields);
     };
 
     // Phase 1: initialize_l2l_pipe -> storage-producing bridge init call.
     // The SSA pipe value becomes the bridge call result (the storage handle);
     // push/pop/free below consume that same value.
     for (InitializeL2LPipeOp init : inits) {
-      const BridgeWhitelistEntry *entry = routeOp(init);
+      const BridgeFunctionDesc *entry = requireEntry(init);
       if (!entry) {
-        continue;
-      }
-      if (entry->storageSizeEntry.empty()) {
-        init.emitError()
-            << "VPTO pipe bridge: whitelist entry '" << entry->entry
-            << "' must declare a storage_size_entry for the stateful pipe "
-               "storage";
-        hadError = true;
         continue;
       }
       if (!isSupportedPipeCapability(init)) {
@@ -181,20 +190,25 @@ struct PTOLowerPipeFamilyOpsPass final
         hadError = true;
         continue;
       }
-      spec.addUniqueField(init, kBridgeSpecPipeKey, *pipeTokOr);
-      spec.addUniqueField(init, kBridgeSpecEntryInitKey, entry->entry);
-      spec.addUniqueField(init, kBridgeSpecEntrySizeKey,
-                          entry->storageSizeEntry);
+      pipeConfig = DictionaryAttr::get(
+          builder.getContext(),
+          {builder.getNamedAttr("flag_base", init.getFlagBaseAttr()),
+           builder.getNamedAttr("direction", init.getDirMaskAttr()),
+           builder.getNamedAttr("slot_size", init.getSlotSizeAttr()),
+           builder.getNamedAttr("slot_num", init.getSlotNumAttr()),
+           builder.getNamedAttr("local_slot_num", builder.getI32IntegerAttr(2)),
+           builder.getNamedAttr("nosplit",
+                                init.getNosplitAttr()
+                                    ? Attribute(init.getNosplitAttr())
+                                    : Attribute(builder.getBoolAttr(false)))});
       builder.setInsertionPoint(init);
-      BridgeCallOp call = builder.create<BridgeCallOp>(
-          init.getLoc(), /*results=*/TypeRange{init.getPipe().getType()},
-          /*callee=*/entry->entry,
-          /*storage_size_callee=*/
-          builder.getStringAttr(entry->storageSizeEntry),
-          /*args=*/ValueRange{init.getLocalAddr()});
+      BridgeObjectCreateOp call = builder.create<BridgeObjectCreateOp>(
+          init.getLoc(), init.getPipe().getType(),
+          getBridgeEntryName(BridgeEntryId::PipeInit), nullptr,
+          buildCallSpec(builder), ValueRange{init.getLocalAddr()});
       // The bridge call result becomes the storage handle: push/pop/free
       // consume the same SSA value instead of the erased pipe op.
-      init.getPipe().replaceAllUsesWith(call.getResults().front());
+      init.getPipe().replaceAllUsesWith(call.getObject());
       init.erase();
     }
 
@@ -225,13 +239,13 @@ struct PTOLowerPipeFamilyOpsPass final
           hadError = true;
           return false;
         }
-        spec.addUniqueField(op, kBridgeSpecSplitKey, *splitTokOr);
+        splitSpec = builder.getI64IntegerAttr(split);
         bridgedSplit = split;
       }
       return true;
     };
     for (TPopOp pop : pops) {
-      const BridgeWhitelistEntry *entry = routeOp(pop);
+      const BridgeFunctionDesc *entry = requireEntry(pop);
       if (!entry) {
         continue;
       }
@@ -258,12 +272,16 @@ struct PTOLowerPipeFamilyOpsPass final
       if (!checkSplitConsistency(pop, pop.getSplit(), "TPOP")) {
         continue;
       }
-      spec.addUniqueField(pop, kBridgeSpecConsumerTileKey, *consumerTokOr);
-      spec.addUniqueField(pop, kBridgeSpecEntryPopKey, entry->entry);
+      consumerSpec = DictionaryAttr::get(
+          builder.getContext(),
+          {builder.getNamedAttr("tile", TypeAttr::get(consumerTileTy))});
       builder.setInsertionPoint(pop);
       BridgeCallOp call = builder.create<BridgeCallOp>(
           pop.getLoc(), /*results=*/TypeRange{builder.getI64Type()},
-          /*callee=*/entry->entry, /*storage_size_callee=*/nullptr,
+          /*callee=*/entry->symbol,
+          /*entry_id=*/builder.getStringAttr("pipe.pop"),
+          /*instance_id=*/nullptr,
+          /*specialization=*/buildCallSpec(builder),
           /*args=*/ValueRange{pop.getPipeHandle()});
       popAddresses[pop.getTile()] = call.getResults().front();
       pop.erase();
@@ -288,7 +306,7 @@ struct PTOLowerPipeFamilyOpsPass final
 
     // Phase 4: tpush -> bridge push call on the planned alloc_tile address.
     for (TPushOp push : pushes) {
-      const BridgeWhitelistEntry *entry = routeOp(push);
+      const BridgeFunctionDesc *entry = requireEntry(push);
       if (!entry) {
         continue;
       }
@@ -315,17 +333,19 @@ struct PTOLowerPipeFamilyOpsPass final
       if (!checkSplitConsistency(push, push.getSplit(), "TPUSH")) {
         continue;
       }
-      spec.addUniqueField(push, kBridgeSpecProducerTileKey, *producerTokOr);
-      spec.addUniqueField(push, kBridgeSpecEntryPushKey, entry->entry);
+      producerSpec = DictionaryAttr::get(
+          builder.getContext(),
+          {builder.getNamedAttr("tile", TypeAttr::get(producerTileTy))});
       builder.setInsertionPoint(push);
-      emitVoidBridgeCall(builder, push.getLoc(), entry->entry,
+      emitVoidBridgeCall(builder, push.getLoc(), BridgeEntryId::PipePush,
+                         buildCallSpec(builder),
                          ValueRange{push.getPipeHandle(), alloc.getAddr()});
       push.erase();
     }
 
     // Phase 5: tfree -> bridge free call.
     for (TFreeOp free : frees) {
-      const BridgeWhitelistEntry *entry = routeOp(free);
+      const BridgeFunctionDesc *entry = requireEntry(free);
       if (!entry) {
         continue;
       }
@@ -338,9 +358,9 @@ struct PTOLowerPipeFamilyOpsPass final
       if (!checkSplitConsistency(free, free.getSplit(), "TFREE")) {
         continue;
       }
-      spec.addUniqueField(free, kBridgeSpecEntryFreeKey, entry->entry);
       builder.setInsertionPoint(free);
-      emitVoidBridgeCall(builder, free.getLoc(), entry->entry,
+      emitVoidBridgeCall(builder, free.getLoc(), BridgeEntryId::PipeFree,
+                         buildCallSpec(builder),
                          ValueRange{free.getPipeHandle()});
       free.erase();
     }
@@ -365,15 +385,7 @@ struct PTOLowerPipeFamilyOpsPass final
       decl.erase();
     }
 
-    // Store the per-function specialization on the function itself; the
-    // module-level wrapper generation pass merges the per-function specs
-    // deterministically. The family pass instances may run concurrently,
-    // so they must not write the shared module attribute directly.
-    if (!hadError && !spec.hadError()) {
-      spec.store(func);
-    }
-
-    if (hadError || spec.hadError()) {
+    if (hadError) {
       signalPassFailure();
     }
   }

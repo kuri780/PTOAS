@@ -1,0 +1,23 @@
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" -pto-resolve-bridge-instances | FileCheck %s
+// CHECK: pto.bridge_call "pto_vpto_tmatmul_mx__0" {entry_id = "cube.tmatmul.mx"} {instance_id = 0}
+// CHECK-SAME: : i64, i64, i64, i64, i64
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" -pto-resolve-bridge-instances "-pto-emit-vpto-bridge-wrapper=whitelist-path=%S/Inputs/vpto-bridge-tmatmul-route.yaml" | FileCheck %s --check-prefix=WRAP
+// WRAP: pto.vpto.bridge.wrapper_source
+// WRAP-SAME: pto_vpto_tmatmul_mx__0
+// WRAP-SAME: pto::TMATMUL_MX
+module attributes {pto.target_arch = "a5"} {
+  func.func @TMATMUL_MX() attributes {pto.kernel} {
+    %c0 = arith.constant 0 : i64
+    %c1 = arith.constant 512 : i64
+    %c2 = arith.constant 1024 : i64
+    %c3 = arith.constant 1536 : i64
+    %c4 = arith.constant 2048 : i64
+    %a = pto.alloc_tile addr = %c0 : !pto.tile_buf<loc=left, dtype=f8E4M3FN, rows=16, cols=512, v_row=16, v_col=512, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %as = pto.alloc_tile addr = %c1 : !pto.tile_buf<loc=scaling, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=row_major, fractal=32, pad=0>
+    %b = pto.alloc_tile addr = %c2 : !pto.tile_buf<loc=right, dtype=f8E4M3FN, rows=512, cols=16, v_row=512, v_col=16, blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %bs = pto.alloc_tile addr = %c3 : !pto.tile_buf<loc=scaling, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=col_major, fractal=32, pad=0>
+    %dst = pto.alloc_tile addr = %c4 : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tmatmul.mx ins(%a, %as, %b, %bs : !pto.tile_buf<loc=left, dtype=f8E4M3FN, rows=16, cols=512, v_row=16, v_col=512, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=scaling, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=row_major, fractal=32, pad=0>, !pto.tile_buf<loc=right, dtype=f8E4M3FN, rows=512, cols=16, v_row=512, v_col=16, blayout=row_major, slayout=col_major, fractal=512, pad=0>, !pto.tile_buf<loc=scaling, dtype=f16, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=col_major, fractal=32, pad=0>) outs(%dst : !pto.tile_buf<loc=acc, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+    return
+  }
+}

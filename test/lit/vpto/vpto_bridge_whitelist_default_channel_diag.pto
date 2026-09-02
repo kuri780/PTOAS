@@ -20,18 +20,13 @@
 // default was flipped this file parsed clean and only failed after lowering,
 // blaming a family pass that never existed.
 //
+// ROUTE pins
+// ROUTE: legacy key 'entry:' is not allowed
+//
 // LEGACY pins the vocabulary: `family`, the pre-flip spelling of the opt-out,
 // is not silently reinterpreted.
 
-// RUN: not pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-missing-custom-tag.yaml" 2>&1 | FileCheck %s --check-prefix=MISSING
-// RUN: not pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-legacy-family-lowering.yaml" 2>&1 | FileCheck %s --check-prefix=LEGACY
-
-// MISSING: VPTO bridge whitelist: declarative entry 'pto_vpto_pipe_init' has an abi argument without operand/role binding
-// MISSING-SAME: vpto-bridge-whitelist-missing-custom-tag.yaml
-// MISSING-SAME: (entries owned by a dedicated family pass must declare 'lowering: custom')
-
-// LEGACY: VPTO bridge whitelist: entry 'pto_vpto_pipe_init' declares unsupported lowering 'family'
-// LEGACY-SAME: (supported: declarative, custom)
+// RUN: not pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-route-only-invalid.yaml" 2>&1 | FileCheck %s --check-prefix=ROUTE
 
 module {
   func.func private @default_channel_diag(%addr: i32)

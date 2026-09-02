@@ -9,18 +9,18 @@
 // PARTICULAR PURPOSE.
 // See LICENSE for more details.
 
-// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist.yaml" | FileCheck %s --check-prefix=FAMILY
-// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist.yaml" "-vpto-bridge-lowering=whitelist-path=%S/Inputs/vpto-bridge-whitelist.yaml" | FileCheck %s --check-prefix=LOWER
+// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" | FileCheck %s --check-prefix=FAMILY
+// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" "-vpto-bridge-lowering=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" | FileCheck %s --check-prefix=LOWER
 
 // FAMILY-LABEL: func.func private @bridge_cube
-// FAMILY: pto.bridge_call "pto_vpto_pipe_init"{{.*}}storage_size_callee = "pto_vpto_pipe_size"
+// FAMILY: pto.bridge_object_create "pipe.init"
 // FAMILY-SAME: -> !pto.pipe
 // FAMILY: pto.bridge_call "pto_vpto_pipe_push"
 // FAMILY-NOT: pto.alloc_tile
 // FAMILY-NOT: pto.tpush
 
 // FAMILY-LABEL: func.func private @bridge_vector
-// FAMILY: pto.bridge_call "pto_vpto_pipe_init"
+// FAMILY: pto.bridge_object_create "pipe.init"
 // FAMILY: pto.bridge_call "pto_vpto_pipe_pop"
 // FAMILY-SAME: -> i64
 // FAMILY: pto.bridge_inttoptr

@@ -529,6 +529,12 @@ def VPTOBridgeWrapperGen : Pass<"pto-emit-vpto-bridge-wrapper", "ModuleOp"> {
   ];
 }
 
+def VPTOResolveBridgeInstances : Pass<"pto-resolve-bridge-instances", "ModuleOp"> {
+  let summary = "Resolve logical bridge entries into specialization instances";
+  let constructor = "mlir::pto::createVPTOResolveBridgeInstancesPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def VPTOSplitCVModule : Pass<"vpto-split-cv-module", "ModuleOp"> {
   let summary = "Split a VPTO module with cube/vector sections into kernel modules";
   let description = [{

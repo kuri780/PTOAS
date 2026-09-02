@@ -1,0 +1,7 @@
+version: 1
+families:
+  pipe:
+    enabled: false
+  cube:
+    enabled_ops:
+      - pto.tmatmul

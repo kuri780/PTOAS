@@ -16,7 +16,7 @@
 // checked here against the empty-routing and the pipe-family whitelists.
 
 // RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-no-routing.yaml" | FileCheck %s --check-prefix=NOROUTE
-// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-variant.yaml" | FileCheck %s --check-prefix=FAMILY
+// RUN: pto-test-opt %s "-pto-lower-declarative-bridge-ops=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" | FileCheck %s --check-prefix=FAMILY
 
 // NOROUTE-LABEL: func.func private @unrouted_matmul_cube
 // NOROUTE: pto.tmatmul

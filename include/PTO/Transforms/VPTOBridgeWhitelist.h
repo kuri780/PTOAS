@@ -1,12 +1,15 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-// CANN Open Software License Agreement Version 2.0 (the "License").
-// Please refer to the License for details. You may not use this file except in compliance with the License.
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-// See LICENSE in the root of the software repository for the full text of the License.
+// This program is free software, you can redistribute it and/or modify it under
+// the terms and conditions of CANN Open Software License Agreement Version 2.0
+// (the "License"). Please refer to the License for details. You may not use
+// this file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON
+// AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS
+// FOR A PARTICULAR PURPOSE. See LICENSE in the root of the software repository
+// for the full text of the License.
 
-//===- VPTOBridgeWhitelist.h - C++ bridge whitelist --------------*- C++ -*-===//
+//===- VPTOBridgeWhitelist.h - C++ bridge whitelist --------------*- C++
+//-*-===//
 //===----------------------------------------------------------------------===//
 //
 // Declarative description of which IR ops are routed to the VPTO C++
@@ -28,6 +31,27 @@
 namespace mlir {
 namespace pto {
 
+/// External route-only policy. ABI and wrapper semantics are never parsed
+/// from this document; the legacy internal structs below are compiler-owned
+/// implementation records until all renderers consume the typed registry.
+struct BridgePipeRoutePolicy {
+  bool enabled = false;
+};
+struct BridgeCubeRoutePolicy {
+  std::vector<std::string> enabledOps;
+};
+struct BridgeRouteFamilies {
+  BridgePipeRoutePolicy pipe;
+  BridgeCubeRoutePolicy cube;
+};
+struct BridgeRoutePolicy {
+  int64_t version = 1;
+  BridgeRouteFamilies families;
+};
+
+/// Legacy compiler-owned ABI record retained only for compatibility with the
+/// generic renderer. Route policy files never populate this type. The typed
+/// registry is authoritative for ABI and lowering.
 /// ABI argument of a wrapper entry. `type` is one of the supported carrier
 /// tokens: "ptr", "i64", or "i32" (declarative entries may omit it, the
 /// parser fills in the "i64" tile-address default). Declarative entries
@@ -63,8 +87,9 @@ struct BridgeTmplMapField {
   std::string omitValue;
 };
 
-/// One whitelist row: an IR op routed to a wrapper entry of a bridged
-/// PTO-ISA C++ interface.
+/// Compiler-owned compatibility record used by the legacy renderer. New route
+/// policy input is expanded from the typed registry and cannot override any
+/// of these fields.
 struct BridgeWhitelistEntry {
   /// IR op name, e.g. "pto.tpush". The whitelist is the routing table the
   /// family passes consult; "internal" marks wrapper-internal helpers
@@ -211,6 +236,13 @@ struct BridgeWhitelist {
 /// tokens, and dangling storage_size_entry references.
 FailureOr<BridgeWhitelist> parseBridgeWhitelist(llvm::StringRef path,
                                                 llvm::raw_ostream &diagOS);
+FailureOr<BridgeRoutePolicy>
+parseBridgeRoutePolicyFromBuffer(llvm::StringRef content,
+                                 llvm::StringRef sourceName,
+                                 llvm::raw_ostream &diagOS);
+FailureOr<BridgeRoutePolicy>
+loadBridgeRoutePolicy(llvm::StringRef optionValue, llvm::raw_ostream &diagOS,
+                      std::string *sourceName = nullptr);
 
 /// Parses a whitelist YAML document already in memory; `sourceName` is used
 /// in diagnostics (e.g. a file path or the built-in whitelist marker).
@@ -235,9 +267,9 @@ constexpr llvm::StringLiteral kBuiltinBridgeWhitelistSource =
 /// Always returns a parsed whitelist unless the explicitly configured file
 /// fails to parse. When `sourceName` is non-null it receives the resolved
 /// source name (file path or the built-in marker) for diagnostics.
-FailureOr<BridgeWhitelist> loadBridgeWhitelist(llvm::StringRef optionValue,
-                                               llvm::raw_ostream &diagOS,
-                                               std::string *sourceName = nullptr);
+FailureOr<BridgeWhitelist>
+loadBridgeWhitelist(llvm::StringRef optionValue, llvm::raw_ostream &diagOS,
+                    std::string *sourceName = nullptr);
 
 /// Returns whether `token` is one of the ABI carrier tokens accepted by the
 /// generic bridge lowering ("ptr", "i64", "i32"). The set stays closed so

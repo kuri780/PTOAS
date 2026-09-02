@@ -1,10 +1,12 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-// CANN Open Software License Agreement Version 2.0 (the "License").
-// Please refer to the License for details. You may not use this file except in compliance with the License.
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-// See LICENSE in the root of the software repository for the full text of the License.
+// This program is free software, you can redistribute it and/or modify it under
+// the terms and conditions of CANN Open Software License Agreement Version 2.0
+// (the "License"). Please refer to the License for details. You may not use
+// this file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON
+// AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS
+// FOR A PARTICULAR PURPOSE. See LICENSE in the root of the software repository
+// for the full text of the License.
 
 //===- VPTOBridgeLowering.cpp - generic C++ interface bridge lowering ----===//
 //===----------------------------------------------------------------------===//
@@ -13,10 +15,8 @@
 // nothing about individual PTO-ISA interface families: it validates each
 // pto.bridge_call against the bridge whitelist and mechanically lowers it
 // into a call to the wrapper entry, materializing the wrapper declaration
-// at module level. Entries that carry `storage_size_callee` additionally
-// synthesize the stateful-object pattern (size query + stack storage) so
-// family passes can express "construct a template object on the kernel
-// stack" without emitting LLVM dialect ops themselves.
+// at module level. Stateful object creation is represented explicitly by bridge_object_create and
+// resolved through the registry size-entry relation.
 //
 // The whitelist is also the routing check of last resort: any op still
 // present in the IR that the whitelist routes to a wrapper entry was
@@ -26,6 +26,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PTO/IR/PTO.h"
+#include "PTO/Transforms/VPTOBridgeRegistry.h"
 #include "PTO/Transforms/VPTOBridgeWhitelist.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -83,7 +84,6 @@ private:
 };
 
 struct BridgeLoweringState {
-  const BridgeWhitelist &whitelist;
   llvm::StringSet<> declaredEntries;
 };
 
@@ -104,23 +104,33 @@ static void ensureWrapperDecl(ModuleOp module, BridgeLoweringState &state,
   decl.setPrivate();
 }
 
-/// Validates the fully assembled call argument list against the whitelist
-/// ABI. Emits a diagnostic and returns failure on any mismatch.
-static LogicalResult validateAbi(Operation *op, const BridgeWhitelistEntry &entry,
-                                 ValueRange callArgs) {
-  if (callArgs.size() != entry.abi.size()) {
-    return op->emitError()
-           << "VPTO bridge call to '" << entry.entry << "' passes "
-           << callArgs.size() << " argument(s), whitelist ABI declares "
-           << entry.abi.size();
+static LogicalResult validateRegistryAbi(Operation *op,
+                                         const BridgeFunctionDesc &desc,
+                                         ValueRange callArgs) {
+  if (callArgs.size() != desc.arguments.size()) {
+    op->emitError() << "VPTO bridge registry entry '" << desc.symbol
+                    << "' expects " << desc.arguments.size()
+                    << " argument(s), got " << callArgs.size();
+    return failure();
   }
   for (auto [index, arg] : llvm::enumerate(callArgs)) {
-    const BridgeAbiArg &abiArg = entry.abi[index];
-    if (!bridgeAbiTypeMatches(abiArg.type, arg.getType())) {
-      return op->emitError()
-             << "VPTO bridge call to '" << entry.entry << "' argument #"
-             << index << " has type " << arg.getType()
-             << ", whitelist ABI declares '" << abiArg.type << "'";
+    if (index >= desc.arguments.size()) {
+      return failure();
+    }
+    BridgeValueKind kind = desc.arguments[index];
+    if (!bridgeValueKindMatches(kind, arg.getType())) {
+      op->emitError() << "VPTO bridge registry entry '" << desc.symbol
+                      << "' argument #" << index << " has type "
+                      << arg.getType();
+      return failure();
+    }
+  }
+  for (auto [index, resultType] : llvm::enumerate(desc.results)) {
+    if (index >= op->getNumResults() ||
+        !bridgeValueKindMatches(resultType, op->getResult(index).getType())) {
+      op->emitError() << "VPTO bridge registry entry '" << desc.symbol
+                      << "' has an incompatible result #" << index;
+      return failure();
     }
   }
   return success();
@@ -137,47 +147,25 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     StringRef callee = op.getCalleeAttr().getValue();
-    const BridgeWhitelistEntry *entry = state.whitelist.findEntry(callee);
-    if (!entry) {
+    auto entryId = op.getEntryId();
+    if (!entryId) {
+      return op.emitError("VPTO bridge call requires a logical entry_id");
+    }
+    const BridgeFunctionDesc *registryEntry =
+        lookupBridgeEntryForName(*entryId);
+    if (!registryEntry) {
       return op.emitError()
-             << "VPTO bridge call to wrapper entry '" << callee
-             << "' is not declared in the bridge whitelist";
+             << "VPTO bridge call uses unknown entry_id '" << *entryId << "'";
+    }
+    if (callee.empty()) {
+      return op.emitError(
+          "VPTO bridge call must be resolved to a concrete instance symbol");
     }
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    ValueRange operands = adaptor.getArgs();
+    SmallVector<Value> callArgs(adaptor.getArgs().begin(),
+                                adaptor.getArgs().end());
 
-    // Stateful entries synthesize their own storage: query the wrapper for
-    // the object size and alloca it on the kernel stack. The storage value
-    // replaces the bridge call result, which must be the only result.
-    bool hasStorage = op.getStorageSizeCalleeAttr() != nullptr;
-    SmallVector<Value> callArgs;
-    Value storage;
-    if (hasStorage) {
-      if (op.getNumResults() != 1) {
-        return op.emitError()
-               << "VPTO bridge call with storage_size_callee must have "
-                  "exactly one result (the storage handle)";
-      }
-      StringRef sizeCallee = op.getStorageSizeCalleeAttr().getValue();
-      if (!state.whitelist.findEntry(sizeCallee)) {
-        return op.emitError()
-               << "VPTO bridge storage size callee '" << sizeCallee
-               << "' is not declared in the bridge whitelist";
-      }
-      Value size = rewriter.create<func::CallOp>(loc, sizeCallee,
-                                                 rewriter.getI64Type(),
-                                                 ValueRange{})
-                       .getResult(0);
-      ensureWrapperDecl(module, state, rewriter, sizeCallee, /*argTypes=*/{},
-                        /*resultTypes=*/{rewriter.getI64Type()});
-      storage = rewriter.create<LLVM::AllocaOp>(
-          loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-          rewriter.getI8Type(), size, /*alignment=*/8);
-      callArgs.push_back(storage);
-    }
-    callArgs.append(operands.begin(), operands.end());
-
-    if (failed(validateAbi(op, *entry, callArgs))) {
+    if (failed(validateRegistryAbi(op, *registryEntry, callArgs))) {
       return failure();
     }
 
@@ -185,9 +173,8 @@ public:
     for (Type resultType : op.getResultTypes()) {
       Type converted = getTypeConverter()->convertType(resultType);
       if (!converted) {
-        return op.emitError()
-               << "VPTO bridge call result type " << resultType
-               << " has no bridge conversion";
+        return op.emitError() << "VPTO bridge call result type " << resultType
+                              << " has no bridge conversion";
       }
       resultTypes.push_back(converted);
     }
@@ -195,19 +182,65 @@ public:
     func::CallOp call = rewriter.create<func::CallOp>(
         loc, callee, TypeRange(resultTypes), ValueRange(callArgs));
     ensureWrapperDecl(module, state, rewriter, callee,
-                      llvm::map_to_vector<4>(callArgs,
-                                             [](Value arg) { return arg.getType(); }),
+                      llvm::map_to_vector<4>(
+                          callArgs, [](Value arg) { return arg.getType(); }),
                       TypeRange(resultTypes));
 
-    if (hasStorage) {
-      rewriter.replaceOp(op, storage);
-      return success();
-    }
     if (call.getNumResults() == 0) {
       rewriter.eraseOp(op);
       return success();
     }
     rewriter.replaceOp(op, call.getResults());
+    return success();
+  }
+
+private:
+  BridgeLoweringState &state;
+};
+
+class LowerBridgeObjectCreatePattern final
+    : public OpConversionPattern<BridgeObjectCreateOp> {
+public:
+  LowerBridgeObjectCreatePattern(TypeConverter &converter, MLIRContext *context,
+                                 BridgeLoweringState &state)
+      : OpConversionPattern<BridgeObjectCreateOp>(converter, context),
+        state(state) {}
+
+  LogicalResult
+  matchAndRewrite(BridgeObjectCreateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    const BridgeFunctionDesc *desc =
+        lookupBridgeEntryForName(op.getEntryAttr().getValue());
+    if (!desc || !desc->stateful || !desc->storageSizeEntry) {
+      return op.emitError(
+          "bridge object create requires a registered stateful entry");
+    }
+    const BridgeFunctionDesc *sizeDesc =
+        lookupBridgeEntry(*desc->storageSizeEntry);
+    if (!op.getInstanceId()) {
+      return op.emitError("bridge object create must be instance-resolved");
+    }
+    int64_t instanceId = *op.getInstanceId();
+    std::string initSymbol = getBridgeInstanceSymbol(desc->id, instanceId);
+    std::string sizeSymbol = getBridgeInstanceSymbol(sizeDesc->id, instanceId);
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Value size = rewriter
+                     .create<func::CallOp>(op.getLoc(), sizeSymbol,
+                                           rewriter.getI64Type(), ValueRange{})
+                     .getResult(0);
+    ensureWrapperDecl(module, state, rewriter, sizeSymbol, {},
+                      {rewriter.getI64Type()});
+    Value storage = rewriter.create<LLVM::AllocaOp>(
+        op.getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()),
+        rewriter.getI8Type(), size, 8);
+    SmallVector<Value> args{storage};
+    args.append(adaptor.getArgs().begin(), adaptor.getArgs().end());
+    rewriter.create<func::CallOp>(op.getLoc(), initSymbol, TypeRange{}, args);
+    ensureWrapperDecl(module, state, rewriter, initSymbol,
+                      llvm::map_to_vector<4>(
+                          args, [](Value value) { return value.getType(); }),
+                      {});
+    rewriter.replaceOp(op, storage);
     return success();
   }
 
@@ -224,7 +257,8 @@ public:
   LogicalResult
   matchAndRewrite(BridgeIntToPtrOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Type convertedResult = getTypeConverter()->convertType(op.getResult().getType());
+    Type convertedResult =
+        getTypeConverter()->convertType(op.getResult().getType());
     if (!convertedResult || !isa<LLVM::LLVMPointerType>(convertedResult)) {
       return op.emitError()
              << "VPTO bridge inttoptr requires a result type that converts "
@@ -245,7 +279,7 @@ struct VPTOBridgeLoweringPass final
     ModuleOp module = getOperation();
     bool hasBridgeOps = false;
     module.walk([&](Operation *op) {
-      if (isa<BridgeCallOp, BridgeIntToPtrOp>(op)) {
+      if (isa<BridgeCallOp, BridgeObjectCreateOp, BridgeIntToPtrOp>(op)) {
         hasBridgeOps = true;
       }
     });
@@ -254,40 +288,28 @@ struct VPTOBridgeLoweringPass final
     // PTOAS_VPTO_BRIDGE_WHITELIST, built-in default), so this pass always
     // validates; `whitelistName` is only for diagnostics.
     std::string whitelistName;
-    FailureOr<BridgeWhitelist> whitelistOr =
-        loadBridgeWhitelist(whitelistPath, llvm::errs(), &whitelistName);
-    if (failed(whitelistOr)) {
+    FailureOr<BridgeRoutePolicy> policyOr =
+        loadBridgeRoutePolicy(whitelistPath, llvm::errs(), &whitelistName);
+    if (failed(policyOr)) {
       signalPassFailure();
       return;
     }
-    BridgeWhitelist whitelist = std::move(*whitelistOr);
-
-    // Routing check: an op the whitelist routes to a wrapper entry must
-    // have been rewritten into bridge ops by the pass owning its lowering
-    // channel. Leftovers mean that pass was skipped or missed the op;
-    // reject them here instead of letting them flow into the regular
-    // emission path. The diagnostic names the channel so the reader knows
-    // which pass to look at.
-    llvm::StringMap<const BridgeWhitelistEntry *> routedOps;
-    for (const BridgeWhitelistEntry &entry : whitelist.bridgeOps) {
-      if (entry.op != BridgeWhitelist::kInternalOp) {
-        routedOps[entry.op] = &entry;
-      }
-    }
     bool leftoversFound = false;
     module.walk([&](Operation *op) {
-      auto it = routedOps.find(op->getName().getStringRef());
-      if (it == routedOps.end()) {
+      StringRef opName = op->getName().getStringRef();
+      const BridgeFunctionDesc *entry = lookupBridgeEntryForOp(opName);
+      bool routed =
+          entry && (entry->family == BridgeFamily::Pipe
+                        ? policyOr->families.pipe.enabled
+                        : llvm::is_contained(policyOr->families.cube.enabledOps,
+                                             opName));
+      if (!routed) {
         return;
       }
-      op->emitError()
-          << "VPTO bridge: '" << it->first()
-          << "' is routed to wrapper entry '" << it->second->entry
-          << "' by the bridge whitelist '" << whitelistName
-          << "' but was not lowered into a pto.bridge_call by "
-          << (it->second->isDeclarative()
-                  ? "the declarative bridge lowering"
-                  : "its family pass");
+      op->emitError() << "VPTO bridge: routed operation '" << opName
+                      << "' was not lowered by its typed family pattern; "
+                         "policy source: '"
+                      << whitelistName << "'";
       leftoversFound = true;
     });
     if (leftoversFound) {
@@ -301,16 +323,17 @@ struct VPTOBridgeLoweringPass final
 
     BridgeTypeConverter converter(&getContext());
     ConversionTarget target(getContext());
-    target.addIllegalOp<BridgeCallOp, BridgeIntToPtrOp>();
+    target.addIllegalOp<BridgeCallOp, BridgeObjectCreateOp, BridgeIntToPtrOp>();
     // Everything the patterns create (func.call, llvm.alloca, private
     // declarations) must be legal on the target, otherwise the conversion
     // driver rejects the generated operations and rolls the pattern back.
-    target.markUnknownOpDynamicallyLegal(
-        [](Operation *op) { return true; });
+    target.markUnknownOpDynamicallyLegal([](Operation *op) { return true; });
 
     RewritePatternSet patterns(&getContext());
-    BridgeLoweringState state{whitelist};
+    BridgeLoweringState state;
     patterns.add<LowerBridgeCallPattern>(converter, &getContext(), state);
+    patterns.add<LowerBridgeObjectCreatePattern>(converter, &getContext(),
+                                                 state);
     patterns.add<LowerBridgeIntToPtrPattern>(converter, &getContext());
     if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       signalPassFailure();

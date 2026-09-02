@@ -18,8 +18,8 @@
 // the wrapper generation pass merges the identical per-function specs and
 // renders the variant tokens into the wrapper source.
 
-// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-variant.yaml" | FileCheck %s --check-prefix=SPEC
-// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-whitelist-variant.yaml" -pto-emit-vpto-bridge-wrapper | FileCheck %s --check-prefix=WRAP
+// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" | FileCheck %s --check-prefix=SPEC
+// RUN: pto-test-opt %s "-pto-lower-pipe-family-ops=whitelist-path=%S/Inputs/vpto-bridge-route-pipe.yaml" -pto-emit-vpto-bridge-wrapper | FileCheck %s --check-prefix=WRAP
 
 // SPEC-LABEL: func.func private @variant_bridge_cube
 // SPEC-SAME: pto.vpto.bridge.func_spec = {
