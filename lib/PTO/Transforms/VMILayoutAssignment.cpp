@@ -29,6 +29,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <type_traits>
+
 namespace mlir {
 namespace pto {
 #define GEN_PASS_DEF_VMILAYOUTASSIGNMENT
@@ -179,7 +181,7 @@ struct LayoutSolver {
     return maskNodes[id].parent;
   }
 
-  LogicalResult unite(Value lhs, Value rhs, Operation *op) {
+  LogicalResult unite(Value lhs, Value rhs, const Operation *op) {
     (void)op;
     addDataValue(lhs);
     addDataValue(rhs);
@@ -288,11 +290,11 @@ struct LayoutSolver {
     return success();
   }
 
-  VMILayoutAttr getContiguousLayout() {
+  VMILayoutAttr getContiguousLayout() const {
     return VMILayoutAttr::getContiguous(ctx);
   }
 
-  DataLayoutSeedPhase getCastSeedPhase(const VMICastLayoutFact &fact) {
+  DataLayoutSeedPhase getCastSeedPhase(const VMICastLayoutFact &fact) const {
     if (fact.priority == VMICastLayoutPriority::High) {
       return DataLayoutSeedPhase::CompactCast;
     }
@@ -302,7 +304,7 @@ struct LayoutSolver {
     return DataLayoutSeedPhase::Cast;
   }
 
-  VMILayoutAttr getPreferredDenseStoreLayout(VMIVRegType type) {
+  VMILayoutAttr getPreferredDenseStoreLayout(VMIVRegType type) const {
     VMILayoutSupport supports;
     FailureOr<VMIStoreLayoutFact> fact =
         supports.getPreferredStoreLayoutFact(type);
@@ -323,12 +325,12 @@ struct LayoutSolver {
 
   FailureOr<VMIMaskedStoreLayoutFact>
   getPreferredDenseMaskedStoreLayout(VMIVRegType valueType,
-                                     VMIMaskType maskType) {
+                                     VMIMaskType maskType) const {
     VMILayoutSupport supports;
     return supports.getPreferredMaskedStoreLayoutFact(valueType, maskType);
   }
 
-  VMILayoutAttr getGroupSlotsLayout(int64_t numGroups) {
+  VMILayoutAttr getGroupSlotsLayout(int64_t numGroups) const {
     return VMILayoutAttr::getGroupSlots(ctx, numGroups);
   }
 
@@ -362,9 +364,9 @@ struct LayoutSolver {
     return getContiguousLayout();
   }
 
-  DataLayoutSeedPhase getGroupReduceUseSeedPhase(VMIVRegType sourceType,
-                                                 int64_t numGroups,
-                                                 VMIGroupReduceLayoutFact fact) {
+  DataLayoutSeedPhase
+  getGroupReduceUseSeedPhase(VMIVRegType sourceType, int64_t numGroups,
+                             VMIGroupReduceLayoutFact fact) const {
     if (!fact.sourceLayout || !fact.sourceLayout.isContiguous() ||
         fact.sourceLayout.getLaneStride() != 1) {
       return DataLayoutSeedPhase::Reduce;
@@ -381,7 +383,7 @@ struct LayoutSolver {
     return DataLayoutSeedPhase::Reduce;
   }
 
-  VMILayoutAttr getPreferredGroupSlotLoadLayout(VMIGroupSlotLoadOp op) {
+  VMILayoutAttr getPreferredGroupSlotLoadLayout(VMIGroupSlotLoadOp op) const {
     auto type = cast<VMIVRegType>(op.getResult().getType());
     int64_t numGroups = op.getNumGroupsAttr().getInt();
     if (VMILayoutAttr existing = type.getLayoutAttr()) {
@@ -398,7 +400,7 @@ struct LayoutSolver {
   }
 
   VMILayoutAttr
-  getPreferredGroupBroadcastLoadLayout(VMIGroupBroadcastLoadOp op) {
+  getPreferredGroupBroadcastLoadLayout(VMIGroupBroadcastLoadOp op) const {
     auto type = cast<VMIVRegType>(op.getResult().getType());
     if (VMILayoutAttr existing = type.getLayoutAttr()) {
       return existing;
@@ -445,7 +447,7 @@ struct LayoutSolver {
   }
 
   VMILayoutAttr
-  getPreferredGroupBroadcastResultLayout(VMIGroupBroadcastOp op) {
+  getPreferredGroupBroadcastResultLayout(VMIGroupBroadcastOp op) const {
     auto type = cast<VMIVRegType>(op.getResult().getType());
     if (VMILayoutAttr existing = type.getLayoutAttr()) {
       return existing;
@@ -503,7 +505,7 @@ struct LayoutSolver {
     return getContiguousLayout();
   }
 
-  LogicalResult validateGroupLoadLayoutPlan(VMIGroupLoadOp op) {
+  LogicalResult validateGroupLoadLayoutPlan(VMIGroupLoadOp op) const {
     auto type = cast<VMIVRegType>(op.getResult().getType());
     if (type.getLayoutAttr()) {
       return success();
@@ -588,7 +590,7 @@ struct LayoutSolver {
   }
 
   LogicalResult collect() {
-    module.walk([&](Operation *op) {
+    module.walk([this](Operation *op) {
       for (Value result : op->getResults()) {
         addDataValue(result);
         addMaskValue(result);
@@ -693,6 +695,34 @@ struct LayoutSolver {
   WalkResult addExtensionConstraint(CastOp castOp, Operation *op) {
     auto sourceType = cast<VMIVRegType>(castOp.getSource().getType());
     auto resultType = cast<VMIVRegType>(castOp.getResult().getType());
+
+    // A four-lane byte/halfword -> ui32 widening is a compact group-slot
+    // operation.  Seed the result with the group-slot carrier so propagation
+    // selects the existing group-slot extension lowering (and avoids creating
+    // an unsupported group-slot -> dense lane-stride ensure_layout).
+    if constexpr (std::is_same_v<CastOp, VMIExtUIOp>) {
+      auto sourceInteger = dyn_cast<IntegerType>(sourceType.getElementType());
+      auto resultInteger = dyn_cast<IntegerType>(resultType.getElementType());
+      unsigned sourceBits =
+          pto::getPTOStorageElemBitWidth(sourceType.getElementType());
+      unsigned resultBits =
+          pto::getPTOStorageElemBitWidth(resultType.getElementType());
+      bool compactUI32Widen =
+          sourceType.getElementCount() == 4 && sourceInteger && resultInteger &&
+          !sourceType.getLayoutAttr() && !resultType.getLayoutAttr() &&
+          (resultInteger.isUnsigned() || resultInteger.isSignless()) &&
+          (sourceBits == 8 || sourceBits == 16) &&
+          resultBits == 32;
+      if (compactUI32Widen) {
+        VMILayoutAttr compactLayout =
+            VMILayoutAttr::getGroupSlots(ctx, /*numGroups=*/4,
+                                         /*slots=*/mlir::pto::kValue8);
+        return *constraintResult(setPreferredLayout(
+            castOp.getResult(), compactLayout, op,
+            DataLayoutSeedPhase::CompactCast));
+      }
+    }
+
     FailureOr<VMICastLayoutFact> fact =
         VMILayoutSupport().getPreferredCastLayoutFact(sourceType, resultType);
     if (failed(fact)) {
@@ -1326,21 +1356,25 @@ struct LayoutSolver {
   }
 
   LogicalResult addExecuteRegionConstraints(scf::ExecuteRegionOp executeOp) {
-    WalkResult result = executeOp.getRegion().walk([&](scf::YieldOp yieldOp) {
-      if (yieldOp->getParentOp() != executeOp.getOperation()) {
-        return WalkResult::advance();
-      }
-      if (failed(
-              addYieldConstraints(executeOp->getResults(), yieldOp, executeOp))) {
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
+    WalkResult result = executeOp.getRegion().walk(
+        [this, executeOp](scf::YieldOp yieldOp) mutable {
+          const bool belongsToExecuteRegion =
+              yieldOp->getParentOp() == executeOp.getOperation();
+          if (!belongsToExecuteRegion) {
+            return WalkResult::advance();
+          }
+          if (failed(addYieldConstraints(executeOp->getResults(), yieldOp,
+                                         executeOp))) {
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
     return failure(result.wasInterrupted());
   }
 
   LogicalResult addIndexSwitchConstraints(scf::IndexSwitchOp indexSwitchOp) {
-    auto addBlockTerminator = [&](Block &block) -> LogicalResult {
+    auto addBlockTerminator =
+        [this, indexSwitchOp](Block &block) mutable -> LogicalResult {
       auto yieldOp = dyn_cast<scf::YieldOp>(block.getTerminator());
       if (!yieldOp) {
         return success();
@@ -1361,14 +1395,14 @@ struct LayoutSolver {
 
   LogicalResult addWhileConstraints(scf::WhileOp whileOp) {
     return VMIControlFlowSupport::addWhileConstraints(
-        whileOp, [&](Value lhs, Value rhs, Operation *op) {
+        whileOp, [this](Value lhs, Value rhs, Operation *op) {
           return uniteEquivalentValues(lhs, rhs, op);
         });
   }
 
   LogicalResult addForConstraints(scf::ForOp forOp) {
     return VMIControlFlowSupport::addForConstraints(
-        forOp, [&](Value lhs, Value rhs, Operation *op) {
+        forOp, [this](Value lhs, Value rhs, Operation *op) {
           return uniteEquivalentValues(lhs, rhs, op);
         });
   }
@@ -1415,12 +1449,12 @@ struct LayoutSolver {
     return success();
   }
 
-  bool hasVMIValueTypes(Operation *op) {
+  bool hasVMIValueTypes(Operation *op) const {
     return llvm::any_of(op->getOperandTypes(), containsVMIType) ||
            llvm::any_of(op->getResultTypes(), containsVMIType);
   }
 
-  bool hasVMIFunctionType(func::FuncOp func) {
+  bool hasVMIFunctionType(func::FuncOp func) const {
     FunctionType type = func.getFunctionType();
     return llvm::any_of(type.getInputs(), containsVMIType) ||
            llvm::any_of(type.getResults(), containsVMIType);
@@ -1447,7 +1481,8 @@ struct LayoutSolver {
     }
 
     SmallVector<func::ReturnOp> returns;
-    callee.walk([&](func::ReturnOp returnOp) { returns.push_back(returnOp); });
+    callee.walk(
+        [&returns](func::ReturnOp returnOp) { returns.push_back(returnOp); });
     for (func::ReturnOp returnOp : returns) {
       for (auto [index, result] : llvm::enumerate(callOp.getResults())) {
         if (index >= returnOp.getNumOperands()) {
@@ -1471,7 +1506,8 @@ struct LayoutSolver {
   }
 
   FailureOr<Value> materializeLayoutValue(Value value, Type targetType,
-                                          Location loc, OpBuilder &builder) {
+                                          Location loc,
+                                          OpBuilder &builder) const {
     if (value.getType() == targetType) {
       return value;
     }
@@ -1500,31 +1536,6 @@ struct LayoutSolver {
     }
 
     return failure();
-  }
-
-  SmallVector<Type> getCallResultTypes(func::FuncOp func) {
-    SmallVector<Type> resultTypes;
-    bool found = false;
-    module.walk([&](func::CallOp call) {
-      if (call.getCallee() != func.getSymName()) {
-        return;
-      }
-      if (!found) {
-        resultTypes.assign(call.getResultTypes().begin(),
-                           call.getResultTypes().end());
-        found = true;
-        return;
-      }
-      if (resultTypes.size() != call.getNumResults()) {
-        return;
-      }
-      for (auto [index, type] : llvm::enumerate(call.getResultTypes())) {
-        if (index < resultTypes.size() && resultTypes[index] != type) {
-          resultTypes[index] = {};
-        }
-      }
-    });
-    return found ? resultTypes : SmallVector<Type>{};
   }
 
   LogicalResult materializeCallOperands(IRRewriter &rewriter) {
@@ -1581,7 +1592,8 @@ struct LayoutSolver {
 
   LogicalResult materializeFunctionReturns(IRRewriter &rewriter) {
     WalkResult result = module.walk([this, &rewriter](func::FuncOp func) {
-      SmallVector<Type> resultTypes = getCallResultTypes(func);
+      SmallVector<Type> resultTypes =
+          getConsistentCallResultTypes(module, func);
       if (resultTypes.empty()) {
         return WalkResult::advance();
       }
@@ -1633,11 +1645,11 @@ struct LayoutSolver {
     return success();
   }
 
-  bool hasRequestedLayout(VMILayoutPropagator &propagator, Value value) {
+  bool hasRequestedLayout(VMILayoutPropagator &propagator, Value value) const {
     return static_cast<bool>(propagator.getRequestedLayout(value));
   }
 
-  bool hasLayoutAssignment(VMILayoutPropagator &propagator, Value value) {
+  bool hasLayoutAssignment(VMILayoutPropagator &propagator, Value value) const {
     return propagator.lookup(value) != nullptr;
   }
 
@@ -1804,20 +1816,16 @@ struct LayoutSolver {
   }
 
   void rewriteFunctionType() {
-    module.walk([&](func::FuncOp func) {
+    module.walk([this](func::FuncOp func) {
       if (func.empty()) {
         return;
       }
 
-      SmallVector<Type> inputs;
-      inputs.reserve(func.getNumArguments());
-      for (BlockArgument arg : func.getArguments()) {
-        inputs.push_back(arg.getType());
-      }
-
+      SmallVector<Type> inputs = getFunctionInputTypes(func);
       SmallVector<Type> results;
       auto it = firstReturnOperandsByFunc.find(func);
-      SmallVector<Type> callResultTypes = getCallResultTypes(func);
+      SmallVector<Type> callResultTypes =
+          getConsistentCallResultTypes(module, func);
       if (!callResultTypes.empty()) {
         for (Type type : callResultTypes) {
           results.push_back(type);
